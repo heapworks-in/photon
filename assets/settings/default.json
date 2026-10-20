@@ -7,9 +7,9 @@
   // - "light": Use the theme indicated by the "light" field
   // - "dark": Use the theme indicated by the "dark" field
   "theme": {
-    "mode": "system",
+    "mode": "dark", // photon: Warp-style dark by default
     "light": "One Light",
-    "dark": "One Dark",
+    "dark": "Photon Black",
   },
   "icon_theme": "Zed (Default)",
   // The name of a base set of key bindings to use.
@@ -28,7 +28,7 @@
   // The name of a font to use for rendering text in the editor
   // ".ZedMono" currently aliases to Lilex
   // but this may change in the future.
-  "buffer_font_family": ".ZedMono",
+  "buffer_font_family": "Lilex", // photon: Lilex pairs with the IBM Plex Sans UI font (.ZedSans); `photon: use mono font style` or `photon: use hack font style` to switch
   // Set the buffer text's font fallbacks, this will be merged with
   // the platform's default fallbacks.
   "buffer_font_fallbacks": null,
@@ -38,7 +38,7 @@
     // "calt": false
   },
   // The default font size for text in the editor
-  "buffer_font_size": 15,
+  "buffer_font_size": 14, // photon: the terminal follows this size too
   // The weight of the editor font in standard CSS units from 100 to 900.
   "buffer_font_weight": 400,
   // Set the buffer's line height.
@@ -51,7 +51,7 @@
   //         "buffer_line_height": {
   //           "custom": 2
   //         },
-  "buffer_line_height": "comfortable",
+  "buffer_line_height": { "custom": 1.2 }, // photon: Warp default
   // The name of a font to use for rendering text in the UI
   // You can set this to ".SystemUIFont" to use the system font
   // ".ZedSans" currently aliases to "IBM Plex Sans", but this may
@@ -68,7 +68,7 @@
   // The weight of the UI font in standard CSS units from 100 to 900.
   "ui_font_weight": 400,
   // The default font size for text in the UI
-  "ui_font_size": 16,
+  "ui_font_size": 14, // photon: matches the code and terminal size
   // The font family for agent responses in the agent panel. Falls back to the UI font family if unset.
   "agent_ui_font_family": null,
   // The default font size for agent responses in the agent panel. Falls back to the UI font size if unset.
@@ -218,12 +218,15 @@
   //         "when_closing_with_no_tabs": "keep_window_open",
   "when_closing_with_no_tabs": "platform_default",
   // What to show when opening a new window.
-  // May take 2 values:
+  // May take 3 values:
   //  1. Show an empty untitled buffer
   //         "on_new_window": "empty_tab"
   //  2. Show the launchpad with recent projects
   //         "on_new_window": "launchpad"
-  "on_new_window": "launchpad",
+  //  3. Open a terminal in the center
+  //         "on_new_window": "terminal"
+  // photon: terminal-first.
+  "on_new_window": "terminal",
   // What to do when the last window is closed.
   // May take 2 values:
   //  1. Use the current platform's convention
@@ -626,11 +629,11 @@
     // Whether to show onboarding banners in the titlebar.
     "show_onboarding_banner": true,
     // Whether to show user picture in the titlebar.
-    "show_user_picture": true,
+    "show_user_picture": false, // photon: no Zed account
     // Whether to show the user menu in the titlebar.
-    "show_user_menu": true,
+    "show_user_menu": false, // photon: no Zed account
     // Whether to show the sign in button in the titlebar.
-    "show_sign_in": true,
+    "show_sign_in": false, // photon: no Zed account
     // Whether to show the menus in the titlebar.
     "show_menus": false,
     // Whether to open the menus in the titlebar on hover.
@@ -1070,7 +1073,7 @@
   },
   "collaboration_panel": {
     // Whether to show the collaboration panel button in the status bar.
-    "button": true,
+    "button": false, // photon: no collaboration
     // Where to dock the collaboration panel. Can be 'left' or 'right'.
     "dock": "right",
     // Default width of the collaboration panel.
@@ -1710,9 +1713,9 @@
   // Control what info is collected by Zed.
   "telemetry": {
     // Send debug info like crash reports.
-    "diagnostics": true,
+    "diagnostics": false, // photon: offline by default
     // Send anonymized usage data like what languages you're using Zed with.
-    "metrics": true,
+    "metrics": false, // photon: offline by default
     // Allow sending requests to Anthropic models that cannot be offered with
     // Zero Data Retention
     "anthropic_retention": false,
@@ -1721,9 +1724,11 @@
   //
   // Default: false
   "disable_ai": false,
+  // photon: command pre-filled (not run) in the terminal that "Run locally" opens for a PR.
+  "pr_review": { "test_command": null },
   // Automatically update Zed. This setting may be ignored on Linux if
   // installed through a package manager.
-  "auto_update": true,
+  "auto_update": false, // photon: update by pulling and rebuilding
   // How to render LSP `textDocument/documentColor` colors in the editor.
   //
   // Possible values:
@@ -1918,7 +1923,7 @@
   "load_direnv": "direct",
   "edit_predictions": {
     // Which edit prediction provider to use.
-    "provider": "zed",
+    "provider": "none", // photon: no Zed-hosted predictions
     // Disable edit predictions for files matching these glob patterns.
     //
     // Use `"..."` to add patterns without repeating Zed's defaults. In project
@@ -2050,6 +2055,10 @@
     "shell": "system",
     // Where to dock terminals panel. Can be `left`, `right`, `bottom`.
     "dock": "bottom",
+    // photon: null follows the editor's font (Hack 13), so terminal and editor stay in sync.
+    "font_family": null,
+    "font_size": null,
+    "font_fallbacks": ["Symbols Nerd Font Mono", "Apple Symbols"], // photon: Nerd symbols are bundled
     // Whether the terminal panel should open on startup.
     //
     // Default: false
@@ -2092,7 +2101,7 @@
     //         "blinking": "terminal_controlled",
     //  3. Always blink the cursor, ignoring the terminal mode
     //         "blinking": "on",
-    "blinking": "terminal_controlled",
+    "blinking": "on", // photon: Warp default
     // Default cursor shape for the terminal.
     //  1. A block that surrounds the following character
     //     "block"
@@ -2104,7 +2113,7 @@
     //     "hollow"
     //
     // Default: "block"
-    "cursor_shape": "block",
+    "cursor_shape": "bar", // photon: Warp default
     // Set whether Alternate Scroll mode (code: ?1007) is active by default.
     // Alternate Scroll mode converts mouse scroll events into up / down key
     // presses when in the alternate screen (e.g. when running applications
@@ -2135,7 +2144,7 @@
     // (shift-ctrl-click).
     "open_links_in_mouse_mode": true,
     // Whether to show the terminal button in the status bar
-    "button": true,
+    "button": false, // photon: terminals live in the center, not the bottom dock
     // Any key-value pairs added to this list will be added to the terminal's
     // environment. Use `:` to separate multiple values.
     "env": {
@@ -2152,7 +2161,7 @@
     //         "line_height": {
     //           "custom": 2
     //         },
-    "line_height": "standard",
+    "line_height": { "custom": 1.2 }, // photon: Warp default
     // Activate the python virtual environment, if one is found, in the
     // terminal's working directory (as resolved by the working_directory
     // setting). Set this to "off" to disable this behavior.
@@ -2289,6 +2298,12 @@
     "show_count_badge": false,
     // Whether to invoke the OS-specific alert sound when the terminal bell (BEL character) is printed.
     "bell": "off",
+    // photon: show commands as blocks in zsh terminals. Applies to newly opened terminals only.
+    "blocks": true,
+    // photon: recognise test runs, git, servers, JSON and tables in command blocks.
+    "smart_blocks": true,
+    // photon: notify when a command that ran at least this long finishes while Photon is in the background; 0 turns it off.
+    "notify_after_seconds": 10,
   },
   "code_actions_on_format": {},
   // Settings related to running tasks.
@@ -2348,6 +2363,9 @@
   //
   // If you don't want any of these extensions, add this field to your settings
   // and change the value to `false`.
+  //
+  // photon: ignored. Photon makes no network calls at startup, so extensions
+  // are only installed from the Extensions page.
   "auto_install_extensions": {
     "html": true,
   },
@@ -2981,7 +2999,10 @@
   // Configures context servers for use by the agent.
   "context_servers": {},
   // Configures agent servers available in the agent panel.
-  "agent_servers": {},
+  "agent_servers": {
+    // photon: Devin CLI over ACP (`devin acp`), using the user's existing Devin login.
+    "devin": { "type": "custom", "command": "devin", "args": ["acp"] },
+  },
   "debugger": {
     "stepping_granularity": "line",
     "save_breakpoints": true,

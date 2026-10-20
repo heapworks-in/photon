@@ -1,3 +1,4 @@
+// For Maha & Bhumi — the light this was built by.
 // Disable command line from opening on release mode
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -7,10 +8,15 @@ mod zed;
 
 // Ensure the binary name stays in sync with APP_NAME so that the paths used
 // at runtime (data dir, config dir, etc.) match what the binary is called.
+// photon: the binary stays `zed` (renaming it touches bundling and signing scripts),
+// while APP_NAME is "Photon"; accept either name.
 const _: () = assert!(
     paths::APP_NAME_LOWERCASE
         .as_bytes()
-        .eq_ignore_ascii_case(env!("CARGO_BIN_NAME").as_bytes()),
+        .eq_ignore_ascii_case(env!("CARGO_BIN_NAME").as_bytes())
+        || env!("CARGO_BIN_NAME")
+            .as_bytes()
+            .eq_ignore_ascii_case(b"zed"),
     "paths::APP_NAME_LOWERCASE must match the binary name. \
      Forks: update APP_NAME in crates/paths/src/paths.rs when renaming the binary.",
 );
@@ -24,7 +30,6 @@ use collab_ui::channel_view::ChannelView;
 use collections::HashMap;
 use crashes::InitCrashHandler;
 use db::kvp::{GlobalKeyValueStore, KeyValueStore};
-use editor::Editor;
 use extension::ExtensionHostProxy;
 use fs::{Fs, RealFs};
 use futures::{FutureExt, StreamExt, channel::oneshot, future};
@@ -37,7 +42,6 @@ use gpui_platform;
 
 use gpui_tokio::Tokio;
 use language::LanguageRegistry;
-use onboarding::{FIRST_OPEN, show_onboarding_view};
 use project_panel::ProjectPanel;
 use prompt_store::PromptBuilder;
 use remote::RemoteConnectionOptions;
@@ -761,6 +765,8 @@ fn main() {
         });
         vim::init(cx);
         terminal_view::init(cx);
+        photon_terminal::init(cx); // photon: block terminal input and history
+        photon_review::init(cx); // photon: GitHub PR review
         journal::init(app_state.clone(), cx);
         encoding_selector::init(cx);
         language_selector::init(cx);
@@ -876,11 +882,7 @@ fn main() {
 
         cx.activate(true);
 
-        cx.spawn({
-            let client = app_state.client.clone();
-            async move |cx| authenticate(client, cx).await
-        })
-        .detach_and_log_err(cx);
+        // photon: never sign in to zed.dev at startup, even if Zed credentials exist in the keychain.
 
         let urls: Vec<_> = args
             .paths_or_urls
@@ -1266,7 +1268,12 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
         let base_open_options = zed::open_options_for_request(open_behavior, &location, cx);
         cx.spawn(async move |cx| {
             let paths: Vec<PathBuf> = request.open_paths.into_iter().map(PathBuf::from).collect();
-            open_remote_project(connection_options, paths, app_state, base_open_options, cx).await
+            let window =
+                open_remote_project(connection_options, paths, app_state, base_open_options, cx)
+                    .await?;
+            // photon: remote projects are terminal-first too (the shell runs on the remote host).
+            zed::photon::ensure_center_terminal_in(window, cx);
+            anyhow::Ok(())
         })
         .detach_and_log_err(cx);
         return;
@@ -1368,6 +1375,8 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
     }
 }
 
+// photon: kept (unused) to keep upstream merges small; see the startup hook above.
+#[allow(dead_code)]
 async fn authenticate(client: Arc<Client>, cx: &AsyncApp) -> Result<()> {
     if stdout_is_a_pty() {
         if client::IMPERSONATE_LOGIN.is_some() {
@@ -1423,7 +1432,6 @@ pub(crate) async fn restore_or_create_workspace(
     app_state: Arc<AppState>,
     cx: &mut AsyncApp,
 ) -> Result<()> {
-    let kvp = cx.update(|cx| KeyValueStore::global(cx));
     if let Some(multi_workspaces) = restorable_workspaces(cx, &app_state).await {
         let mut error_count = 0;
         for multi_workspace in multi_workspaces {
@@ -1431,7 +1439,8 @@ pub(crate) async fn restore_or_create_workspace(
                 SerializedWorkspaceLocation::Local => {
                     restore_multiworkspace(multi_workspace, app_state.clone(), cx)
                         .await
-                        .map(|_| ())
+                        // photon: a restored project with no open tabs is terminal-first too.
+                        .map(|window| zed::photon::ensure_center_terminal_in(window, cx))
                 }
                 SerializedWorkspaceLocation::Remote(connection_options) => {
                     let mut connection_options = connection_options.clone();
@@ -1466,6 +1475,8 @@ pub(crate) async fn restore_or_create_workspace(
                             cx,
                         )
                         .await;
+                        // photon: remote projects are terminal-first too.
+                        zed::photon::ensure_center_terminal_in(window, cx);
                         Ok::<(), anyhow::Error>(())
                     }
                     .await
@@ -1545,7 +1556,8 @@ pub(crate) async fn restore_or_create_workspace(
                         match restore_on_startup {
                             workspace::RestoreOnStartupBehavior::Launchpad => {}
                             _ => {
-                                Editor::new_file(workspace, &Default::default(), window, cx);
+                                // photon: terminal-first instead of an empty file.
+                                zed::photon::ensure_center_terminal(workspace, window, cx);
                             }
                         }
                     },
@@ -1553,9 +1565,9 @@ pub(crate) async fn restore_or_create_workspace(
             })
             .await?;
         }
-    } else if matches!(kvp.read_kvp(FIRST_OPEN), Ok(None)) {
-        cx.update(|cx| show_onboarding_view(app_state, cx)).await?;
     } else {
+        // photon: no onboarding view (it is Zed sign-in and hosted-AI setup); first launch opens a
+        // terminal like every other launch.
         cx.update(|cx| {
             workspace::open_new(
                 Default::default(),
@@ -1566,7 +1578,8 @@ pub(crate) async fn restore_or_create_workspace(
                     match restore_on_startup {
                         workspace::RestoreOnStartupBehavior::Launchpad => {}
                         _ => {
-                            Editor::new_file(workspace, &Default::default(), window, cx);
+                            // photon: terminal-first instead of an empty file.
+                            zed::photon::ensure_center_terminal(workspace, window, cx);
                         }
                     }
                 },

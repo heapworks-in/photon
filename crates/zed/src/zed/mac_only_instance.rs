@@ -27,11 +27,12 @@ fn address() -> SocketAddr {
     // 44338, 44438, and 44538 for the preview, stable, and nightly channels,
     // respectively. User 502 will use ports 44339, 44439, and 44539 for the preview,
     // stable, and nightly channels, respectively.
+    // photon: start 2000 ports above Zed's block so a running Zed never blocks Photon from launching.
     let port = match *release_channel::RELEASE_CHANNEL {
-        ReleaseChannel::Dev => 43737,
-        ReleaseChannel::Preview => 43737 + USER_BLOCK,
-        ReleaseChannel::Stable => 43737 + (2 * USER_BLOCK),
-        ReleaseChannel::Nightly => 43737 + (3 * USER_BLOCK),
+        ReleaseChannel::Dev => 45737,
+        ReleaseChannel::Preview => 45737 + USER_BLOCK,
+        ReleaseChannel::Stable => 45737 + (2 * USER_BLOCK),
+        ReleaseChannel::Nightly => 45737 + (3 * USER_BLOCK),
     };
     let uid = getuid().as_raw();
     // Ensure that the user ID is not too large to avoid overflow when
@@ -44,12 +45,13 @@ fn address() -> SocketAddr {
     SocketAddr::V4(SocketAddrV4::new(LOCALHOST, user_port))
 }
 
+// photon: a distinct handshake, so Photon never mistakes a Zed listener for itself.
 fn instance_handshake() -> &'static str {
     match *release_channel::RELEASE_CHANNEL {
-        ReleaseChannel::Dev => "Zed Editor Dev Instance Running",
-        ReleaseChannel::Nightly => "Zed Editor Nightly Instance Running",
-        ReleaseChannel::Preview => "Zed Editor Preview Instance Running",
-        ReleaseChannel::Stable => "Zed Editor Stable Instance Running",
+        ReleaseChannel::Dev => "Photon Dev Instance Running",
+        ReleaseChannel::Nightly => "Photon Nightly Instance Running",
+        ReleaseChannel::Preview => "Photon Preview Instance Running",
+        ReleaseChannel::Stable => "Photon Stable Instance Running",
     }
 }
 

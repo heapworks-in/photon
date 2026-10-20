@@ -595,7 +595,6 @@ dependencies = [
 [[package]]
 name = "alacritty_terminal"
 version = "0.26.1-dev"
-source = "git+https://github.com/zed-industries/alacritty?rev=4c129667ce56611becdc82de6e28218c80e2e88f#4c129667ce56611becdc82de6e28218c80e2e88f"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.1",
@@ -3035,6 +3034,7 @@ dependencies = [
  "ipc-channel",
  "parking_lot",
  "paths",
+ "photon_brand",
  "plist",
  "rayon",
  "release_channel",
@@ -13451,6 +13451,90 @@ dependencies = [
 ]
 
 [[package]]
+name = "photon_blocks"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "percent-encoding",
+ "regex",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "photon_brand"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "serde_json_lenient",
+]
+
+[[package]]
+name = "photon_review"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "buffer_diff",
+ "db",
+ "editor",
+ "fs",
+ "futures 0.3.34",
+ "gpui",
+ "grammars",
+ "language",
+ "log",
+ "lsp",
+ "multi_buffer",
+ "parking_lot",
+ "paths",
+ "project",
+ "remote_connection",
+ "serde",
+ "serde_json",
+ "settings",
+ "tempfile",
+ "terminal_view",
+ "theme",
+ "theme_settings",
+ "tree-sitter-python",
+ "tree-sitter-typescript",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
+name = "photon_terminal"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "db",
+ "editor",
+ "git_ui",
+ "gpui",
+ "language",
+ "libc",
+ "log",
+ "paths",
+ "photon_blocks",
+ "picker",
+ "project",
+ "settings",
+ "smol",
+ "tabular_data_preview",
+ "tempfile",
+ "terminal",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "which",
+ "workspace",
+]
+
+[[package]]
 name = "picker"
 version = "0.1.0"
 dependencies = [
@@ -18089,6 +18173,7 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "assets",
  "async-channel 2.5.0",
  "collections",
  "futures 0.3.34",
@@ -18098,7 +18183,9 @@ dependencies = [
  "libc",
  "log",
  "parking_lot",
+ "paths",
  "percent-encoding",
+ "photon_blocks",
  "rand 0.9.4",
  "regex",
  "release_channel",
@@ -18140,11 +18227,14 @@ dependencies = [
  "dirs",
  "editor",
  "futures 0.3.34",
+ "git_ui",
  "gpui",
  "itertools 0.14.0",
  "language",
  "log",
  "menu",
+ "photon_blocks",
+ "photon_terminal",
  "pretty_assertions",
  "project",
  "regex",
@@ -18159,6 +18249,7 @@ dependencies = [
  "shellexpand",
  "shlex 2.0.1",
  "task",
+ "tempfile",
  "terminal",
  "theme",
  "theme_settings",
@@ -19813,8 +19904,6 @@ dependencies = [
 [[package]]
 name = "vte"
 version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5924018406ce0063cd67f8e008104968b74b563ee1b85dde3ed1f7cb87d3dbd"
 dependencies = [
  "arrayvec",
  "bitflags 2.13.1",
@@ -22558,6 +22647,7 @@ dependencies = [
  "collab_ui",
  "collections",
  "command_palette",
+ "command_palette_hooks",
  "component_preview",
  "copilot",
  "copilot_chat",
@@ -22629,6 +22719,9 @@ dependencies = [
  "outline_panel",
  "parking_lot",
  "paths",
+ "photon_brand",
+ "photon_review",
+ "photon_terminal",
  "picker",
  "pkg-config",
  "pretty_assertions",
@@ -22669,6 +22762,7 @@ dependencies = [
  "telemetry",
  "telemetry_events",
  "tempfile",
+ "terminal",
  "terminal_view",
  "theme",
  "theme_extension",

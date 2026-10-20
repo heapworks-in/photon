@@ -7,6 +7,7 @@ mod migrate;
 pub(crate) mod move_to_applications;
 mod open_listener;
 mod open_url_modal;
+pub(crate) mod photon;
 mod quick_action_bar;
 pub mod remote_debug;
 pub mod telemetry_log;
@@ -428,6 +429,9 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
 }
 
 pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
+    // photon: hide palette actions for services Photon keeps off.
+    photon::hide_offline_actions(cx);
+    photon::register_font_styles(cx); // photon: switchable font styles
     let mut _on_close_subscription = bind_on_window_closed(cx);
     cx.observe_global::<SettingsStore>(move |cx| {
         // A 1.92 regression causes unused-assignment to trigger on this variable.
@@ -783,6 +787,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
         let channels_panel =
             collab_ui::collab_panel::CollabPanel::load(workspace_handle.clone(), cx.clone());
+        let inbox_panel = photon_review::InboxPanel::load(workspace_handle.clone(), cx.clone()); // photon: PR inbox
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
 
         async fn add_panel_when_ready(
@@ -807,6 +812,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(channels_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(inbox_panel, workspace_handle.clone(), cx.clone()), // photon: PR inbox
             initialize_agent_panel(workspace_handle.clone(), cx.clone()).map(|r| r.log_err()),
         );
 
@@ -1296,6 +1302,7 @@ fn register_actions(
                 |_, _, _| None,
             );
         })
+        .register_action(photon::toggle_terminal_editor_focus) // photon: terminal/editor focus toggle
         .register_action(open_project_settings_file)
         .register_action(open_project_tasks_file)
         .register_action(open_worktree_setup_tasks_file)
@@ -1550,6 +1557,8 @@ fn open_about_window(cx: &mut App) {
         message: SharedString,
         commit: Option<SharedString>,
         full_version: SharedString,
+        // photon: set by an Option-click on the icon.
+        icon_note: Option<&'static str>,
     }
 
     impl AboutWindow {
@@ -1578,6 +1587,7 @@ fn open_about_window(cx: &mut App) {
                 message,
                 commit,
                 full_version,
+                icon_note: None,
             }
         }
 
@@ -1622,8 +1632,24 @@ fn open_about_window(cx: &mut App) {
                             .w_full()
                             .gap_2()
                             .items_center()
-                            .child(img(self.app_icon.clone()).size_16().flex_none())
+                            .child(
+                                div()
+                                    .id("about-icon")
+                                    .on_click(cx.listener(
+                                        |this, event: &gpui::ClickEvent, _, cx| {
+                                            this.icon_note =
+                                                photon::about_icon_click_note(&event.modifiers());
+                                            cx.notify();
+                                        },
+                                    ))
+                                    .child(img(self.app_icon.clone()).size_16().flex_none()),
+                            )
                             .child(Headline::new(self.message.clone()))
+                            .when_some(self.icon_note, |this, note| {
+                                this.child(
+                                    Label::new(note).color(Color::Muted).size(LabelSize::Small),
+                                )
+                            })
                             .when_some(self.commit.clone(), |this, commit| {
                                 this.child(
                                     Label::new("Commit")
@@ -1718,7 +1744,8 @@ fn open_about_window(cx: &mut App) {
     cx.open_window(
         WindowOptions {
             titlebar: Some(TitlebarOptions {
-                title: Some("About Zed".into()),
+                // photon: rebrand.
+                title: Some(format!("About {}", paths::APP_NAME).into()),
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(12.), px(12.))),
             }),
@@ -2420,8 +2447,14 @@ fn initialize_new_window(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    if WorkspaceSettings::get_global(cx).on_new_window == settings::OnNewWindow::Launchpad {
-        return;
+    match WorkspaceSettings::get_global(cx).on_new_window {
+        settings::OnNewWindow::Launchpad => return,
+        // photon: terminal-first new windows.
+        settings::OnNewWindow::Terminal => {
+            photon::ensure_center_terminal(workspace, window, cx);
+            return;
+        }
+        settings::OnNewWindow::EmptyTab => {}
     }
     // Create buffer synchronously to avoid flicker
     let project = workspace.project().clone();
@@ -3796,6 +3829,41 @@ mod tests {
                 editor.update(cx, |editor, cx| {
                     assert!(!editor.is_dirty(cx));
                     assert_eq!(editor.title(cx), "the-new-name");
+                });
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    async fn photon_new_window_opens_terminal_by_default(cx: &mut TestAppContext) {
+        let app_state = init_test(cx);
+        // The center terminal spawns a real shell on its own threads.
+        cx.executor().allow_parking();
+
+        cx.update(|cx| {
+            open_new(
+                Default::default(),
+                app_state.clone(),
+                cx,
+                |workspace, window, cx| initialize_new_window(workspace, window, cx),
+            )
+        })
+        .await
+        .unwrap();
+        cx.run_until_parked();
+
+        let multi_workspace = cx
+            .update(|cx| cx.windows().first().unwrap().downcast::<MultiWorkspace>())
+            .unwrap();
+        multi_workspace
+            .update(cx, |multi_workspace, _, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
+                    assert!(
+                        workspace
+                            .active_item_as::<terminal_view::TerminalView>(cx)
+                            .is_some(),
+                        "a new window should open a center terminal"
+                    );
                 });
             })
             .unwrap();
@@ -5955,6 +6023,9 @@ mod tests {
                 "onboarding",
                 "outline",
                 "outline_panel",
+                "photon",          // photon: terminal/editor focus toggle
+                "photon_review",   // photon: PR inbox actions
+                "photon_terminal", // photon: block terminal actions
                 "pane",
                 "picker",
                 "project_panel",
@@ -7341,6 +7412,8 @@ mod tests {
         use workspace::{OpenMode, ProjectGroupKey, Workspace, WorkspaceId};
 
         let app_state = init_test(cx);
+        // photon: restored empty workspaces open a terminal, whose shell runs on its own threads.
+        cx.executor().allow_parking();
 
         let dir1 = path!("/dir1");
         let dir2 = path!("/dir2");
@@ -7557,6 +7630,9 @@ mod tests {
         use workspace::{OpenMode, Workspace};
 
         let app_state = init_test(cx);
+        // photon: empty workspaces open a block terminal whose real shell reports its cwd,
+        // and the git chips then run `git` on the process reaper's thread.
+        cx.executor().allow_parking();
         cx.update(init);
 
         let dir1 = path!("/dir1");
@@ -7827,6 +7903,8 @@ mod tests {
         use workspace::{OpenMode, ProjectGroupKey};
 
         let app_state = init_test(cx);
+        // photon: restored empty workspaces open a terminal, whose shell runs on its own threads.
+        cx.executor().allow_parking();
 
         let fs = app_state.fs.clone();
         let fake_fs = fs.as_fake();

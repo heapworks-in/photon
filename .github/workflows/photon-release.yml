@@ -1,0 +1,79 @@
+# photon: builds Photon.app for a photon-v*-alpha.* tag, publishes it as a GitHub pre-release,
+# and updates the Homebrew cask in heapworks-in/homebrew-photon.
+name: Photon Release
+
+on:
+  push:
+    # Every Photon release is an alpha for now.
+    tags: ["photon-v*-alpha.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing photon-v*-alpha.* tag to (re)build"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 360
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      # Checked before the long build, so no release ships without its Homebrew update.
+      - name: Check the release can reach Homebrew
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          [[ "$TAG" == photon-v*-alpha.* ]] || { echo "::error::Releases must be alphas: photon-vX.Y.Z-alpha.N"; exit 1; }
+          [[ -n "$HOMEBREW_TAP_TOKEN" ]] || { echo "::error::Add the HOMEBREW_TAP_TOKEN secret (contents: write on homebrew-photon)"; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain
+      - name: Install build prerequisites
+        run: |
+          brew install cmake
+          xcodebuild -downloadComponent MetalToolchain || true
+      - name: Build the stable app
+        # Unset secrets leave these empty, and bundle-mac falls back to an ad-hoc signed, un-notarized build.
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+          APPLE_NOTARIZATION_TEAM: ${{ secrets.APPLE_NOTARIZATION_TEAM }}
+        run: |
+          echo stable > crates/zed/RELEASE_CHANNEL
+          script/bundle-mac aarch64-apple-darwin
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          dmg="target/aarch64-apple-darwin/release/Photon-aarch64.dmg"
+          notes="docs/photon/releases/${TAG}.md"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$dmg" --clobber
+          else
+            gh release create "$TAG" "$dmg" --prerelease --title "Photon ${TAG#photon-v}" --notes-file "$notes"
+          fi
+      - name: Update the Homebrew cask
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          version="${TAG#photon-v}"
+          sha=$(shasum -a 256 target/aarch64-apple-darwin/release/Photon-aarch64.dmg | cut -d' ' -f1)
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/heapworks-in/homebrew-photon.git" tap
+          mkdir -p tap/Casks
+          sed -e "s/@VERSION@/$version/" -e "s/@SHA256@/$sha/" script/photon-cask.rb.in > tap/Casks/photon.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/photon.rb
+          git commit -m "photon $version"
+          git push

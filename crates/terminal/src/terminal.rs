@@ -1,6 +1,7 @@
 mod mappings;
 
 mod alacritty;
+mod photon; // photon: command blocks
 mod pty_info;
 pub mod terminal_settings;
 
@@ -75,6 +76,7 @@ use crate::alacritty::{
 };
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
+pub use crate::photon::{BlockPart, InputTarget}; // photon: command blocks
 
 /// Process-wide flag set by headless hosts (e.g. the eval CLI) that have no
 /// controlling TTY. In such sandboxes PTY allocation and acquiring a
@@ -677,6 +679,8 @@ pub enum Event {
     SelectionsChanged,
     NewNavigationTarget(Option<MaybeNavigationTarget>),
     Open(MaybeNavigationTarget),
+    /// photon: a shell-integration mark was applied to the block list.
+    BlocksChanged(Option<photon_blocks::BlockEvent>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -736,6 +740,12 @@ pub(crate) enum TerminalBackendEvent {
     Bell,
     Exit,
     ChildExit(ExitStatus),
+    // photon: OSC 133/633/7 mark at an absolute line, numbered as of `history_clears`.
+    ShellIntegration {
+        params: Vec<Vec<u8>>,
+        absolute_line: i64,
+        history_clears: u64,
+    },
 }
 
 impl fmt::Debug for TerminalBackendEvent {
@@ -754,6 +764,9 @@ impl fmt::Debug for TerminalBackendEvent {
             Self::Bell => f.write_str("Bell"),
             Self::Exit => f.write_str("Exit"),
             Self::ChildExit(status) => write!(f, "ChildExit({status})"),
+            Self::ShellIntegration { absolute_line, .. } => {
+                write!(f, "ShellIntegration({absolute_line})")
+            }
         }
     }
 }
@@ -1053,6 +1066,8 @@ impl TerminalBuilder {
             hyperlink_regex_searches: RegexSearches::default(),
             vi_mode_enabled: false,
             is_remote_terminal: false,
+            shell_integration: false,
+            blocks: None,
             last_mouse_move_time: Instant::now(),
             last_hyperlink_search_position: None,
             mouse_down_hyperlink: None,
@@ -1110,6 +1125,9 @@ impl TerminalBuilder {
     ) -> Task<Result<TerminalBuilder>> {
         let version = release_channel::AppVersion::global(cx);
         let background_executor = cx.background_executor().clone();
+        // photon: command blocks are zsh-only and never apply to remote terminals.
+        let blocks_enabled = !is_remote_terminal
+            && TerminalSettings::try_get(cx).is_some_and(|settings| settings.blocks);
         // Headless hosts (e.g. the eval CLI) have no controlling TTY, so PTY
         // allocation / acquiring a controlling terminal fails with `ENOTTY`.
         // When set, run the command as a plain subprocess instead.
@@ -1191,6 +1209,27 @@ impl TerminalBuilder {
             };
             let terminal_title_override =
                 shell_params.as_ref().and_then(|e| e.title_override.clone());
+
+            // photon: clones re-run this hook, so the template must not keep the injection
+            // (the user may have turned blocks off by then).
+            let template_env = env.clone();
+            // photon: point zsh at Photon's ZDOTDIR so it emits shell marks.
+            let shell_integration = blocks_enabled
+                && task.is_none()
+                && !no_pty
+                && match install_photon_zsh_integration() {
+                    Ok(integration_dir) => {
+                        let program = shell_params
+                            .as_ref()
+                            .map(|params| params.program.clone())
+                            .unwrap_or_else(util::shell::get_system_shell);
+                        photon_blocks::prepare_zsh_env(&program, &integration_dir, &mut env)
+                    }
+                    Err(error) => {
+                        log::error!("shell integration disabled: {error:#}");
+                        false
+                    }
+                };
 
             #[cfg(windows)]
             let shell_program = shell_params.as_ref().map(|params| {
@@ -1343,6 +1382,8 @@ impl TerminalBuilder {
                 ),
                 vi_mode_enabled: false,
                 is_remote_terminal,
+                shell_integration,
+                blocks: None,
                 last_mouse_move_time: Instant::now(),
                 last_hyperlink_search_position: None,
                 mouse_down_hyperlink: None,
@@ -1351,7 +1392,7 @@ impl TerminalBuilder {
                 activation_script: activation_script.clone(),
                 template: CopyTemplate {
                     shell,
-                    env,
+                    env: template_env,
                     cursor_shape,
                     alternate_scroll,
                     max_scroll_history_lines,
@@ -1418,6 +1459,10 @@ impl TerminalBuilder {
     }
 
     pub fn subscribe(mut self, cx: &Context<Terminal>) -> Terminal {
+        // photon: blocks start (and the no-marks check starts counting) with the event loop.
+        if self.terminal.shell_integration {
+            self.terminal.enable_blocks(cx);
+        }
         //Event loop
         self.terminal.event_loop_task = cx.spawn(async move |terminal, cx| {
             while let Some(event) = self.events_rx.next().await {
@@ -1549,6 +1594,10 @@ pub struct Terminal {
     task: Option<TaskState>,
     vi_mode_enabled: bool,
     is_remote_terminal: bool,
+    /// photon: whether the shell was launched with zsh integration (see `photon_blocks`).
+    shell_integration: bool,
+    /// photon: command blocks; None unless `shell_integration`.
+    blocks: Option<photon::TerminalBlocks>,
     last_mouse_move_time: Instant,
     last_hyperlink_search_position: Option<GpuiPoint<Pixels>>,
     mouse_down_hyperlink: Option<HyperlinkMatch>,
@@ -1636,6 +1685,33 @@ const FIND_HYPERLINK_THROTTLE: Duration = Duration::from_millis(100);
 /// clipboard. Mirrors the drag threshold used by gpui's `div` element.
 const SELECTION_DRAG_THRESHOLD: f64 = 2.0;
 
+// photon: installs the bundled zsh files under the data dir and returns their directory.
+fn install_photon_zsh_integration() -> Result<PathBuf> {
+    use gpui::AssetSource as _;
+    const FILES: [(&str, &str); 5] = [
+        (".zshenv", "shell_integration/zsh/zshenv"),
+        (".zprofile", "shell_integration/zsh/zprofile"),
+        (".zshrc", "shell_integration/zsh/zshrc"),
+        (".zlogin", "shell_integration/zsh/zlogin"),
+        (
+            "photon-complete.zsh",
+            "shell_integration/zsh/photon-complete.zsh",
+        ),
+    ];
+    let mut loaded = Vec::with_capacity(FILES.len());
+    for (name, asset_path) in FILES {
+        let bytes = assets::Assets
+            .load(asset_path)?
+            .with_context(|| format!("missing bundled asset {asset_path}"))?;
+        loaded.push((name, bytes));
+    }
+    let files: Vec<(&str, &[u8])> = loaded
+        .iter()
+        .map(|(name, bytes)| (*name, bytes.as_ref()))
+        .collect();
+    photon_blocks::install_zsh_integration(paths::data_dir(), &files)
+}
+
 impl Terminal {
     fn process_pty_event(&mut self, event: PtyEvent, cx: &mut Context<Self>) {
         match event {
@@ -1699,6 +1775,10 @@ impl Terminal {
                 //NOOP, Handled in render
             }
             TerminalBackendEvent::Wakeup => {
+                // photon: follow history clears and scrollback eviction.
+                if let Some(blocks) = &mut self.blocks {
+                    blocks.sync_with_grid(&self.term.lock());
+                }
                 self.detect_init_command_startup_marker();
                 cx.emit(Event::Wakeup);
 
@@ -1723,6 +1803,12 @@ impl Terminal {
             TerminalBackendEvent::ChildExit(exit_status) => {
                 self.register_task_finished(Some(exit_status), cx);
             }
+            // photon: shell-integration marks drive the block list.
+            TerminalBackendEvent::ShellIntegration {
+                params,
+                absolute_line,
+                history_clears,
+            } => self.apply_shell_mark(&params, absolute_line, history_clears, cx),
         }
     }
 
@@ -1742,8 +1828,8 @@ impl Terminal {
                 let new_bounds = normalize_terminal_bounds(new_bounds);
                 trace!("Resizing: new_bounds={new_bounds:?}");
 
-                let columns_changed =
-                    self.last_content.terminal_bounds.num_columns() != new_bounds.num_columns();
+                // photon: `set_size` already stored the new bounds, so compare with the grid.
+                let columns_changed = term.columns() != new_bounds.num_columns();
                 self.last_content.terminal_bounds = new_bounds;
 
                 if let TerminalType::Pty {
@@ -1754,7 +1840,18 @@ impl Terminal {
                     pty_tx.resize(new_bounds);
                 }
 
+                // photon: re-wrapping moves lines between rows; blocks follow their lines.
+                let block_distances = self
+                    .blocks
+                    .as_ref()
+                    .filter(|_| columns_changed && !crate::alacritty::is_alt_screen(term))
+                    .map(|blocks| blocks.distances_from_cursor(term));
                 resize(term, new_bounds);
+                if let (Some(blocks), Some(distances)) = (&mut self.blocks, block_distances) {
+                    blocks.restore_from_cursor(term, &distances);
+                    // photon: smart blocks read again the blocks whose lines moved.
+                    cx.emit(Event::BlocksChanged(None));
+                }
                 if columns_changed {
                     self.reset_cwd_history();
                 }
@@ -1769,6 +1866,10 @@ impl Terminal {
                 trace!("Clearing");
                 clear_saved_screen(term);
                 self.reset_cwd_history();
+                // photon: cmd-K drops finished blocks right away.
+                if let Some(blocks) = &mut self.blocks {
+                    blocks.clear(term);
+                }
                 cx.emit(Event::Wakeup);
             }
             InternalEvent::Scroll(scroll) => {
@@ -4348,6 +4449,50 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    async fn test_clone_template_env_excludes_photon_integration(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.executor().allow_parking();
+
+        let builder = cx
+            .update(|cx| {
+                TerminalBuilder::new(
+                    None,
+                    TerminalMode::interactive(),
+                    task::Shell::Program("/bin/zsh".to_string()),
+                    HashMap::default(),
+                    SettingsCursorShape::default(),
+                    AlternateScroll::On,
+                    None,
+                    vec![],
+                    Duration::ZERO,
+                    false,
+                    0,
+                    cx,
+                    Vec::new(),
+                    PathStyle::local(),
+                )
+            })
+            .await
+            .unwrap();
+        let terminal = cx.new(|cx| builder.subscribe(cx));
+        terminal.read_with(cx, |terminal, _| {
+            assert!(terminal.shell_integration);
+            assert!(!terminal.template.env.contains_key("PHOTON_BLOCKS"));
+            assert!(!terminal.template.env.contains_key("PHOTON_USER_ZDOTDIR"));
+            assert_ne!(
+                terminal.template.env.get("ZDOTDIR").map(String::as_str),
+                Some(
+                    paths::data_dir()
+                        .join("shell_integration/zsh")
+                        .to_str()
+                        .unwrap_or_default()
+                )
+            );
+        });
+    }
+
     // TODO should be tested on Linux too, but does not work there well
     #[cfg(target_os = "macos")]
     #[gpui::test(iterations = 10)]
@@ -6468,5 +6613,509 @@ mod tests {
 
         assert!(terminal.cwd_history.is_empty());
         assert_eq!(terminal.pending_cwd_boundary, None);
+    }
+
+    // photon: command-block tests.
+    const BLOCK_LIFECYCLE: &[u8] = b"\x1b]7;file://host/tmp\x07\x1b]133;A\x07$ \x1b]133;B\x07git status\r\n\x1b]633;E;git status\x07\x1b]133;C\x07On branch main\r\nnothing to commit\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07";
+
+    fn init_block_terminal(cx: &mut TestAppContext) -> (Entity<Terminal>, &mut VisualTestContext) {
+        let (terminal, cx) = init_terminal_test_with_window(cx, b"");
+        terminal.update(cx, |terminal, cx| terminal.enable_blocks(cx));
+        (terminal, cx)
+    }
+
+    /// Mirrors the PTY event loop: parse the bytes, deliver their events, then send Wakeup.
+    fn feed_pty_output(terminal: &Entity<Terminal>, bytes: &[u8], cx: &mut VisualTestContext) {
+        terminal.update(cx, |terminal, cx| terminal.write_raw_output(bytes, cx));
+        cx.run_until_parked();
+        terminal.update(cx, |terminal, cx| {
+            terminal.process_event(TerminalBackendEvent::Wakeup, cx)
+        });
+    }
+
+    #[gpui::test]
+    async fn blocks_follow_shell_marks(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_block_terminal(cx);
+        feed_pty_output(&terminal, BLOCK_LIFECYCLE, cx);
+        terminal.read_with(cx, |terminal, _| {
+            let blocks = terminal.blocks().expect("blocks enabled");
+            let ids: Vec<_> = blocks.blocks().map(|block| block.id).collect();
+            assert_eq!(ids.len(), 1);
+            assert_eq!(
+                terminal.block_text(ids[0], BlockPart::Command).as_deref(),
+                Some("git status")
+            );
+            assert_eq!(
+                terminal.block_text(ids[0], BlockPart::Output).as_deref(),
+                Some("On branch main\nnothing to commit")
+            );
+            assert_eq!(
+                terminal.block_text(ids[0], BlockPart::Both).as_deref(),
+                Some("git status\nOn branch main\nnothing to commit")
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn blocks_follow_their_lines_when_width_changes(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_block_terminal(cx);
+        let size = |columns: f32| {
+            TerminalBounds::new(
+                px(20.),
+                px(10.),
+                bounds(
+                    point(px(0.), px(0.)),
+                    size(px(10. * columns), px(20. * 30.)),
+                ),
+            )
+        };
+        terminal.update_in(cx, |terminal, window, cx| {
+            terminal.set_size(size(40.));
+            terminal.sync(window, cx);
+        });
+        let long = "x".repeat(35);
+        let output = format!(
+            "\x1b]133;A\x07\x1b]133;B\x07one\r\n\x1b]633;E;one\x07\x1b]133;C\x07{long}\r\n\x1b]133;D;0\x07\x1b]133;A\x07\x1b]133;B\x07two\r\n\x1b]633;E;two\x07\x1b]133;C\x07second\r\n\x1b]133;D;0\x07\x1b]133;A\x07\x1b]133;B\x07"
+        );
+        feed_pty_output(&terminal, output.as_bytes(), cx);
+        let outputs = |cx: &mut VisualTestContext| {
+            terminal.read_with(cx, |terminal, _| {
+                let blocks = terminal.blocks().expect("blocks");
+                blocks
+                    .blocks()
+                    .map(|block| terminal.block_text(block.id, BlockPart::Output))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let expected = vec![Some(long), Some("second".to_string())];
+        assert_eq!(outputs(cx), expected);
+
+        // A panel opening narrows the terminal: the long line now wraps onto two rows.
+        for columns in [20., 40.] {
+            terminal.update_in(cx, |terminal, window, cx| {
+                terminal.set_size(size(columns));
+                terminal.sync(window, cx);
+            });
+            assert_eq!(outputs(cx), expected, "at {columns} columns");
+        }
+    }
+
+    #[gpui::test]
+    async fn output_lines_join_wrapped_rows(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_block_terminal(cx);
+        terminal.update_in(cx, |terminal, window, cx| {
+            terminal.set_size(TerminalBounds::new(
+                px(20.),
+                px(10.),
+                bounds(point(px(0.), px(0.)), size(px(30.), px(20. * 30.))),
+            ));
+            terminal.sync(window, cx);
+        });
+        feed_pty_output(
+            &terminal,
+            b"\x1b]133;A\x07\x1b]133;B\x07cmd\r\n\x1b]633;E;cmd\x07\x1b]133;C\x07abcdefgh\r\nxy\r\n\r\n\x1b]133;D;0\x07",
+            cx,
+        );
+        terminal.read_with(cx, |terminal, _| {
+            let id = terminal
+                .blocks()
+                .expect("blocks")
+                .blocks()
+                .next()
+                .expect("block")
+                .id;
+            let lines = terminal.block_output_lines(id, 10, 1000).expect("lines");
+            let texts: Vec<_> = lines.iter().map(|line| line.text.as_str()).collect();
+            assert_eq!(texts, ["abcdefgh", "xy"]);
+            assert_eq!(lines[1].absolute_line, lines[0].absolute_line + 3);
+        });
+    }
+
+    #[gpui::test]
+    async fn output_lines_read_tabs_back_as_tabs(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_block_terminal(cx);
+        feed_pty_output(
+            &terminal,
+            b"\x1b]133;A\x07\x1b]133;B\x07git status\r\n\x1b]633;E;git status\x07\x1b]133;C\x07Changes not staged for commit:\r\n\tmodified:   a.txt\r\nab\tc\t\td\r\n\x1b]133;D;1\x07",
+            cx,
+        );
+        terminal.read_with(cx, |terminal, _| {
+            let block = terminal
+                .blocks()
+                .expect("blocks")
+                .blocks()
+                .next()
+                .expect("block");
+            let lines = terminal
+                .block_output_lines(block.id, 10, 1000)
+                .expect("lines");
+            let texts: Vec<_> = lines.iter().map(|line| line.text.as_str()).collect();
+            assert_eq!(
+                texts,
+                [
+                    "Changes not staged for commit:",
+                    "\tmodified:   a.txt",
+                    "ab\tc\t\td"
+                ]
+            );
+            let insight = photon_blocks::recognise(&block.command, &lines, block.exit_code);
+            assert!(
+                matches!(
+                    &insight,
+                    Some(photon_blocks::Insight::GitStatus { files })
+                        if files.len() == 1 && files[0].path == "a.txt"
+                ),
+                "{insight:?}"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn output_lines_over_cap_is_none(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_block_terminal(cx);
+        feed_pty_output(
+            &terminal,
+            b"\x1b]133;A\x07\x1b]133;B\x07cmd\r\n\x1b]633;E;cmd\x07\x1b]133;C\x07one\r\ntwo\r\nthree\r\n\x1b]133;D;0\x07",
+            cx,
+        );
+        terminal.read_with(cx, |terminal, _| {
+            let id = terminal
+                .blocks()
+                .expect("blocks")
+                .blocks()
+                .next()
+                .expect("block")
+                .id;
+            assert_eq!(
+                terminal
+                    .block_output_lines(id, 3, 1000)
+                    .map(|lines| lines.len()),
+                Some(3)
+            );
+            assert!(terminal.block_output_lines(id, 2, 1000).is_none());
+            assert!(terminal.block_output_lines(id, 10, 10).is_none());
+        });
+    }
+
+    #[gpui::test]
+    async fn marks_from_a_program_inside_a_block_are_ignored(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_block_terminal(cx);
+        // Photon's zsh tags its marks; an agent CLI running in the block prints its own.
+        feed_pty_output(
+            &terminal,
+            b"\x1b]133;A;photon\x07\x1b]133;B;photon\x07devin\r\n\x1b]633;E;devin;photon\x07\x1b]133;C;photon\x07\x1b]133;A\x07> \x1b]133;B\x07ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07bye\r\n\x1b]133;D;0;photon\x07\x1b]133;A;photon\x07\x1b]133;B;photon\x07",
+            cx,
+        );
+        terminal.read_with(cx, |terminal, _| {
+            let blocks = terminal.blocks().expect("blocks");
+            assert_eq!(blocks.phase(), &photon_blocks::Phase::Prompt);
+            let commands: Vec<_> = blocks.blocks().map(|block| block.command.clone()).collect();
+            assert_eq!(commands, ["devin"]);
+            let id = blocks.blocks().next().expect("block").id;
+            assert_eq!(
+                terminal.block_text(id, BlockPart::Output).as_deref(),
+                Some("> ls\nout\nbye")
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn clear_leaves_an_empty_screen_at_the_bottom(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_block_terminal(cx);
+        let mut output = String::new();
+        for _ in 0..60 {
+            output.push_str("line\r\n");
+        }
+        output.push_str("\x1b]133;A;photon\x07\x1b]133;B;photon\x07clear\r\n\x1b]633;E;clear;photon\x07\x1b]133;C;photon\x07\x1b[H\x1b[2J\x1b[3J\r\n\x1b]133;D;0;photon\x07\x1b]133;A;photon\x07\r\n\r\n\x1b]133;B;photon\x07");
+        feed_pty_output(&terminal, output.as_bytes(), cx);
+        terminal.read_with(cx, |terminal, _| {
+            // The clear block printed nothing after clearing, so nothing is left to show.
+            assert_eq!(terminal.blocks().expect("blocks").blocks().count(), 0);
+            // The new prompt still goes to the bottom.
+            assert!(terminal.blank_rows_below_cursor() > 0);
+        });
+    }
+
+    #[gpui::test]
+    async fn bottom_anchoring_never_hides_text_below_the_cursor(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_block_terminal(cx);
+        feed_pty_output(
+            &terminal,
+            b"\x1b]133;A;photon\x07top\r\n\r\n\r\nstatus line\x1b[3A",
+            cx,
+        );
+        terminal.read_with(cx, |terminal, _| {
+            let content = &terminal.last_content;
+            let rows = content.terminal_bounds.num_lines();
+            // "status line" is on row 3, below the cursor on row 0.
+            assert_eq!(terminal.blank_rows_below_cursor(), rows - 4);
+        });
+    }
+
+    #[gpui::test]
+    async fn input_goes_to_pty_while_command_runs(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_block_terminal(cx);
+        feed_pty_output(
+            &terminal,
+            b"\x1b]133;A\x07$ \x1b]133;B\x07\x1b]633;E;sudo ls\x07\x1b]133;C\x07Password:",
+            cx,
+        );
+        terminal.read_with(cx, |terminal, _| {
+            assert_eq!(terminal.input_target(), InputTarget::Pty)
+        });
+        feed_pty_output(
+            &terminal,
+            b"\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07",
+            cx,
+        );
+        terminal.read_with(cx, |terminal, _| {
+            assert_eq!(terminal.input_target(), InputTarget::BlockInput)
+        });
+    }
+
+    #[gpui::test]
+    async fn alt_screen_routes_to_pty(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_block_terminal(cx);
+        feed_pty_output(&terminal, b"\x1b]133;A\x07$ \x1b]133;B\x07", cx);
+        terminal.read_with(cx, |terminal, _| {
+            assert_eq!(terminal.input_target(), InputTarget::BlockInput)
+        });
+        feed_pty_output(&terminal, b"\x1b[?1049h", cx);
+        terminal.read_with(cx, |terminal, _| {
+            assert_eq!(terminal.input_target(), InputTarget::Pty)
+        });
+    }
+
+    #[gpui::test]
+    async fn clear_resets_blocks(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_block_terminal(cx);
+        let block_count = |terminal: &Entity<Terminal>, cx: &mut VisualTestContext| {
+            terminal.read_with(cx, |terminal, _| {
+                terminal.blocks().map(|blocks| blocks.blocks().count())
+            })
+        };
+
+        feed_pty_output(&terminal, BLOCK_LIFECYCLE, cx);
+        assert_eq!(block_count(&terminal, cx), Some(1));
+        terminal.update_in(cx, |terminal, window, cx| {
+            terminal.clear();
+            terminal.sync(window, cx);
+        });
+        assert_eq!(block_count(&terminal, cx), Some(0));
+
+        feed_pty_output(&terminal, BLOCK_LIFECYCLE, cx);
+        assert_eq!(block_count(&terminal, cx), Some(1));
+        feed_pty_output(&terminal, b"\x1bc", cx);
+        assert_eq!(block_count(&terminal, cx), Some(0));
+
+        // cmd-K while a command runs must not hand the keyboard to the input box.
+        feed_pty_output(
+            &terminal,
+            b"\x1b]133;A\x07$ \x1b]133;B\x07\x1b]633;E;cat\x07\x1b]133;C\x07",
+            cx,
+        );
+        terminal.update_in(cx, |terminal, window, cx| {
+            terminal.clear();
+            terminal.sync(window, cx);
+        });
+        terminal.read_with(cx, |terminal, _| {
+            assert_eq!(terminal.input_target(), InputTarget::Pty)
+        });
+    }
+
+    #[gpui::test]
+    async fn marks_parsed_before_clear_use_post_clear_lines(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_block_terminal(cx);
+        feed_pty_output(&terminal, BLOCK_LIFECYCLE, cx);
+        let mut screenful = Vec::new();
+        for line in 0..40 {
+            screenful.extend_from_slice(format!("{line}\r\n").as_bytes());
+        }
+        screenful.extend_from_slice(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+        feed_pty_output(&terminal, &screenful, cx);
+
+        // `clear` runs: its C mark, the clear itself and the next prompt arrive in one read.
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_raw_output(
+                b"\x1b]633;E;clear\x07\x1b]133;C\x07\x1b[H\x1b[2J\x1b[3J\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07",
+                cx,
+            );
+            // The PTY loop handles a batch's Wakeup before its marks.
+            terminal.process_event(TerminalBackendEvent::Wakeup, cx);
+        });
+        cx.run_until_parked();
+
+        terminal.read_with(cx, |terminal, _| {
+            let blocks = terminal.blocks().expect("blocks enabled");
+            for block in blocks.blocks() {
+                let (Some(output), Some(end)) = (block.output_line, block.end_line) else {
+                    panic!("unfinished block {:?}", block.command);
+                };
+                assert!(end >= output, "inverted block {block:?}");
+                assert!(block.prompt_line <= output, "inverted block {block:?}");
+            }
+            let commands: Vec<_> = blocks
+                .blocks()
+                .map(|block| block.command.as_str())
+                .collect();
+            assert_eq!(commands, ["clear"]);
+            assert_eq!(blocks.phase(), &photon_blocks::Phase::Prompt);
+        });
+    }
+
+    #[gpui::test]
+    async fn run_command_uses_bracketed_paste(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_block_terminal(cx);
+        feed_pty_output(&terminal, b"\x1b]133;A\x07$ \x1b]133;B\x07", cx);
+        terminal.update(cx, |terminal, cx| {
+            terminal.run_command("ls -la", cx);
+            let log = terminal.take_pty_write_log();
+            // Ctrl-U first drops any typeahead sitting in zsh's line buffer.
+            assert_eq!(log.concat(), b"\x15\x1b[200~ls -la\x1b[201~\r");
+        });
+    }
+
+    #[gpui::test]
+    async fn input_waits_for_shell_after_run_command(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_block_terminal(cx);
+        let target = |terminal: &Entity<Terminal>, cx: &mut VisualTestContext| {
+            terminal.read_with(cx, |terminal, _| terminal.input_target())
+        };
+        feed_pty_output(&terminal, b"\x1b]133;A\x07$ \x1b]133;B\x07", cx);
+        assert_eq!(target(&terminal, cx), InputTarget::BlockInput);
+
+        // An unclosed quote: zsh shows its continuation prompt and sends no mark.
+        terminal.update(cx, |terminal, cx| terminal.run_command("echo \"it is", cx));
+        assert_eq!(target(&terminal, cx), InputTarget::Pty);
+        feed_pty_output(&terminal, b"\r\ndquote> ", cx);
+        assert_eq!(target(&terminal, cx), InputTarget::Pty);
+        // While waiting, nothing else is pasted into the continuation line.
+        terminal.update(cx, |terminal, cx| {
+            terminal.take_pty_write_log();
+            terminal.run_command("echo SECOND", cx);
+            assert!(terminal.take_pty_write_log().is_empty());
+        });
+        // ctrl-c there makes zsh print a fresh prompt.
+        feed_pty_output(&terminal, b"\r\n\x1b]133;A\x07\x1b]133;B\x07", cx);
+        assert_eq!(target(&terminal, cx), InputTarget::BlockInput);
+
+        // A normal command hands the keyboard back once its output starts.
+        terminal.update(cx, |terminal, cx| terminal.run_command("sleep 1", cx));
+        assert_eq!(target(&terminal, cx), InputTarget::Pty);
+        feed_pty_output(&terminal, b"\x1b]633;E;sleep 1\x07\x1b]133;C\x07", cx);
+        assert_eq!(target(&terminal, cx), InputTarget::Pty);
+        feed_pty_output(
+            &terminal,
+            b"\x1b]133;D;0\x07\x1b]133;A\x07\x1b]133;B\x07",
+            cx,
+        );
+        assert_eq!(target(&terminal, cx), InputTarget::BlockInput);
+    }
+
+    #[gpui::test]
+    async fn clear_on_alt_screen_keeps_blocks(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_block_terminal(cx);
+        feed_pty_output(&terminal, BLOCK_LIFECYCLE, cx);
+        feed_pty_output(
+            &terminal,
+            b"vim\r\n\x1b]633;E;vim\x07\x1b]133;C\x07\x1b[?1049h",
+            cx,
+        );
+        let blocks = |terminal: &Entity<Terminal>, cx: &mut VisualTestContext| {
+            terminal.read_with(cx, |terminal, _| {
+                terminal
+                    .blocks()
+                    .map(|blocks| {
+                        blocks
+                            .blocks()
+                            .map(|block| (block.command.clone(), block.output_line))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+        };
+        let before = blocks(&terminal, cx);
+        assert_eq!(before.len(), 2);
+        terminal.update_in(cx, |terminal, window, cx| {
+            terminal.clear();
+            terminal.sync(window, cx);
+        });
+        feed_pty_output(&terminal, b"\x1b[?1049l", cx);
+        assert_eq!(blocks(&terminal, cx), before);
+    }
+
+    #[gpui::test]
+    async fn no_marks_degrades_after_two_seconds(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_block_terminal(cx);
+        cx.executor().advance_clock(Duration::from_secs(2));
+        cx.run_until_parked();
+        terminal.read_with(cx, |terminal, _| {
+            let phase = terminal.blocks().map(|blocks| blocks.phase().clone());
+            assert!(matches!(phase, Some(photon_blocks::Phase::Degraded(_))));
+            assert_eq!(terminal.input_target(), InputTarget::Pty);
+        });
+    }
+
+    #[gpui::test]
+    async fn first_mark_cancels_no_marks_check(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_block_terminal(cx);
+        feed_pty_output(&terminal, b"\x1b]7;file://host/tmp\x07", cx);
+        cx.executor().advance_clock(Duration::from_secs(3));
+        cx.run_until_parked();
+        terminal.read_with(cx, |terminal, _| {
+            assert_eq!(
+                terminal.blocks().map(|blocks| blocks.phase().clone()),
+                Some(photon_blocks::Phase::AwaitingFirstMark)
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn evicted_blocks_are_trimmed(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        let terminal = window.new(|cx| {
+            let mut terminal = TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                Some(10),
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx);
+            terminal.enable_blocks(cx);
+            terminal
+        });
+        let commands = |terminal: &Entity<Terminal>, cx: &mut VisualTestContext| {
+            terminal.read_with(cx, |terminal, _| {
+                terminal.blocks().map(|blocks| {
+                    blocks
+                        .blocks()
+                        .map(|block| block.command.clone())
+                        .collect::<Vec<_>>()
+                })
+            })
+        };
+        feed_pty_output(&terminal, BLOCK_LIFECYCLE, window);
+        let mut long_output = b"\x1b]633;E;seq 100\x07\x1b]133;C\x07".to_vec();
+        for line in 0..100 {
+            long_output.extend_from_slice(format!("{line}\r\n").as_bytes());
+        }
+        long_output.extend_from_slice(b"\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+        feed_pty_output(&terminal, &long_output, window);
+        assert_eq!(
+            commands(&terminal, window),
+            Some(vec!["seq 100".to_string()])
+        );
+    }
+
+    #[gpui::test]
+    async fn integration_off_means_no_blocks(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_terminal_test_with_window(cx, b"");
+        feed_pty_output(&terminal, BLOCK_LIFECYCLE, cx);
+        terminal.read_with(cx, |terminal, _| {
+            assert!(terminal.blocks().is_none());
+            assert_eq!(terminal.input_target(), InputTarget::Pty);
+        });
     }
 }

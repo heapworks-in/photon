@@ -19,6 +19,8 @@ async fn registry_refresh_times_out_when_fetch_never_completes(cx: &mut TestAppC
 
     let registry_store =
         cx.update(|cx| AgentRegistryStore::init_global(cx, fs.clone(), http_client));
+    // photon: init_global no longer fetches; request the refresh explicitly.
+    registry_store.update(cx, |store, cx| store.refresh(cx));
     cx.run_until_parked();
 
     cx.executor().advance_clock(Duration::from_secs(31));
@@ -99,6 +101,8 @@ async fn registry_refresh_does_not_block_sequentially_on_hung_icon_downloads(
 
     let registry_store =
         cx.update(|cx| AgentRegistryStore::init_global(cx, fs.clone(), http_client));
+    // photon: init_global no longer fetches; request the refresh explicitly.
+    registry_store.update(cx, |store, cx| store.refresh(cx));
     cx.run_until_parked();
 
     cx.executor().advance_clock(Duration::from_secs(11));
@@ -150,6 +154,8 @@ async fn registry_refresh_preserves_optional_binary_checksums(cx: &mut TestAppCo
 
     let registry_store =
         cx.update(|cx| AgentRegistryStore::init_global(cx, fs.clone(), http_client));
+    // photon: init_global no longer fetches; request the refresh explicitly.
+    registry_store.update(cx, |store, cx| store.refresh(cx));
     cx.run_until_parked();
 
     registry_store.read_with(cx, |store, _| {
@@ -172,4 +178,46 @@ async fn registry_refresh_preserves_optional_binary_checksums(cx: &mut TestAppCo
         );
         assert_eq!(store.fetch_error(), None);
     });
+}
+
+// photon: having an installed registry agent in settings must not fetch the registry at startup.
+#[gpui::test]
+async fn registry_agent_in_settings_does_not_fetch_on_project_open(cx: &mut TestAppContext) {
+    use gpui::UpdateGlobal as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/project", json!({ "file.txt": "" })).await;
+    let requests = Arc::new(AtomicUsize::new(0));
+    let http_client = FakeHttpClient::create({
+        let requests = requests.clone();
+        move |_| {
+            requests.fetch_add(1, Ordering::SeqCst);
+            future::ready(Ok(Response::builder()
+                .status(404)
+                .body(AsyncBody::default())
+                .expect("response")))
+        }
+    }) as Arc<dyn HttpClient>;
+
+    cx.update(|cx| {
+        AgentRegistryStore::init_global(cx, fs.clone(), http_client);
+        settings::SettingsStore::update_global(cx, |store, cx| {
+            store
+                .set_user_settings(
+                    r#"{"agent_servers": {"claude-acp": {"type": "registry"}}}"#,
+                    cx,
+                )
+                .unwrap();
+        });
+    });
+    let _project = project::Project::test(fs.clone(), [std::path::Path::new("/project")], cx).await;
+    cx.run_until_parked();
+
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        0,
+        "registry fetched at startup"
+    );
 }

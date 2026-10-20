@@ -1,0 +1,71 @@
+# photon: see zshenv.
+# /etc/zshrc on macOS derives HISTFILE from the ZDOTDIR we pointed at Photon's dir.
+[[ $HISTFILE == $PHOTON_ZDOTDIR/* ]] && HISTFILE=${PHOTON_USER_ZDOTDIR:-$HOME}/${HISTFILE:t}
+# photon: the completion helper's driver skips the user's config; its capture shell loads it.
+[[ $PHOTON_COMPLETER == 1 && -z $PHOTON_COMPLETER_PTY ]] && source $PHOTON_ZDOTDIR/photon-complete.zsh
+ZDOTDIR=${PHOTON_USER_ZDOTDIR:-$HOME}
+[[ -f $ZDOTDIR/.zshrc ]] && source "$ZDOTDIR/.zshrc"
+
+if [[ $PHOTON_COMPLETER == 1 ]]; then
+  source $PHOTON_ZDOTDIR/photon-complete.zsh
+elif [[ $PHOTON_BLOCKS == 1 ]]; then
+  # A zsh started by a command (`exec zsh`, a nested `zsh`) ends that command's block. Every
+  # mark ends in a `photon` field so marks printed by programs inside a block can be told apart.
+  if [[ -n $__photon_command_ran ]]; then
+    printf '\e]133;D;0;photon\a'
+    unset __photon_command_ran
+  fi
+
+  __photon_capture_status() {
+    __photon_status=$?
+    ZDOTDIR=${PHOTON_USER_ZDOTDIR:-$HOME}
+  }
+
+  __photon_precmd() {
+    # The newline leaves a blank row inside the block below its output (Warp's padding).
+    [[ -n $__photon_command_ran ]] && printf '\n\e]133;D;%s;photon\a' "$__photon_status"
+    unset __photon_command_ran
+    local url=${PWD//\%/%25}
+    printf '\e]7;file://%s%s\a' "$HOST" "${url// /%20}"
+    printf '\e]133;A;photon\a'
+    # A blank row and a row for the block's folder/branch/time, then the typed command.
+    PROMPT=$'\n\n%{\e]133;B;photon\a%}'
+    RPROMPT=''
+  }
+
+  __photon_preexec() {
+    local command=${1//\\/\\x5c}
+    command=${command//;/\\x3b}
+    command=${command//$'\a'/\\x07}
+    command=${command//$'\e'/\\x1b}
+    command=${command//$'\n'/\\x0a}
+    local flag=''
+    if [[ $1 == ' '* ]] || [[ -n $HISTORY_IGNORE && $1 == ${~HISTORY_IGNORE} ]]; then
+      flag=';nohist'
+    fi
+    typeset -g __photon_command_ran=1
+    # Only a command that starts zsh (`exec zsh`, `zsh`) gets Photon's ZDOTDIR, so that zsh loads
+    # the hooks again; anything else (`conda init zsh`) must see the user's own dotfiles.
+    local -a words=(${(z)1})
+    [[ $words[1] == exec ]] && shift words
+    while [[ $words[1] == -* ]]; do shift words; done
+    local program=${(Q)words[1]}
+    [[ $program == '$SHELL' || $program == '${SHELL}' ]] && program=$SHELL
+    if [[ ${program:t} == zsh ]]; then
+      export __photon_command_ran
+      ZDOTDIR=$PHOTON_ZDOTDIR
+    fi
+    printf '\e]633;E;%s%s;photon\a' "$command" "$flag"
+    printf '\e]133;C;photon\a'
+  }
+
+  precmd_functions=(__photon_capture_status ${precmd_functions:#__photon_*} __photon_precmd)
+  # First, so the command text is sent before any C another integration's preexec prints.
+  preexec_functions=(__photon_preexec ${preexec_functions:#__photon_*})
+fi
+
+if [[ -o login ]]; then
+  ZDOTDIR=$PHOTON_ZDOTDIR
+else
+  ZDOTDIR=${PHOTON_USER_ZDOTDIR:-$HOME}
+fi

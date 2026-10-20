@@ -46,6 +46,8 @@ pub struct LayoutState {
     block_below_cursor_element: Option<AnyElement>,
     base_text_style: TextStyle,
     content_mode: ContentMode,
+    // photon: command block chrome painted over the grid.
+    block_chrome: Vec<crate::photon_blocks_view::BlockChrome>,
 }
 
 /// Helper struct for converting terminal cursor points to displayed cursor points.
@@ -961,6 +963,16 @@ impl TerminalElement {
 
                 let view = terminal_view.read(cx);
                 let scroll_top = view.scroll_top;
+                // photon: cmd-click on a `git log` hash opens the commit instead of a hyperlink.
+                if e.modifiers.secondary() {
+                    let mut position = e.position;
+                    position.y += scroll_top.max(Pixels::ZERO);
+                    if terminal_view
+                        .update(cx, |view, cx| view.open_commit_at(position, window, cx))
+                    {
+                        return;
+                    }
+                }
                 terminal.update(cx, |terminal, cx| {
                     let mut adjusted_event = e.clone();
                     if scroll_top > Pixels::ZERO {
@@ -968,7 +980,7 @@ impl TerminalElement {
                     }
                     terminal.mouse_down(&adjusted_event, mouse_input_mode, cx);
                     cx.notify();
-                })
+                });
             }
         });
 
@@ -981,7 +993,13 @@ impl TerminalElement {
                     return;
                 }
 
-                if e.pressed_button.is_some() && !cx.has_active_drag() && focus.is_focused(window) {
+                // photon: at a block prompt the click hands focus on to the input box inside
+                // the terminal, and the drag must still select text.
+                if e.pressed_button.is_some()
+                    && !cx.has_active_drag()
+                    && (focus.is_focused(window)
+                        || terminal_view.read(cx).block_input_focused(window, cx))
+                {
                     let hovered = hitbox.is_hovered(window);
 
                     let scroll_top = terminal_view.read(cx).scroll_top;
@@ -1014,8 +1032,12 @@ impl TerminalElement {
             self.interactivity.on_mouse_up(button, {
                 let terminal = terminal.clone();
                 let focus = focus.clone();
+                let terminal_view = self.terminal_view.clone();
                 move |event, window, cx| {
-                    if !focus.is_focused(window) {
+                    // photon: as for the drag above, the input box may hold the focus.
+                    if !focus.is_focused(window)
+                        && !terminal_view.read(cx).block_input_focused(window, cx)
+                    {
                         return;
                     }
                     if button != MouseButton::Left
@@ -1035,6 +1057,24 @@ impl TerminalElement {
                 }
             });
         }
+
+        // photon: a plain click (no drag, no modifiers) selects the block under it. Bubble
+        // listeners run newest first, so this sees the drag before the listener above ends it.
+        self.interactivity.on_mouse_up(MouseButton::Left, {
+            let terminal = terminal.clone();
+            let terminal_view = self.terminal_view.clone();
+            move |event, _, cx| {
+                let plain_click = event.click_count == 1
+                    && event.modifiers == gpui::Modifiers::default()
+                    && !terminal.read(cx).selection_started();
+                if plain_click {
+                    let mut position = event.position;
+                    position.y += terminal_view.read(cx).scroll_top.max(Pixels::ZERO);
+                    terminal_view.update(cx, |view, cx| view.select_block_at(position, cx));
+                }
+            }
+        });
+
         for button in [MouseButton::Middle, MouseButton::Right] {
             self.interactivity.on_mouse_down(button, {
                 let terminal = terminal.clone();
@@ -1262,7 +1302,15 @@ impl Element for TerminalElement {
                         .advance(font_id, font_pixels, 'm')
                         .unwrap()
                         .width;
-                    gutter = cell_width;
+                    // photon: blocks inset text like Warp and keep the newest output at the bottom.
+                    let blocks_drawn = matches!(self.mode, TerminalMode::Standalone)
+                        && crate::photon_blocks_view::active_blocks(self.terminal.read(cx))
+                            .is_some();
+                    gutter = if blocks_drawn {
+                        cell_width * crate::photon_blocks_view::BLOCK_GUTTER_CELLS
+                    } else {
+                        cell_width
+                    };
 
                     let mut size = bounds.size;
                     size.width -= gutter;
@@ -1281,7 +1329,8 @@ impl Element for TerminalElement {
                     if matches!(self.terminal_view.read(cx).mode, TerminalMode::Standalone) {
                         let should_anchor_to_bottom = {
                             let content = self.terminal.read(cx).last_content();
-                            content.mode.contains(Modes::ALT_SCREEN)
+                            blocks_drawn // photon: see above
+                                || content.mode.contains(Modes::ALT_SCREEN)
                                 || (content.scrolled_to_bottom && content.bottom_row_occupied)
                         };
                         let scale_factor = window.scale_factor();
@@ -1307,6 +1356,14 @@ impl Element for TerminalElement {
                         size.height = snapped_height;
                         if should_anchor_to_bottom {
                             origin.y += padding;
+                        }
+                        if blocks_drawn {
+                            // photon: see above. Rows are drawn at the exact line height, so the
+                            // last row's bottom is put on the element's bottom, where the input
+                            // box overlaps a fixed number of rows.
+                            let blank_rows = self.terminal.read(cx).blank_rows_below_cursor();
+                            origin.y = bounds.origin.y + available_height
+                                - line_height_pixels * rows.saturating_sub(blank_rows) as f32;
                         }
                     }
 
@@ -1550,6 +1607,15 @@ impl Element for TerminalElement {
                     None
                 };
 
+                // photon: command block chrome.
+                let terminal_view = self.terminal_view.read(cx);
+                let block_chrome = crate::photon_blocks_view::layout_block_chrome(
+                    self.terminal.read(cx),
+                    terminal_view.selected_block(),
+                    terminal_view.enabled_smart_blocks(cx),
+                    dimensions.num_lines(),
+                );
+
                 LayoutState {
                     hitbox,
                     batched_text_runs,
@@ -1565,6 +1631,7 @@ impl Element for TerminalElement {
                     block_below_cursor_element,
                     base_text_style: text_style,
                     content_mode,
+                    block_chrome,
                 }
             },
         )
@@ -1679,6 +1746,16 @@ impl Element for TerminalElement {
                         block_element_rect.paint(origin, &layout.dimensions, window);
                     }
                     let text_paint_time = text_paint_start.elapsed();
+                    // photon: block chrome covers the echoed prompt rows of each block.
+                    crate::photon_blocks_view::paint_block_chrome(
+                        &layout.block_chrome,
+                        origin,
+                        &layout.dimensions,
+                        layout.background_color,
+                        &layout.base_text_style,
+                        window,
+                        cx,
+                    );
 
                     if let Some(text_to_mark) = &marked_text_cloned
                         && !text_to_mark.is_empty()

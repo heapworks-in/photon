@@ -9574,6 +9574,14 @@ impl Render for Workspace {
         static FIRST_PAINT: AtomicBool = AtomicBool::new(true);
         if FIRST_PAINT.swap(false, std::sync::atomic::Ordering::Relaxed) {
             log::info!("Rendered first frame");
+            // photon: first-frame timestamp for script/photon-perf.
+            if std::env::var_os("PHOTON_PERF").is_some() {
+                let epoch_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_millis())
+                    .unwrap_or_default();
+                eprintln!("photon-perf first-frame-epoch-ms {epoch_ms}");
+            }
         }
 
         let pad_center_pane = self.centered_layout
@@ -13009,7 +13017,7 @@ mod tests {
             });
         });
         cx.executor().run_until_parked();
-        assert_eq!(cx.window_title().as_deref(), Some("Zed — root1, root2"));
+        assert_eq!(cx.window_title().as_deref(), Some("Photon — root1, root2")); // photon: app name
 
         let item = cx.new(|cx| {
             TestItem::new(cx).with_project_items(&[TestProjectItem::new_in_worktree(
@@ -13026,7 +13034,7 @@ mod tests {
         let expected_file_path = path!("/root1/src/one.txt");
         assert_eq!(
             cx.window_title().as_deref(),
-            Some(format!("Zed — root1, root2 — one — {expected_file_path}").as_str())
+            Some(format!("Photon — root1, root2 — one — {expected_file_path}").as_str())
         );
     }
 
@@ -19357,7 +19365,7 @@ mod tests {
             serde_json::json!({
                 "mode": "system",
                 "light": "One Light",
-                "dark": "One Dark"
+                "dark": "Photon Black" // photon: default dark theme
             })
         );
 

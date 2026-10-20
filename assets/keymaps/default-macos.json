@@ -697,6 +697,8 @@
     "use_key_equivalents": true,
     "bindings": {
       "alt-/": "which_key::ShowPendingBindings",
+      // photon: jump between the center terminal and the editor.
+      "ctrl-cmd-t": "photon::ToggleTerminalEditorFocus",
       // Move focus between the major regions of the window (editor, open
       // panels, status bar). Accessibility navigation; mirrors VS Code's
       // "Focus Next/Previous Part". `cmd-f6` mirrors `f6` so region navigation
@@ -1407,6 +1409,82 @@
       "cmd-d": "pane::SplitRight",
       "cmd-alt-r": "terminal::RerunTask",
       "cmd->": "agent::AddSelectionToThread",
+    },
+  },
+  {
+    // photon: while command blocks are drawn, cmd-up/down select blocks instead of scrolling a page.
+    "context": "Terminal && photon_blocks && screen == normal",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-up": "photon_terminal::SelectPreviousBlock",
+      "cmd-down": "photon_terminal::SelectNextBlock",
+    },
+  },
+  {
+    // photon: a selected block's actions.
+    "context": "Terminal && photon_block_selected",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-shift-c": "photon_terminal::CopyBlockCommand",
+      "cmd-alt-c": "photon_terminal::CopyBlockOutput",
+      "cmd-alt-shift-c": "photon_terminal::CopyBlock",
+      "cmd-shift-r": "photon_terminal::RerunBlock",
+      "ctrl-cmd-r": "photon_terminal::RerunFailedTests",
+    },
+  },
+  {
+    // photon: start a draft comment on the selected lines of a pull request review.
+    "context": "PhotonReview > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-alt-m": "photon_review::AddComment",
+    },
+  },
+  {
+    // photon: step through the errors of the selected (or newest) test or build block; a running program gets F8.
+    "context": "Terminal && photon_blocks && !photon_keys_to_pty",
+    "use_key_equivalents": true,
+    "bindings": {
+      "f8": "photon_terminal::NextBlockError",
+      "shift-f8": "photon_terminal::PreviousBlockError",
+    },
+  },
+  {
+    // photon: escape unselects the block only at a prompt; a running program gets the key.
+    "context": "Terminal && photon_block_selected && !photon_keys_to_pty",
+    "use_key_equivalents": true,
+    "bindings": {
+      "escape": "photon_terminal::ClearBlockSelection",
+    },
+  },
+  {
+    // photon: the block terminal's input box runs on enter, walks history from its first/last line opens history search on ctrl-r, completes on tab, accepts the grey suggestion on right and clears on ctrl-c.
+    "context": "PhotonBlockInput > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "enter": "photon_terminal::RunInput",
+      "shift-enter": "editor::Newline",
+      "up": "photon_terminal::HistoryPrevious",
+      "down": "photon_terminal::HistoryNext",
+      "ctrl-r": "photon_terminal::SearchHistory",
+      "cmd-up": "photon_terminal::SelectPreviousBlock",
+      "cmd-down": "photon_terminal::SelectNextBlock",
+      "f8": "photon_terminal::NextBlockError",
+      "shift-f8": "photon_terminal::PreviousBlockError",
+      "tab": "photon_terminal::Complete",
+      "right": "photon_terminal::AcceptSuggestion",
+      "ctrl-c": "photon_terminal::Interrupt",
+    },
+  },
+  {
+    // photon: while the input's completion menu is open, its keys drive the menu instead.
+    "context": "PhotonBlockInput > Editor && showing_completions",
+    "use_key_equivalents": true,
+    "bindings": {
+      "enter": "editor::ConfirmCompletion",
+      "tab": "editor::ContextMenuNext",
+      "up": "editor::ContextMenuPrevious",
+      "down": "editor::ContextMenuNext",
     },
   },
   {

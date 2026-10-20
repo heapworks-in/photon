@@ -162,6 +162,10 @@ members = [
     "crates/outline_panel",
     "crates/path",
     "crates/paths",
+    "crates/photon_blocks",
+    "crates/photon_brand",
+    "crates/photon_review", # photon: PR review
+    "crates/photon_terminal",
     "crates/picker",
     "crates/picker_preview",
     "crates/platform_title_bar",
@@ -270,6 +274,8 @@ members = [
     "tooling/xtask",
 ]
 default-members = ["crates/zed"]
+# photon: vendored third-party crates are path deps, not workspace members
+exclude = ["vendor/vte", "vendor/alacritty_terminal"]
 
 [workspace.package]
 publish = false
@@ -436,6 +442,10 @@ outline_panel = { path = "crates/outline_panel" }
 path = { path = "crates/path" }
 paths = { path = "crates/paths" }
 perf = { path = "tooling/perf", default-features = false }
+photon_blocks = { path = "crates/photon_blocks" }
+photon_brand = { path = "crates/photon_brand" }
+photon_review = { path = "crates/photon_review" } # photon: PR review
+photon_terminal = { path = "crates/photon_terminal" }
 picker = { path = "crates/picker" }
 picker_preview = { path = "crates/picker_preview" }
 platform_title_bar = { path = "crates/platform_title_bar" }
@@ -531,7 +541,7 @@ accesskit_unix = "0.22"
 accesskit_windows = "0.34"
 agent-client-protocol = { version = "=3.4.0", features = ["schemars", "unstable", "unstable_protocol_v2"] }
 aho-corasick = "1.1"
-alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "4c129667ce56611becdc82de6e28218c80e2e88f" }
+alacritty_terminal = { path = "vendor/alacritty_terminal" } # photon: vendored to surface OSC 133/633/7 (was zed-industries/alacritty rev 4c129667); upstream tests/ref and tests/ref.rs omitted (46 MB fixtures)
 any_vec = "0.14"
 anyhow = "1.0.86"
 arc-swap = "1.9.0"
@@ -1013,6 +1023,7 @@ features = [
 ]
 
 [patch.crates-io]
+vte = { path = "vendor/vte" } # photon: vendored to forward OSC 133/633/7 to Handler
 cpal = { git = "https://github.com/RustAudio/cpal", rev = "e1612d5d98152f8dc2a62e1b51ef7cbf4f7f26b7" }
 # Unify `tree_sitter_language::LanguageFn` between crates.io grammar crates and
 # the git tree-sitter above; two instances of the crate would make grammar

@@ -52,6 +52,9 @@ pub struct TerminalSettings {
     pub path_hyperlink_timeout_ms: u64,
     pub show_count_badge: bool,
     pub bell: TerminalBell,
+    pub blocks: bool,              // photon: command blocks
+    pub smart_blocks: bool,        // photon: smart blocks
+    pub notify_after_seconds: u64, // photon: smart blocks
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -137,6 +140,9 @@ impl settings::Settings for TerminalSettings {
             path_hyperlink_timeout_ms: project_content.path_hyperlink_timeout_ms.unwrap(),
             show_count_badge: user_content.show_count_badge.unwrap(),
             bell: user_content.bell.unwrap(),
+            blocks: user_content.blocks.unwrap(), // photon: command blocks
+            smart_blocks: user_content.smart_blocks.unwrap(), // photon: smart blocks
+            notify_after_seconds: user_content.notify_after_seconds.unwrap(), // photon: smart blocks
         }
     }
 }
