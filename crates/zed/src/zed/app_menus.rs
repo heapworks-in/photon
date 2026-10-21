@@ -3,7 +3,6 @@ use gpui::{App, Menu, MenuItem, OsAction};
 use project::DisableAiSettings;
 use release_channel::ReleaseChannel;
 use settings::Settings;
-use terminal_view::terminal_panel;
 use zed_actions::{Quit, assistant, debug_panel, dev, git_panel, project_panel};
 
 pub fn app_menus(cx: &mut App) -> Vec<Menu> {
@@ -43,7 +42,8 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
         MenuItem::action("Project Panel", project_panel::ToggleFocus),
         MenuItem::action("Outline Panel", outline_panel::ToggleFocus),
         MenuItem::action("Collab Panel", collab_panel::ToggleFocus),
-        MenuItem::action("Terminal Panel", terminal_panel::Toggle),
+        // photon: terminals live in the center; this switches to one, opening it if needed
+        MenuItem::action("Terminal", super::photon::ToggleTerminalEditorFocus),
         MenuItem::action("Debugger Panel", debug_panel::ToggleFocus),
     ];
 

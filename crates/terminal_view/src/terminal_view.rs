@@ -626,11 +626,8 @@ impl TerminalView {
         let context_menu = ContextMenu::build(window, cx, |menu, _, _| {
             menu.context(self.focus_handle.clone())
                 .when(self.shows_workspace_actions(), |menu| {
+                    // photon: New Terminal always opens in the center, so there's no separate center entry
                     menu.action("New Terminal", Box::new(NewTerminal::default()))
-                        .action(
-                            "New Center Terminal",
-                            Box::new(NewCenterTerminal::default()),
-                        )
                         .separator()
                 })
                 .action("Copy", Box::new(Copy))
