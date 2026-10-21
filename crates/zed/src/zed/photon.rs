@@ -2,8 +2,9 @@ use command_palette_hooks::CommandPaletteFilter;
 use editor::Editor;
 use gpui::{App, Context, Focusable as _, Window};
 use terminal_view::TerminalView;
+use ui::{IconButton, IconName, IconSize, Tooltip, prelude::*};
 use util::ResultExt as _;
-use workspace::{ItemHandle, NewCenterTerminal, Workspace};
+use workspace::{HideStatusItem, ItemHandle, NewCenterTerminal, StatusItemView, Workspace};
 
 /// Hides actions for services Photon keeps switched off (Zed account, collaboration, auto-update).
 pub fn hide_offline_actions(cx: &mut App) {
@@ -141,6 +142,35 @@ pub fn toggle_terminal_editor_focus(
             TerminalView::deploy(workspace, &center_terminal_action(), window, cx)
         }
         None => {}
+    }
+}
+
+/// Status bar button that opens a new terminal, so one is always a click away after closing the last.
+pub struct NewTerminalButton;
+
+impl gpui::Render for NewTerminalButton {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+        IconButton::new("photon-new-terminal", IconName::Terminal)
+            .icon_size(IconSize::Small)
+            .aria_label("New Terminal")
+            .tooltip(Tooltip::text("New Terminal"))
+            .on_click(|_, window, cx| {
+                window.dispatch_action(Box::new(center_terminal_action()), cx)
+            })
+    }
+}
+
+impl StatusItemView for NewTerminalButton {
+    fn set_active_pane_item(
+        &mut self,
+        _: Option<&dyn ItemHandle>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+    }
+
+    fn hide_setting(&self, _: &App) -> Option<HideStatusItem> {
+        None
     }
 }
 
