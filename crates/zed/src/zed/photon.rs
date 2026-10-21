@@ -57,7 +57,7 @@ fn center_terminal_action() -> NewCenterTerminal {
 gpui::actions!(
     photon,
     [
-        /// Moves focus between the most recently used center terminal and editor.
+        /// Moves focus between the most recently used center terminal and editor, opening a terminal if none is open.
         ToggleTerminalEditorFocus,
         /// Font style: Mono for code and the terminal, Sans for menus (the default).
         UseMonoFontStyle,
@@ -123,18 +123,24 @@ pub fn toggle_terminal_editor_focus(
     if !active_pane.focus_handle(cx).contains_focused(window, cx) {
         return;
     }
-    let Some(active_item) = active_pane.read(cx).active_item() else {
-        return;
-    };
-    let target = if active_item.downcast::<TerminalView>().is_some() {
+    let on_terminal = active_pane
+        .read(cx)
+        .active_item()
+        .is_some_and(|item| item.downcast::<TerminalView>().is_some());
+    let target = if on_terminal {
         most_recently_active_item::<Editor>(workspace, cx)
-    } else if active_item.downcast::<Editor>().is_some() {
-        most_recently_active_item::<TerminalView>(workspace, cx)
     } else {
-        None
+        most_recently_active_item::<TerminalView>(workspace, cx)
     };
-    if let Some(target) = target {
-        workspace.activate_item(target.as_ref(), true, true, window, cx);
+    match target {
+        Some(target) => {
+            workspace.activate_item(target.as_ref(), true, true, window, cx);
+        }
+        // The user closed every terminal; this is the way back to one.
+        None if !on_terminal => {
+            TerminalView::deploy(workspace, &center_terminal_action(), window, cx)
+        }
+        None => {}
     }
 }
 
@@ -386,6 +392,46 @@ mod tests {
             workspace.read_with(cx, |workspace, _| workspace.panes().len()),
             2
         );
+    }
+
+    #[gpui::test]
+    async fn toggle_opens_a_terminal_when_none_is_open(cx: &mut TestAppContext) {
+        // Opening a terminal starts a real shell process.
+        cx.executor().allow_parking();
+        use project::Project;
+        use serde_json::json;
+        use util::path;
+        use workspace::{MultiWorkspace, WorkspaceHandle as _};
+
+        let app_state = super::super::tests::init_test(cx);
+        app_state
+            .fs
+            .as_fake()
+            .insert_tree(path!("/root"), json!({ "notes.txt": "hello" }))
+            .await;
+        let project = Project::test(app_state.fs.clone(), [path!("/root").as_ref()], cx).await;
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .unwrap();
+        let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        let file = cx.read(|cx| workspace.file_project_paths(cx))[0].clone();
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.open_path(file, None, true, window, cx)
+            })
+            .await
+            .unwrap();
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            toggle_terminal_editor_focus(workspace, &ToggleTerminalEditorFocus, window, cx)
+        });
+        cx.run_until_parked();
+
+        let terminals = workspace.read_with(cx, |workspace, cx| {
+            workspace.items_of_type::<TerminalView>(cx).count()
+        });
+        assert_eq!(terminals, 1);
     }
 
     #[test]

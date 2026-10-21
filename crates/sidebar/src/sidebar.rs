@@ -7665,7 +7665,8 @@ impl Sidebar {
         render_import_onboarding_banner(
             "acp",
             "Looking for threads from external agents?",
-            "Import threads from agents like Claude Agent, Codex, and more, whether started in Zed or another client.",
+            // photon: Photon's name, not Zed's
+            "Import threads from agents like Claude Agent, Codex, and more, whether started in Photon or another client.",
             if verbose_labels {
                 "Import Threads from External Agents"
             } else {

@@ -20,9 +20,11 @@ use workspace::{
 };
 
 use crate::{
-    ChecksState, GhError, GhRunner, Inbox, InboxGroup, PrKey, PrSummary, ReviewDb, SinceReview,
-    Tracked, auth_status_request,
-    checkout::{ensure_safe_segment, force_remove_worktree, review_root, worktree_path},
+    ChecksState, GhError, GhRunner, Inbox, InboxGroup, PrKey, PrSummary, RepoId, ReviewDb,
+    SinceReview, Tracked, auth_status_request,
+    checkout::{
+        ensure_safe_segment, force_remove_worktree, parse_remote_url, review_root, worktree_path,
+    },
     cleanup_checkout, gh_runner, inbox_request, open_review, parse_auth_status, parse_inbox,
     run_locally,
 };
@@ -40,6 +42,7 @@ actions!(
 const INBOX_PANEL_NAME: &str = "PhotonReviewInbox";
 const DEFAULT_HOST: &str = "github.com";
 const EMPTY_INBOX_TEXT: &str = "No open pull requests.";
+const NO_REPOSITORY_TEXT: &str = "Open a folder with a GitHub repository to see its pull requests.";
 
 pub(crate) fn init_inbox(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -75,6 +78,8 @@ pub struct HostInbox {
 pub enum InboxState {
     Idle,
     Loading,
+    /// The window has no repository with a GitHub remote, so there is nothing to ask GitHub.
+    NoRepository,
     Loaded(Vec<HostInbox>),
     Failed(GhError),
 }
@@ -213,11 +218,15 @@ impl InboxPanel {
             self.state = InboxState::Loading;
         }
         self.load_task = cx.spawn(async move |this, cx| {
+            // Read here, not before spawning: refresh usually runs inside the workspace's own update.
+            let Ok(repos) = this.update(cx, |this, cx| window_repos(&this.workspace, cx)) else {
+                return;
+            };
             let (state, closed, with_drafts) = cx
                 .background_spawn({
                     let database = database.clone();
                     async move {
-                        let (state, closed) = load_inbox(runner, database.clone()).await;
+                        let (state, closed) = load_inbox(runner, database.clone(), repos).await;
                         let with_drafts = prs_with_drafts(&state, &database);
                         (state, closed, with_drafts)
                     }
@@ -236,6 +245,44 @@ impl InboxPanel {
         });
         cx.notify();
     }
+}
+
+/// GitHub repositories behind the `origin` and `upstream` remotes of the window's projects.
+fn window_repos(workspace: &WeakEntity<Workspace>, cx: &App) -> Vec<RepoId> {
+    let Some(workspace) = workspace.upgrade() else {
+        return Vec::new();
+    };
+    // Names go into a search query; anything outside GitHub's name characters is dropped.
+    let searchable = |part: &str| {
+        part.chars()
+            .all(|char| char.is_ascii_alphanumeric() || matches!(char, '-' | '_' | '.'))
+    };
+    let mut repos = Vec::new();
+    for repository in workspace
+        .read(cx)
+        .project()
+        .read(cx)
+        .repositories(cx)
+        .values()
+    {
+        let repository = repository.read(cx);
+        for url in [
+            &repository.remote_origin_url,
+            &repository.remote_upstream_url,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(repo) = parse_remote_url(url)
+                && searchable(&repo.owner)
+                && searchable(&repo.repo)
+                && !repos.contains(&repo)
+            {
+                repos.push(repo);
+            }
+        }
+    }
+    repos
 }
 
 fn failed(error: anyhow::Error) -> GhError {
@@ -263,7 +310,14 @@ fn prs_with_drafts(state: &InboxState, database: &ReviewDb) -> HashSet<PrKey> {
         .collect()
 }
 
-async fn load_inbox(runner: Arc<dyn GhRunner>, database: ReviewDb) -> (InboxState, Vec<Tracked>) {
+async fn load_inbox(
+    runner: Arc<dyn GhRunner>,
+    database: ReviewDb,
+    repos: Vec<RepoId>,
+) -> (InboxState, Vec<Tracked>) {
+    if repos.is_empty() {
+        return (InboxState::NoRepository, Vec::new());
+    }
     let hosts = match runner.run(auth_status_request()).await {
         Ok(output) => match parse_auth_status(&output) {
             Ok(hosts) => hosts,
@@ -278,9 +332,27 @@ async fn load_inbox(runner: Arc<dyn GhRunner>, database: ReviewDb) -> (InboxStat
         );
     }
 
+    let hosts: Vec<_> = hosts
+        .into_iter()
+        .filter(|auth| {
+            repos
+                .iter()
+                .any(|repo| repo.host == auth.host.to_lowercase())
+        })
+        .collect();
+    if hosts.is_empty() {
+        let host = repos.first().map(|repo| repo.host.clone());
+        return (InboxState::Failed(GhError::LoggedOut { host }), Vec::new());
+    }
+
     let tracked = database.tracked().log_err().unwrap_or_default();
     let results = join_all(hosts.into_iter().map(|auth| {
         let runner = runner.clone();
+        let host_repos: Vec<String> = repos
+            .iter()
+            .filter(|repo| repo.host == auth.host.to_lowercase())
+            .map(|repo| format!("{}/{}", repo.owner, repo.repo))
+            .collect();
         let node_ids: Vec<String> = tracked
             .iter()
             .filter(|tracked| tracked.key.host == auth.host)
@@ -292,7 +364,7 @@ async fn load_inbox(runner: Arc<dyn GhRunner>, database: ReviewDb) -> (InboxStat
                     host: Some(auth.host.clone()),
                 }),
                 Some(login) => match runner
-                    .run(inbox_request(&auth.host, &login, &node_ids))
+                    .run(inbox_request(&auth.host, &login, &host_repos, &node_ids))
                     .await
                 {
                     Ok(output) => parse_inbox(&auth.host, &output, &node_ids).map_err(failed),
@@ -539,6 +611,9 @@ impl Render for InboxPanel {
                 )
             }
             InboxState::Loading => body = body.child(Self::render_note("Loading…", Color::Muted)),
+            InboxState::NoRepository => {
+                body = body.child(Self::render_note(NO_REPOSITORY_TEXT, Color::Muted))
+            }
             InboxState::Failed(error) => {
                 body = body.child(Self::render_note(error.to_string(), Color::Error))
             }
@@ -651,11 +726,28 @@ mod tests {
         );
     }
 
+    const ORIGIN: (&str, &str) = ("origin", "git@github.com:acme/web.git");
+
+    /// Opens a window on a repository with these remotes; no remotes means no repository.
     async fn add_panel(
         cx: &mut TestAppContext,
+        remotes: &[(&str, &str)],
     ) -> (Entity<Workspace>, Entity<InboxPanel>, VisualTestContext) {
         let fs = FakeFs::new(cx.executor());
-        let project = Project::test(fs, [], cx).await;
+        let project = if remotes.is_empty() {
+            Project::test(fs, [], cx).await
+        } else {
+            fs.insert_tree(Path::new("/project"), serde_json::json!({ ".git": {} }))
+                .await;
+            for (name, url) in remotes {
+                fs.set_remote_for_repo(Path::new("/project/.git"), *name, *url);
+            }
+            let project = Project::test(fs, [Path::new("/project")], cx).await;
+            project
+                .update(cx, |project, cx| project.git_scans_complete(cx))
+                .await;
+            project
+        };
         let window =
             cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
         let workspace = window
@@ -735,7 +827,7 @@ mod tests {
     async fn panel_creation_runs_no_gh(cx: &mut TestAppContext) {
         let fake = FakeGh::new();
         init_test(cx, &fake);
-        let (_workspace, panel, cx) = add_panel(cx).await;
+        let (_workspace, panel, cx) = add_panel(cx, &[ORIGIN]).await;
         cx.run_until_parked();
         assert!(fake.requests().is_empty());
         panel.read_with(&cx, |panel, _| {
@@ -747,7 +839,7 @@ mod tests {
     async fn startup_makes_no_gh_or_git_network_calls(cx: &mut TestAppContext) {
         let fake = FakeGh::new();
         init_test(cx, &fake);
-        let (_workspace, panel, mut cx) = add_panel(cx).await;
+        let (_workspace, panel, mut cx) = add_panel(cx, &[ORIGIN]).await;
         // Dock restoration activates the panel at startup without a user action.
         panel.update_in(&mut cx, |panel, window, cx| {
             panel.set_active(true, window, cx)
@@ -774,7 +866,7 @@ mod tests {
         init_test(cx, &fake);
         respond_auth(&fake, AUTH_ONE_HOST);
         respond_inbox(&fake, "github.com");
-        let (_workspace, panel, mut cx) = add_panel(cx).await;
+        let (_workspace, panel, mut cx) = add_panel(cx, &[ORIGIN]).await;
         set_active(&panel, true, &mut cx);
         assert_eq!(request_summary(&fake), ["auth", "api github.com"]);
         panel.update_in(&mut cx, |panel, window, _| {
@@ -791,6 +883,39 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn inbox_searches_only_this_windows_repos(cx: &mut TestAppContext) {
+        let fake = FakeGh::new();
+        init_test(cx, &fake);
+        respond_auth(&fake, AUTH_ONE_HOST);
+        respond_inbox(&fake, "github.com");
+        let (_workspace, panel, mut cx) = add_panel(
+            cx,
+            &[ORIGIN, ("upstream", "https://github.com/Upstream/Web.git")],
+        )
+        .await;
+        set_active(&panel, true, &mut cx);
+        let requests = fake.requests();
+        let query = requests[1].stdin.as_deref().expect("graphql body");
+        assert!(
+            query.contains("archived:false repo:acme/web repo:upstream/web review-requested:@me"),
+            "{query}"
+        );
+    }
+
+    #[gpui::test]
+    async fn window_without_a_github_repo_runs_no_gh(cx: &mut TestAppContext) {
+        let fake = FakeGh::new();
+        init_test(cx, &fake);
+        let (_workspace, panel, mut cx) = add_panel(cx, &[]).await;
+        set_active(&panel, true, &mut cx);
+        assert!(fake.requests().is_empty());
+        panel.read_with(&cx, |panel, _| {
+            assert_eq!(panel.state(), &InboxState::NoRepository)
+        });
+        render(&panel, &mut cx);
+    }
+
+    #[gpui::test]
     async fn refresh_on_open_and_manual_only(cx: &mut TestAppContext) {
         let fake = FakeGh::new();
         init_test(cx, &fake);
@@ -798,7 +923,7 @@ mod tests {
             respond_auth(&fake, AUTH_ONE_HOST);
             respond_inbox(&fake, "github.com");
         }
-        let (workspace, panel, mut cx) = add_panel(cx).await;
+        let (workspace, panel, mut cx) = add_panel(cx, &[ORIGIN]).await;
         set_active(&panel, true, &mut cx);
         assert_eq!(fake.requests().len(), 2);
 
@@ -823,7 +948,7 @@ mod tests {
         let fake = FakeGh::new();
         init_test(cx, &fake);
         fake.respond(|_| true, Err(GhError::NotInstalled));
-        let (_workspace, panel, mut cx) = add_panel(cx).await;
+        let (_workspace, panel, mut cx) = add_panel(cx, &[ORIGIN]).await;
         set_active(&panel, true, &mut cx);
         panel.read_with(&cx, |panel, _| {
             let InboxState::Failed(error) = panel.state() else {
@@ -840,7 +965,7 @@ mod tests {
         let fake = FakeGh::new();
         init_test(cx, &fake);
         respond_auth(&fake, r#"{"hosts":{}}"#);
-        let (_workspace, panel, mut cx) = add_panel(cx).await;
+        let (_workspace, panel, mut cx) = add_panel(cx, &[ORIGIN]).await;
         set_active(&panel, true, &mut cx);
         panel.read_with(&cx, |panel, _| {
             assert!(matches!(
@@ -856,7 +981,8 @@ mod tests {
         init_test(cx, &fake);
         respond_auth(&fake, AUTH_TWO_HOSTS);
         respond_inbox(&fake, "github.com");
-        let (_workspace, panel, mut cx) = add_panel(cx).await;
+        let (_workspace, panel, mut cx) =
+            add_panel(cx, &[ORIGIN, ("upstream", "https://ghe.corp/acme/app.git")]).await;
         set_active(&panel, true, &mut cx);
         assert_eq!(request_summary(&fake), ["auth", "api github.com"]);
         panel.update_in(&mut cx, |panel, _, _| {
@@ -911,7 +1037,7 @@ mod tests {
         .expect("track");
         assert_eq!(db.tracked().expect("tracked").len(), 1);
 
-        let (_workspace, panel, mut cx) = add_panel(cx).await;
+        let (_workspace, panel, mut cx) = add_panel(cx, &[ORIGIN]).await;
         set_active(&panel, true, &mut cx);
         for _ in 0..50 {
             if db.tracked().expect("tracked").is_empty() {
@@ -971,7 +1097,7 @@ mod tests {
             .await
             .expect("save");
 
-        let (_workspace, panel, mut cx) = add_panel(cx).await;
+        let (_workspace, panel, mut cx) = add_panel(cx, &[ORIGIN]).await;
         set_active(&panel, true, &mut cx);
         panel.read_with(&cx, |panel, _| {
             let InboxState::Loaded(hosts) = panel.state() else {
@@ -1000,7 +1126,7 @@ mod tests {
         init_test(cx, &fake);
         respond_auth(&fake, AUTH_ONE_HOST);
         respond_inbox(&fake, "github.com");
-        let (workspace, panel, mut cx) = add_panel(cx).await;
+        let (workspace, panel, mut cx) = add_panel(cx, &[ORIGIN]).await;
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace
                 .right_dock()
@@ -1026,7 +1152,7 @@ mod tests {
         init_test(cx, &fake);
         respond_auth(&fake, AUTH_ONE_HOST);
         respond_inbox(&fake, "github.com");
-        let (workspace, _panel, mut cx) = add_panel(cx).await;
+        let (workspace, _panel, mut cx) = add_panel(cx, &[ORIGIN]).await;
         workspace.update_in(&mut cx, |_, window, cx| {
             window.dispatch_action(ToggleInbox.boxed_clone(), cx)
         });
@@ -1042,7 +1168,7 @@ mod tests {
             respond_auth(&fake, AUTH_ONE_HOST);
             respond_inbox(&fake, "github.com");
         }
-        let (_workspace, panel, mut cx) = add_panel(cx).await;
+        let (_workspace, panel, mut cx) = add_panel(cx, &[ORIGIN]).await;
         set_active(&panel, true, &mut cx);
         panel.update(&mut cx, |panel, cx| {
             panel.refresh(cx);
@@ -1283,7 +1409,7 @@ mod tests {
         init_test(cx, &fake);
         respond_auth(&fake, AUTH_ONE_HOST);
         respond_inbox(&fake, "github.com");
-        let (_workspace, panel, mut cx) = add_panel(cx).await;
+        let (_workspace, panel, mut cx) = add_panel(cx, &[ORIGIN]).await;
         set_active(&panel, true, &mut cx);
         let first_row = |panel: &InboxPanel| {
             let InboxState::Loaded(hosts) = panel.state() else {

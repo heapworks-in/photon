@@ -406,10 +406,21 @@ const PR_SUMMARY_FIELDS: &str = "id number title url author { login } headRefOid
     reviews(last: 1, author: $login, states: [APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]) \
     { nodes { commit { oid } } }";
 
-pub fn inbox_request(host: &str, login: &str, tracked_node_ids: &[String]) -> GhRequest {
+/// `repos` are `owner/repo` names; the search covers only those repositories.
+pub fn inbox_request(
+    host: &str,
+    login: &str,
+    repos: &[String],
+    tracked_node_ids: &[String],
+) -> GhRequest {
+    let repos = repos
+        .iter()
+        .map(|repo| format!("repo:{repo}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     let search = |alias: &str, qualifier: &str| {
         format!(
-            "{alias}: search(query: \"is:pr is:open archived:false {qualifier}\", type: ISSUE, first: 50) \
+            "{alias}: search(query: \"is:pr is:open archived:false {repos} {qualifier}\", type: ISSUE, first: 50) \
              {{ nodes {{ ... on PullRequest {{ {PR_SUMMARY_FIELDS} \
              reviewThreads(first: 100) {{ nodes {{ isResolved }} }} }} }} }}"
         )
@@ -948,7 +959,8 @@ mod tests {
     #[test]
     fn inbox_request_shape() {
         let tracked = vec!["PR_x".to_string()];
-        let request = inbox_request("ghe.corp", "alice", &tracked);
+        let repos = vec!["acme/app".to_string(), "acme/web".to_string()];
+        let request = inbox_request("ghe.corp", "alice", &repos, &tracked);
         let expected = graphql_request("ghe.corp", "", serde_json::json!({}));
         assert_eq!(request.args, expected.args);
         let body: serde_json::Value =
@@ -962,7 +974,9 @@ mod tests {
         assert!(query.contains("lastCommit: commits(last: 1)"));
         for search in ["review-requested:@me", "author:@me", "mentions:@me"] {
             assert!(
-                query.contains(&format!("is:pr is:open archived:false {search}")),
+                query.contains(&format!(
+                    "is:pr is:open archived:false repo:acme/app repo:acme/web {search}"
+                )),
                 "{search}"
             );
         }

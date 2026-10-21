@@ -10,14 +10,15 @@ use project::{
 use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, IntoElement, ParentElement as _, Pixels, Render,
-    SharedString, Styled as _, Subscription, Task, TextStyleRefinement, WeakEntity, Window,
-    actions, div, prelude::*, px, relative, rgb,
+    App, Context, Entity, FocusHandle, Focusable, Hsla, IntoElement, ParentElement as _, Pixels,
+    Render, SharedString, Styled as _, Subscription, Task, TextStyleRefinement, WeakEntity, Window,
+    actions, div, prelude::*, px, relative,
 };
 use photon_blocks::BlockEvent;
 use settings::{Settings as _, SettingsStore};
 use terminal::{Event, InputTarget, Terminal, terminal_settings::TerminalSettings};
 use theme_settings::ThemeSettings;
+use ui::ActiveTheme as _;
 use ui::{ButtonCommon as _, ButtonLike, ButtonSize, ButtonStyle, PopoverMenu, PopoverMenuHandle};
 use util::ResultExt as _;
 use workspace::Workspace;
@@ -52,8 +53,6 @@ const MAX_LINES: usize = 10;
 /// Chips are chrome, so they keep one size whatever the terminal font size is.
 const CHIP_FONT_SIZE: f32 = 13.;
 const LINE_HEIGHT: f32 = 1.2;
-const BORDER_COLOR: u32 = 0x222222;
-const BACKGROUND_COLOR: u32 = 0x0a0a0a;
 const PADDING_TOP: f32 = 12.;
 const PADDING_BOTTOM: f32 = 16.;
 /// Matches the grid's two-cell text inset, so the input lines up with block text.
@@ -61,9 +60,6 @@ const PADDING_X: f32 = 16.;
 const BORDER_WIDTH: f32 = 1.;
 const CHIPS_HEIGHT: f32 = 20.;
 const CHIPS_GAP: f32 = 14.;
-const CHIP_BORDER_COLOR: u32 = 0x333333;
-const FOLDER_CHIP_COLOR: u32 = 0xA5D5FE;
-const BRANCH_CHIP_COLOR: u32 = 0xB4FA72;
 // Far above the ids the editor hands out for its own predictions.
 const SUGGESTION_INLAY_ID: usize = usize::MAX;
 const SUGGESTION_INLAY: InlayId = InlayId::EditPrediction(SUGGESTION_INLAY_ID);
@@ -101,8 +97,8 @@ pub fn input_slot(
         .mt(-overlap)
         .when_some(input, |this, input| {
             this.border_t_1()
-                .border_color(rgb(BORDER_COLOR))
-                .bg(rgb(BACKGROUND_COLOR))
+                .border_color(cx.theme().colors().border_variant)
+                .bg(cx.theme().colors().terminal_background)
                 .child(div().absolute().left_0().right_0().bottom_0().child(input))
         })
 }
@@ -622,8 +618,8 @@ impl Render for BlockInput {
             .px(px(PADDING_X))
             .pb(px(PADDING_BOTTOM))
             .border_t_1()
-            .border_color(rgb(BORDER_COLOR))
-            .bg(rgb(BACKGROUND_COLOR))
+            .border_color(cx.theme().colors().border_variant)
+            .bg(cx.theme().colors().terminal_background)
             .child(
                 div()
                     .flex()
@@ -636,7 +632,7 @@ impl Render for BlockInput {
                                 .trigger(chip(
                                     "photon-folder-chip",
                                     folder_chip_text(cwd),
-                                    FOLDER_CHIP_COLOR,
+                                    cx.theme().colors().terminal_ansi_blue,
                                     cx,
                                 ))
                                 .with_handle(self.folder_menu.clone())
@@ -656,7 +652,7 @@ impl Render for BlockInput {
                                 .trigger(chip(
                                     "photon-branch-chip",
                                     branch_chip_text(info),
-                                    BRANCH_CHIP_COLOR,
+                                    cx.theme().colors().terminal_ansi_green,
                                     cx,
                                 ))
                                 .with_handle(self.branch_menu.clone())
@@ -692,16 +688,16 @@ impl Render for BlockInput {
     }
 }
 
-fn chip(id: &'static str, text: String, color: u32, cx: &App) -> ButtonLike {
+fn chip(id: &'static str, text: String, color: Hsla, cx: &App) -> ButtonLike {
     let (font_family, _) = terminal_font(cx);
     ButtonLike::new(id)
-        .style(ButtonStyle::OutlinedCustom(rgb(CHIP_BORDER_COLOR).into()))
+        .style(ButtonStyle::OutlinedCustom(cx.theme().colors().border))
         .size(ButtonSize::Compact)
         .child(
             div()
                 .font_family(font_family)
                 .text_size(px(CHIP_FONT_SIZE))
-                .text_color(rgb(color))
+                .text_color(color)
                 .child(text),
         )
 }
