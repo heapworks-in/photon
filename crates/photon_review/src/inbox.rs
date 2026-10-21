@@ -12,7 +12,7 @@ use gpui::{
     Action, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels,
     Render, SharedString, Task, WeakEntity, Window, actions, px,
 };
-use ui::{Tab, Tooltip, prelude::*};
+use ui::{Tab, TintColor, Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::{
     Workspace,
@@ -561,7 +561,7 @@ impl InboxPanel {
             }))
             .children(button_label.map(|label| {
                 Button::new("photon-review-load", label)
-                    .style(ButtonStyle::Filled)
+                    .style(ButtonStyle::Tinted(TintColor::Accent))
                     .on_click(|_, window, cx| {
                         window.dispatch_action(RefreshInbox.boxed_clone(), cx)
                     })
@@ -608,7 +608,7 @@ impl InboxPanel {
                     .gap_1p5()
                     .child(
                         Button::new(SharedString::from(format!("{id}-run")), "Run locally")
-                            .style(ButtonStyle::Subtle)
+                            .style(ButtonStyle::Outlined)
                             .on_click(move |_, window, cx| {
                                 local_workspace
                                     .update(cx, |workspace, cx| {
@@ -623,7 +623,7 @@ impl InboxPanel {
                             SharedString::from(format!("{id}-review")),
                             row.primary_action,
                         )
-                        .style(ButtonStyle::Filled)
+                        .style(ButtonStyle::Tinted(TintColor::Accent))
                         .on_click(move |_, window, cx| {
                             workspace
                                 .update(cx, |workspace, cx| {
