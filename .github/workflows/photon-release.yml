@@ -1,11 +1,9 @@
 # photon: builds Photon.app for a photon-v*-alpha.* tag, publishes it as a GitHub pre-release,
 # and updates the Homebrew cask in heapworks-in/homebrew-photon.
+# Releases normally run locally with script/photon-release; this is the manual backup.
 name: Photon Release
 
 on:
-  push:
-    # Every Photon release is an alpha for now.
-    tags: ["photon-v*-alpha.*"]
   workflow_dispatch:
     inputs:
       tag:

@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# photon: builds and publishes a Photon alpha from this Mac, then updates the Homebrew tap.
+# Usage: script/photon-release 0.1.1-alpha.1
+# Needs: a clean, pushed main; docs/photon/releases/photon-v<version>.md; `gh` logged in with access to heapworks-in.
+
+set -euo pipefail
+
+version="${1:-}"
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]] || { echo "usage: $0 X.Y.Z-alpha.N" >&2; exit 1; }
+
+repo="heapworks-in/photon"
+tap="git@github.com:heapworks-in/homebrew-photon.git"
+tag="photon-v${version}"
+notes="docs/photon/releases/${tag}.md"
+dmg="target/aarch64-apple-darwin/release/Photon-aarch64.dmg"
+
+cd "$(git rev-parse --show-toplevel)"
+[[ -z "$(git status --porcelain)" ]] || { echo "Commit or stash your changes first." >&2; exit 1; }
+[[ "$(git branch --show-current)" == main ]] || { echo "Release from main." >&2; exit 1; }
+git fetch -q origin main
+[[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]] || { echo "Push main first: local and origin/main differ." >&2; exit 1; }
+[[ -f "$notes" ]] || { echo "Write the release notes first: $notes" >&2; exit 1; }
+if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+    echo "$tag already exists on origin." >&2
+    exit 1
+fi
+
+# The build needs the stable channel; put the tracked file back however the script ends.
+trap 'git checkout -q -- crates/zed/RELEASE_CHANNEL' EXIT
+echo stable > crates/zed/RELEASE_CHANNEL
+script/bundle-mac aarch64-apple-darwin
+git checkout -q -- crates/zed/RELEASE_CHANNEL
+
+git tag -a "$tag" -m "Photon ${version}"
+git push -q origin "$tag"
+gh release create "$tag" "$dmg" --repo "$repo" --prerelease --title "Photon ${version}" --notes-file "$notes"
+
+# A backup release run on GitHub also writes the cask; let it finish so it can't overwrite this one.
+while [[ -n "$(gh run list --repo "$repo" --workflow photon-release.yml --status in_progress --json databaseId --jq '.[].databaseId')" ]]; do
+    echo "Waiting for the GitHub release run to finish before updating the tap…"
+    sleep 60
+done
+
+sha=$(shasum -a 256 "$dmg" | cut -d' ' -f1)
+tap_dir=$(mktemp -d)
+git clone -q "$tap" "$tap_dir"
+mkdir -p "$tap_dir/Casks"
+sed -e "s/@VERSION@/$version/" -e "s/@SHA256@/$sha/" script/photon-cask.rb.in > "$tap_dir/Casks/photon.rb"
+git -C "$tap_dir" add Casks/photon.rb
+git -C "$tap_dir" commit -q -m "photon $version"
+git -C "$tap_dir" push -q
+rm -rf "$tap_dir"
+
+echo "Released: https://github.com/${repo}/releases/tag/${tag}"
+echo "Install:  brew tap heapworks-in/photon && brew install photon"
