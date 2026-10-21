@@ -746,7 +746,8 @@ impl TerminalPanel {
             .active_item()
             .is_some_and(|item| item.downcast::<TerminalView>().is_some());
 
-        if center_pane_has_focus && active_center_item_is_terminal {
+        // photon: terminals always open in the center, never in the bottom panel
+        if true || center_pane_has_focus && active_center_item_is_terminal {
             let working_directory = default_working_directory(workspace, cx);
             let local = action.local;
             Self::add_center_terminal(workspace, window, cx, move |project, cx| {
@@ -2942,6 +2943,7 @@ mod tests {
     }
 
     #[gpui::test]
+    #[ignore = "photon: new terminals always open in the center"]
     async fn test_new_terminal_opens_in_panel_by_default(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         init_test(cx);
@@ -3093,6 +3095,7 @@ mod tests {
     }
 
     #[gpui::test]
+    #[ignore = "photon: new terminals always open in the center"]
     async fn test_new_terminal_opens_in_panel_when_panel_focused(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         init_test(cx);
@@ -3260,6 +3263,7 @@ mod tests {
     }
 
     #[gpui::test]
+    #[ignore = "photon: new terminals always open in the center"]
     async fn test_new_terminal_opens_in_panel_when_panel_focused_and_center_has_terminal(
         cx: &mut TestAppContext,
     ) {

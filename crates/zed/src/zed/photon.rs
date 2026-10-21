@@ -4,9 +4,12 @@ use gpui::{App, Context, Focusable as _, Window};
 use terminal_view::TerminalView;
 use ui::{IconButton, IconName, IconSize, Tooltip, prelude::*};
 use util::ResultExt as _;
-use workspace::{HideStatusItem, ItemHandle, NewCenterTerminal, StatusItemView, Workspace};
+use workspace::{
+    HideStatusItem, ItemHandle, NewCenterTerminal, NewTerminal, StatusItemView, Workspace,
+};
 
-/// Hides actions for services Photon keeps switched off (Zed account, collaboration, auto-update).
+/// Hides actions for services Photon keeps switched off (Zed account, collaboration, auto-update)
+/// and for the bottom terminal panel, which Photon doesn't use.
 pub fn hide_offline_actions(cx: &mut App) {
     CommandPaletteFilter::update_global(cx, |filter, _| {
         for namespace in [
@@ -15,10 +18,16 @@ pub fn hide_offline_actions(cx: &mut App) {
             "collab_panel",
             "channel_modal",
             "auto_update",
+            // Terminals always open in the center, so the bottom terminal panel stays out of the way.
+            "terminal_panel",
         ] {
             filter.hide_namespace(namespace);
         }
-        filter.hide_action_types(&[std::any::TypeId::of::<zed_actions::OpenAccountSettings>()]);
+        filter.hide_action_types(&[
+            std::any::TypeId::of::<zed_actions::OpenAccountSettings>(),
+            // "New Terminal" already opens in the center.
+            std::any::TypeId::of::<NewCenterTerminal>(),
+        ]);
     });
 }
 
@@ -153,10 +162,8 @@ impl gpui::Render for NewTerminalButton {
         IconButton::new("photon-new-terminal", IconName::Terminal)
             .icon_size(IconSize::Small)
             .aria_label("New Terminal")
-            .tooltip(Tooltip::text("New Terminal"))
-            .on_click(|_, window, cx| {
-                window.dispatch_action(Box::new(center_terminal_action()), cx)
-            })
+            .tooltip(|_, cx| Tooltip::for_action("New Terminal", &NewTerminal::default(), cx))
+            .on_click(|_, window, cx| window.dispatch_action(Box::new(NewTerminal::default()), cx))
     }
 }
 
@@ -205,7 +212,7 @@ pub fn about_icon_click_note(modifiers: &gpui::Modifiers) -> Option<&'static str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui::TestAppContext;
 
     #[gpui::test]
     fn offline_actions_hidden(cx: &mut TestAppContext) {
@@ -216,7 +223,8 @@ mod tests {
             assert!(filter.is_hidden(&client::SignIn));
             assert!(filter.is_hidden(&auto_update::Check));
             assert!(filter.is_hidden(&zed_actions::OpenAccountSettings));
-            assert!(!filter.is_hidden(&workspace::NewCenterTerminal::default()));
+            assert!(filter.is_hidden(&workspace::NewCenterTerminal::default()));
+            assert!(!filter.is_hidden(&workspace::NewTerminal::default()));
         });
     }
 
@@ -462,6 +470,45 @@ mod tests {
             workspace.items_of_type::<TerminalView>(cx).count()
         });
         assert_eq!(terminals, 1);
+    }
+
+    #[gpui::test]
+    async fn new_terminal_opens_in_the_center(cx: &mut TestAppContext) {
+        // Opening a terminal starts a real shell process.
+        cx.executor().allow_parking();
+        use project::Project;
+        use serde_json::json;
+        use util::path;
+        use workspace::{MultiWorkspace, WorkspaceHandle as _};
+
+        let app_state = super::super::tests::init_test(cx);
+        cx.update(terminal_view::init);
+        app_state
+            .fs
+            .as_fake()
+            .insert_tree(path!("/root"), json!({ "notes.txt": "hello" }))
+            .await;
+        let project = Project::test(app_state.fs.clone(), [path!("/root").as_ref()], cx).await;
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .unwrap();
+        let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        let file = cx.read(|cx| workspace.file_project_paths(cx))[0].clone();
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.open_path(file, None, true, window, cx)
+            })
+            .await
+            .unwrap();
+
+        cx.dispatch_action(NewTerminal::default());
+        cx.run_until_parked();
+
+        let center_terminals = workspace.read_with(cx, |workspace, cx| {
+            workspace.active_pane().read(cx).items_of_type::<TerminalView>().count()
+        });
+        assert_eq!(center_terminals, 1);
     }
 
     #[test]
