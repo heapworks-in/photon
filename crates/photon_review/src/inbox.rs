@@ -44,7 +44,8 @@ const DEFAULT_HOST: &str = "github.com";
 const EMPTY_INBOX_TEXT: &str = "No open pull requests";
 const EMPTY_INBOX_DETAIL: &str = "Pull requests that need your review, and your own, show up here.";
 const NO_REPOSITORY_TEXT: &str = "No GitHub repository";
-const NO_REPOSITORY_DETAIL: &str = "Open a folder with a GitHub repository to see its pull requests.";
+const NO_REPOSITORY_DETAIL: &str =
+    "Open a folder with a GitHub repository to see its pull requests.";
 
 pub(crate) fn init_inbox(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -530,11 +531,11 @@ impl InboxPanel {
     }
 
     fn render_section_label(text: impl Into<SharedString>) -> impl IntoElement {
-        div().px_2().pt_3().pb_1().child(
-            Label::new(text)
-                .color(Color::Muted)
-                .size(LabelSize::Small),
-        )
+        div()
+            .px_2()
+            .pt_3()
+            .pb_1()
+            .child(Label::new(text).color(Color::Muted).size(LabelSize::Small))
     }
 
     fn render_empty_state(
@@ -553,11 +554,9 @@ impl InboxPanel {
             .child(Icon::new(icon).size(IconSize::Medium).color(Color::Muted))
             .child(Label::new(title))
             .children(detail.map(|(detail, color)| {
-                div().text_center().child(
-                    Label::new(detail)
-                        .color(color)
-                        .size(LabelSize::Small),
-                )
+                div()
+                    .text_center()
+                    .child(Label::new(detail).color(color).size(LabelSize::Small))
             }))
             .children(button_label.map(|label| {
                 Button::new("photon-review-load", label)
@@ -697,8 +696,10 @@ impl Render for InboxPanel {
                                     continue;
                                 }
                                 any_rows = true;
-                                body = body
-                                    .child(Self::render_section_label(section_label(*group, rows.len())));
+                                body = body.child(Self::render_section_label(section_label(
+                                    *group,
+                                    rows.len(),
+                                )));
                                 for summary in rows {
                                     body = body.child(self.render_row(summary, cx));
                                 }
