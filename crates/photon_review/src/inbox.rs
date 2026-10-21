@@ -12,7 +12,7 @@ use gpui::{
     Action, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels,
     Render, SharedString, Task, WeakEntity, Window, actions, px,
 };
-use ui::{Tooltip, prelude::*};
+use ui::{Tab, Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::{
     Workspace,
@@ -41,8 +41,10 @@ actions!(
 
 const INBOX_PANEL_NAME: &str = "PhotonReviewInbox";
 const DEFAULT_HOST: &str = "github.com";
-const EMPTY_INBOX_TEXT: &str = "No open pull requests.";
-const NO_REPOSITORY_TEXT: &str = "Open a folder with a GitHub repository to see its pull requests.";
+const EMPTY_INBOX_TEXT: &str = "No open pull requests";
+const EMPTY_INBOX_DETAIL: &str = "Pull requests that need your review, and your own, show up here.";
+const NO_REPOSITORY_TEXT: &str = "No GitHub repository";
+const NO_REPOSITORY_DETAIL: &str = "Open a folder with a GitHub repository to see its pull requests.";
 
 pub(crate) fn init_inbox(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -521,7 +523,49 @@ impl Panel for InboxPanel {
 
 impl InboxPanel {
     fn render_note(text: impl Into<SharedString>, color: Color) -> impl IntoElement {
-        Label::new(text).color(color).size(LabelSize::Small)
+        div()
+            .px_2()
+            .py_1()
+            .child(Label::new(text).color(color).size(LabelSize::Small))
+    }
+
+    fn render_section_label(text: impl Into<SharedString>) -> impl IntoElement {
+        div().px_2().pt_3().pb_1().child(
+            Label::new(text)
+                .color(Color::Muted)
+                .size(LabelSize::Small),
+        )
+    }
+
+    fn render_empty_state(
+        icon: IconName,
+        title: impl Into<SharedString>,
+        detail: Option<(SharedString, Color)>,
+        button_label: Option<&'static str>,
+    ) -> impl IntoElement {
+        v_flex()
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .px_6()
+            .py_8()
+            .child(Icon::new(icon).size(IconSize::Medium).color(Color::Muted))
+            .child(Label::new(title))
+            .children(detail.map(|(detail, color)| {
+                div().text_center().child(
+                    Label::new(detail)
+                        .color(color)
+                        .size(LabelSize::Small),
+                )
+            }))
+            .children(button_label.map(|label| {
+                Button::new("photon-review-load", label)
+                    .style(ButtonStyle::Filled)
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(RefreshInbox.boxed_clone(), cx)
+                    })
+            }))
     }
 
     fn row(&self, summary: &PrSummary) -> RowMeta {
@@ -602,27 +646,46 @@ impl Render for InboxPanel {
         let mut host_line_text = None;
         match &self.state {
             InboxState::Idle => {
-                body = body.child(
-                    Button::new("photon-review-load", "Refresh to load")
-                        .style(ButtonStyle::Filled)
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(RefreshInbox.boxed_clone(), cx)
-                        }),
-                )
+                body = body.child(Self::render_empty_state(
+                    IconName::PullRequest,
+                    "See what needs your review",
+                    Some((
+                        "Load the open pull requests for this window's repositories.".into(),
+                        Color::Muted,
+                    )),
+                    Some("Load pull requests"),
+                ))
             }
-            InboxState::Loading => body = body.child(Self::render_note("Loading…", Color::Muted)),
+            InboxState::Loading => {
+                body = body.child(Self::render_empty_state(
+                    IconName::PullRequest,
+                    "Loading pull requests…",
+                    None,
+                    None,
+                ))
+            }
             InboxState::NoRepository => {
-                body = body.child(Self::render_note(NO_REPOSITORY_TEXT, Color::Muted))
+                body = body.child(Self::render_empty_state(
+                    IconName::Github,
+                    NO_REPOSITORY_TEXT,
+                    Some((NO_REPOSITORY_DETAIL.into(), Color::Muted)),
+                    None,
+                ))
             }
             InboxState::Failed(error) => {
-                body = body.child(Self::render_note(error.to_string(), Color::Error))
+                body = body.child(Self::render_empty_state(
+                    IconName::Warning,
+                    "Couldn't load pull requests",
+                    Some((error.to_string().into(), Color::Error)),
+                    Some("Try again"),
+                ))
             }
             InboxState::Loaded(hosts) => {
                 host_line_text = Some(host_line(hosts));
                 let mut any_rows = false;
                 for host in hosts {
                     if hosts.len() > 1 {
-                        body = body.child(Label::new(host.host.clone()));
+                        body = body.child(Self::render_section_label(host.host.clone()));
                     }
                     match &host.result {
                         Err(error) => {
@@ -634,11 +697,8 @@ impl Render for InboxPanel {
                                     continue;
                                 }
                                 any_rows = true;
-                                body = body.child(
-                                    Label::new(section_label(*group, rows.len()))
-                                        .color(Color::Muted)
-                                        .size(LabelSize::Small),
-                                );
+                                body = body
+                                    .child(Self::render_section_label(section_label(*group, rows.len())));
                                 for summary in rows {
                                     body = body.child(self.render_row(summary, cx));
                                 }
@@ -647,7 +707,12 @@ impl Render for InboxPanel {
                     }
                 }
                 if !any_rows && hosts.iter().all(|host| host.result.is_ok()) {
-                    body = body.child(Self::render_note(EMPTY_INBOX_TEXT, Color::Muted));
+                    body = body.child(Self::render_empty_state(
+                        IconName::Check,
+                        EMPTY_INBOX_TEXT,
+                        Some((EMPTY_INBOX_DETAIL.into(), Color::Muted)),
+                        None,
+                    ));
                 }
             }
         }
@@ -658,29 +723,38 @@ impl Render for InboxPanel {
             .bg(cx.theme().colors().panel_background)
             .child(
                 h_flex()
-                    .px_2()
-                    .py_1()
+                    .h(Tab::container_height(cx))
+                    .flex_none()
+                    .pl_2()
+                    .pr_1()
                     .gap_2()
                     .justify_between()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border_variant)
                     .child(Label::new("Pull requests"))
-                    .when(self.refreshing, |header| {
-                        header.child(
-                            Label::new("Refreshing…")
-                                .color(Color::Muted)
-                                .size(LabelSize::Small),
-                        )
-                    })
-                    .children(
-                        host_line_text.map(|text| {
-                            Label::new(text).color(Color::Muted).size(LabelSize::Small)
-                        }),
-                    )
                     .child(
-                        IconButton::new("photon-review-refresh", IconName::RotateCw)
-                            .tooltip(Tooltip::text("Refresh"))
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(RefreshInbox.boxed_clone(), cx)
-                            }),
+                        h_flex()
+                            .gap_1()
+                            .when(self.refreshing, |header| {
+                                header.child(
+                                    Label::new("Refreshing…")
+                                        .color(Color::Muted)
+                                        .size(LabelSize::Small),
+                                )
+                            })
+                            .when(!self.refreshing, |header| {
+                                header.children(host_line_text.map(|text| {
+                                    Label::new(text).color(Color::Muted).size(LabelSize::Small)
+                                }))
+                            })
+                            .child(
+                                IconButton::new("photon-review-refresh", IconName::RotateCw)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text("Refresh"))
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(RefreshInbox.boxed_clone(), cx)
+                                    }),
+                            ),
                     ),
             )
             .child(body)
@@ -1400,7 +1474,7 @@ mod tests {
         );
         assert_eq!(section_label(InboxGroup::Yours, 2), "Yours · 2");
         assert_eq!(section_label(InboxGroup::Mentioned, 0), "Mentioned · 0");
-        assert_eq!(EMPTY_INBOX_TEXT, "No open pull requests.");
+        assert_eq!(EMPTY_INBOX_TEXT, "No open pull requests");
     }
 
     #[gpui::test]
