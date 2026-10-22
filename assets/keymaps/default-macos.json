@@ -722,6 +722,11 @@
       "alt-shift-enter": "toast::RunAction",
       "cmd-shift-s": "workspace::SaveAs",
       "cmd-shift-n": "workspace::NewWindow",
+      // photon: project tabs inside one window
+      "ctrl-shift-]": "photon_tabs::NextTab",
+      "ctrl-shift-[": "photon_tabs::PreviousTab",
+      "cmd-ctrl-t": "photon_tabs::NewTab",
+      "cmd-ctrl-w": "photon_tabs::CloseTab",
       "ctrl-`": "photon::ToggleTerminalEditorFocus", // photon: terminals live in the center
       "cmd-1": ["workspace::ActivatePane", 0],
       "cmd-2": ["workspace::ActivatePane", 1],

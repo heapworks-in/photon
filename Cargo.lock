@@ -22739,6 +22739,7 @@ dependencies = [
  "paths",
  "photon_brand",
  "photon_review",
+ "photon_tabs",
  "photon_terminal",
  "picker",
  "pkg-config",

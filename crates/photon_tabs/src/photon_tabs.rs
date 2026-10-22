@@ -4,6 +4,7 @@ use gpui::{
     App, Context, Entity, EntityId, Hsla, MouseButton, Pixels, ScrollHandle, SharedString,
     Subscription, WeakEntity, Window, actions, canvas,
 };
+use project::Project;
 use settings::Settings;
 use theme_settings::ThemeSettings;
 use ui::{
@@ -12,7 +13,7 @@ use ui::{
 };
 use util::ResultExt as _;
 use workspace::{
-    CloseWindow, ItemSettings, MultiWorkspace, RemovalIntent, Workspace,
+    CloseWindow, ItemSettings, MultiWorkspace, OpenMode, RemovalIntent, Workspace,
     item::{ClosePosition, ShowCloseButton},
 };
 
@@ -22,9 +23,186 @@ actions!(
         /// Opens a new empty project tab in this window.
         NewTab,
         /// Closes the active project tab.
-        CloseTab
+        CloseTab,
+        /// Shows the next project tab.
+        NextTab,
+        /// Shows the previous project tab.
+        PreviousTab,
+        /// Moves the active project tab into its own window.
+        MoveTabToNewWindow,
+        /// Moves the projects of every other window into this one as tabs.
+        MergeAllWindows
     ]
 );
+
+/// Registers the tab actions. `new_tab` sets up each new empty tab, the way new windows are set up.
+pub fn init(new_tab: fn(&mut Workspace, &mut Window, &mut Context<Workspace>), cx: &mut App) {
+    cx.observe_new(move |workspace: &mut Workspace, _, _| {
+        workspace
+            .register_action(move |_, _: &NewTab, window, cx| {
+                with_multi_workspace(window, cx, move |multi_workspace, window, cx| {
+                    open_new_tab(multi_workspace, new_tab, window, cx)
+                })
+            })
+            .register_action(|_, _: &CloseTab, window, cx| {
+                with_multi_workspace(window, cx, |multi_workspace, window, cx| {
+                    let active = multi_workspace.workspace().clone();
+                    close_tab(multi_workspace, active, window, cx)
+                })
+            })
+            .register_action(|_, _: &NextTab, window, cx| {
+                with_multi_workspace(window, cx, |multi_workspace, window, cx| {
+                    activate_relative(multi_workspace, 1, window, cx)
+                })
+            })
+            .register_action(|_, _: &PreviousTab, window, cx| {
+                with_multi_workspace(window, cx, |multi_workspace, window, cx| {
+                    activate_relative(multi_workspace, -1, window, cx)
+                })
+            })
+            .register_action(|_, _: &MoveTabToNewWindow, window, cx| {
+                with_multi_workspace(window, cx, |multi_workspace, window, cx| {
+                    let active = multi_workspace.workspace().clone();
+                    move_tab_to_new_window(multi_workspace, active, window, cx)
+                })
+            })
+            .register_action(move |_, _: &MergeAllWindows, window, cx| {
+                with_multi_workspace(window, cx, move |multi_workspace, window, cx| {
+                    merge_all_windows(multi_workspace, new_tab, window, cx)
+                })
+            });
+    })
+    .detach();
+}
+
+/// Workspace actions run while the workspace is being updated, so the window's
+/// `MultiWorkspace` is updated after the action returns.
+fn with_multi_workspace(
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+    f: impl FnOnce(&mut MultiWorkspace, &mut Window, &mut Context<MultiWorkspace>) + 'static,
+) {
+    let Some(multi_workspace) = window.root::<MultiWorkspace>().flatten() else {
+        return;
+    };
+    window.defer(cx, move |window, cx| {
+        multi_workspace.update(cx, |multi_workspace, cx| f(multi_workspace, window, cx));
+    });
+}
+
+fn activate_relative(
+    multi_workspace: &mut MultiWorkspace,
+    offset: isize,
+    window: &mut Window,
+    cx: &mut Context<MultiWorkspace>,
+) {
+    let workspaces = multi_workspace.workspaces().cloned().collect::<Vec<_>>();
+    let Some(ix) = workspaces
+        .iter()
+        .position(|workspace| workspace == multi_workspace.workspace())
+    else {
+        return;
+    };
+    let next = (ix as isize + offset).rem_euclid(workspaces.len() as isize) as usize;
+    if let Some(workspace) = workspaces.get(next) {
+        multi_workspace.activate(workspace.clone(), None, window, cx);
+    }
+}
+
+fn new_empty_workspace(
+    multi_workspace: &MultiWorkspace,
+    window: &mut Window,
+    cx: &mut Context<MultiWorkspace>,
+) -> Entity<Workspace> {
+    let app_state = multi_workspace.workspace().read(cx).app_state().clone();
+    let project = Project::local(
+        app_state.client.clone(),
+        app_state.node_runtime.clone(),
+        app_state.user_store.clone(),
+        app_state.languages.clone(),
+        app_state.fs.clone(),
+        None,
+        project::LocalProjectFlags::default(),
+        cx,
+    );
+    cx.new(|cx| Workspace::new(None, project, app_state, window, cx))
+}
+
+fn open_new_tab(
+    multi_workspace: &mut MultiWorkspace,
+    new_tab: fn(&mut Workspace, &mut Window, &mut Context<Workspace>),
+    window: &mut Window,
+    cx: &mut Context<MultiWorkspace>,
+) {
+    let workspace = new_empty_workspace(multi_workspace, window, cx);
+    multi_workspace.activate(workspace.clone(), None, window, cx);
+    workspace.update(cx, |workspace, cx| new_tab(workspace, window, cx));
+}
+
+/// Workspaces can't move between windows, so each project is reopened here, in
+/// order, and its old window closed (which asks about unsaved edits as usual).
+fn merge_all_windows(
+    _multi_workspace: &mut MultiWorkspace,
+    new_tab: fn(&mut Workspace, &mut Window, &mut Context<Workspace>),
+    window: &mut Window,
+    cx: &mut Context<MultiWorkspace>,
+) {
+    let this_window = window.window_handle().window_id();
+    let others = cx
+        .windows()
+        .into_iter()
+        .filter(|other| other.window_id() != this_window)
+        .filter_map(|other| other.downcast::<MultiWorkspace>())
+        .collect::<Vec<_>>();
+    let path_lists = others
+        .iter()
+        .filter_map(|other| {
+            other
+                .read_with(cx, |other, cx| {
+                    other
+                        .workspaces()
+                        .map(|workspace| {
+                            workspace.read(cx).project_group_key(cx).path_list().clone()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .log_err()
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    cx.spawn_in(window, async move |this, cx| {
+        for path_list in path_lists {
+            let open = this.update_in(cx, |this, window, cx| {
+                if path_list.is_empty() {
+                    let workspace = new_empty_workspace(this, window, cx);
+                    this.add(workspace.clone(), window, cx);
+                    workspace.update(cx, |workspace, cx| new_tab(workspace, window, cx));
+                    None
+                } else {
+                    Some(this.find_or_create_local_workspace(
+                        path_list,
+                        None,
+                        None,
+                        OpenMode::Add,
+                        None,
+                        window,
+                        cx,
+                    ))
+                }
+            })?;
+            if let Some(open) = open {
+                open.await?;
+            }
+        }
+        for other in others {
+            other.update(cx, |_, window, cx| {
+                window.dispatch_action(Box::new(CloseWindow), cx)
+            })?;
+        }
+        anyhow::Ok(())
+    })
+    .detach_and_log_err(cx);
+}
 
 /// The project tabs of one window, drawn in its title bar.
 pub struct ProjectTabs {
@@ -345,7 +523,7 @@ impl ProjectTabs {
     }
 }
 
-/// Reopens the tab's project in its own window, then closes the tab here.
+/// Reopens the tab's project in its own window and closes it here.
 pub fn move_tab_to_new_window(
     multi_workspace: &mut MultiWorkspace,
     workspace: Entity<Workspace>,
@@ -353,14 +531,14 @@ pub fn move_tab_to_new_window(
     cx: &mut Context<MultiWorkspace>,
 ) {
     let key = workspace.read(cx).project_group_key(cx);
-    let open = multi_workspace.open_project_group_in_new_window(&key, window, cx);
-    cx.spawn_in(window, async move |this, cx| {
-        open.await?;
-        this.update_in(cx, |this, window, cx| {
-            close_tab(this, workspace, window, cx)
-        })
-    })
-    .detach_and_log_err(cx);
+    if key.path_list().is_empty() {
+        window.dispatch_action(Box::new(workspace::NewWindow), cx);
+        close_tab(multi_workspace, workspace, window, cx);
+        return;
+    }
+    multi_workspace
+        .open_project_group_in_new_window(&key, window, cx)
+        .detach_and_log_err(cx);
 }
 
 impl Render for ProjectTabs {
@@ -481,7 +659,6 @@ mod tests {
     use super::*;
     use fs::FakeFs;
     use gpui::{Focusable as _, Modifiers, TestAppContext, VisualTestContext};
-    use project::Project;
     use serde_json::json;
     use settings::SettingsStore;
     use workspace::item::test::TestItem;
@@ -491,7 +668,19 @@ mod tests {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
+            init(count_new_tab, cx);
         });
+    }
+
+    static NEW_TAB_INITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn count_new_tab(_: &mut Workspace, _: &mut Window, _: &mut Context<Workspace>) {
+        NEW_TAB_INITS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn dispatch(action: impl gpui::Action, cx: &mut VisualTestContext) {
+        cx.dispatch_action(action);
+        cx.run_until_parked();
     }
 
     async fn window_with_projects(
@@ -503,7 +692,8 @@ mod tests {
         VisualTestContext,
     ) {
         init_test(cx);
-        let fs = FakeFs::new(cx.executor());
+        let app_state = cx.update(workspace::AppState::test);
+        let fs = app_state.fs.as_fake();
         let mut projects = Vec::new();
         for root in roots {
             if root.is_empty() {
@@ -700,5 +890,89 @@ mod tests {
             workspace.active_item(cx).map(|item| item.item_id())
         });
         assert_eq!(active_item, Some(item.entity_id()));
+    }
+
+    #[gpui::test]
+    async fn next_and_previous_wrap(cx: &mut TestAppContext) {
+        let (multi_workspace, _tabs, mut cx) = window_with_projects(&["/a", "/b", "/c"], cx).await;
+        click_tab("photon-project-tab-0", &mut cx);
+
+        dispatch(PreviousTab, &mut cx);
+        assert_eq!(active_label(&multi_workspace, &mut cx), "c");
+        dispatch(NextTab, &mut cx);
+        dispatch(NextTab, &mut cx);
+        assert_eq!(active_label(&multi_workspace, &mut cx), "b");
+    }
+
+    #[gpui::test]
+    async fn new_tab_adds_empty_project_and_runs_init(cx: &mut TestAppContext) {
+        let (multi_workspace, _tabs, mut cx) = window_with_projects(&["/a", "/b"], cx).await;
+        let inits = NEW_TAB_INITS.load(std::sync::atomic::Ordering::SeqCst);
+
+        dispatch(NewTab, &mut cx);
+        assert_eq!(
+            labels(&multi_workspace, &mut cx),
+            ["a", "b", "empty project"]
+        );
+        assert_eq!(active_label(&multi_workspace, &mut cx), "empty project");
+        assert_eq!(
+            NEW_TAB_INITS.load(std::sync::atomic::Ordering::SeqCst),
+            inits + 1
+        );
+    }
+
+    #[gpui::test]
+    async fn close_tab_action_closes_active_tab(cx: &mut TestAppContext) {
+        let (multi_workspace, _tabs, mut cx) = window_with_projects(&["/a", "/b"], cx).await;
+        dispatch(CloseTab, &mut cx);
+        assert_eq!(labels(&multi_workspace, &mut cx), ["a"]);
+    }
+
+    #[gpui::test]
+    async fn merge_all_windows_collects_projects(cx: &mut TestAppContext) {
+        let (multi_workspace, _tabs, mut cx) = window_with_projects(&["/a"], cx).await;
+        let fs =
+            multi_workspace.read_with(&cx, |mw, cx| mw.workspace().read(cx).app_state().fs.clone());
+        let fs = fs.as_fake();
+        fs.insert_tree("/b", json!({ "file.txt": "" })).await;
+        fs.insert_tree("/c", json!({ "file.txt": "" })).await;
+        let project_b = Project::test(fs.clone(), ["/b".as_ref()], &mut cx).await;
+        let project_c = Project::test(fs.clone(), ["/c".as_ref()], &mut cx).await;
+        let other = cx.add_window(|window, cx| MultiWorkspace::test_new(project_b, window, cx));
+        other
+            .update(&mut cx, |mw, window, cx| {
+                mw.test_add_workspace(project_c, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(cx.windows().len(), 2);
+
+        multi_workspace.update_in(&mut cx, |_, window, _| window.activate_window());
+        dispatch(MergeAllWindows, &mut cx);
+        assert_eq!(cx.windows().len(), 1);
+        assert_eq!(labels(&multi_workspace, &mut cx), ["a", "b", "c"]);
+    }
+
+    #[gpui::test]
+    async fn move_tab_to_new_window_splits(cx: &mut TestAppContext) {
+        let (multi_workspace, _tabs, mut cx) = window_with_projects(&["/a", "/b"], cx).await;
+        dispatch(MoveTabToNewWindow, &mut cx);
+
+        let windows = cx.windows();
+        assert_eq!(windows.len(), 2);
+        assert_eq!(labels(&multi_workspace, &mut cx), ["a"]);
+        let other = windows
+            .into_iter()
+            .filter_map(|window| window.downcast::<MultiWorkspace>())
+            .find(|window| window.entity(&cx).ok() != Some(multi_workspace.clone()))
+            .expect("new window");
+        let other_labels = other
+            .read_with(&cx, |mw, cx| {
+                mw.workspaces()
+                    .map(|workspace| tab_label(workspace.read(cx), cx).to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap();
+        assert_eq!(other_labels, ["b"]);
     }
 }

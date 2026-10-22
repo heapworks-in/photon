@@ -6333,6 +6333,7 @@ mod tests {
                 "outline_panel",
                 "photon",          // photon: terminal/editor focus toggle
                 "photon_review",   // photon: PR inbox actions
+                "photon_tabs",     // photon: project tab actions
                 "photon_terminal", // photon: block terminal actions
                 "pane",
                 "picker",
