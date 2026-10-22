@@ -1912,7 +1912,8 @@ impl Workspace {
                 cx,
             );
             center_pane.set_can_split(Some(Arc::new(|_, _, _, _| true)));
-            center_pane.set_should_display_welcome_page(true);
+            // photon: windows open a terminal, so the welcome page would only flash while it starts
+            center_pane.set_should_display_welcome_page(false);
             center_pane
         });
         cx.subscribe_in(&center_pane, window, Self::handle_pane_event)
