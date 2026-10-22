@@ -4002,6 +4002,105 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn photon_restore_keeps_review_worktree_tabs(cx: &mut TestAppContext) {
+        use session::Session;
+
+        let app_state = init_test(cx);
+        cx.executor().allow_parking();
+        let fs = app_state.fs.as_fake();
+        fs.insert_tree(
+            path!("/repo"),
+            json!({
+                ".git": {
+                    "HEAD": "ref: refs/heads/main",
+                    "worktrees": { "pr-1": { "commondir": "../../", "HEAD": "ref: refs/heads/pr-1" } }
+                },
+                "a.rs": ""
+            }),
+        )
+        .await;
+        fs.insert_tree(
+            path!("/pr-1"),
+            json!({ ".git": "gitdir: /repo/.git/worktrees/pr-1", "a.rs": "" }),
+        )
+        .await;
+        let session_id = cx.read(|cx| app_state.session.read(cx).id().to_owned());
+
+        let workspace::OpenResult { window, .. } = cx
+            .update(|cx| {
+                Workspace::new_local(
+                    vec![path!("/repo").into()],
+                    app_state.clone(),
+                    None,
+                    None,
+                    None,
+                    workspace::OpenMode::Activate,
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        window
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.open_project(
+                    vec![path!("/pr-1").into()],
+                    workspace::OpenMode::Activate,
+                    window,
+                    cx,
+                )
+            })
+            .unwrap()
+            .await
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |multi_workspace, window, cx| {
+                let repo = multi_workspace.workspaces().next().unwrap().clone();
+                multi_workspace.activate(repo, None, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        flush_workspace_serialization(&window, cx).await;
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            app_state.session.update(cx, |app_session, _| {
+                app_session
+                    .replace_session_for_test(Session::test_with_old_session(session_id.clone()));
+            });
+        });
+        let mut async_cx = cx.to_async();
+        crate::restore_or_create_workspace(app_state.clone(), &mut async_cx)
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        let windows: Vec<WindowHandle<MultiWorkspace>> = cx.read(|cx| {
+            cx.windows()
+                .into_iter()
+                .filter_map(|window| window.downcast::<MultiWorkspace>())
+                .collect()
+        });
+        assert_eq!(windows.len(), 1);
+        windows[0]
+            .read_with(cx, |multi_workspace, cx| {
+                let labels = multi_workspace
+                    .workspaces()
+                    .map(|workspace| photon_tabs::tab_label(workspace.read(cx), cx).to_string())
+                    .collect::<Vec<_>>();
+                assert_eq!(labels, ["repo", "pr-1"]);
+                assert_eq!(
+                    photon_tabs::tab_label(multi_workspace.workspace().read(cx), cx),
+                    "repo"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn photon_native_window_tabs_off_by_default(cx: &mut TestAppContext) {
         init_test(cx);
         cx.update(|cx| {

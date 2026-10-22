@@ -123,6 +123,8 @@ pub struct MultiWorkspaceState {
 pub struct SerializedMultiWorkspace {
     pub active_workspace: SessionWorkspace,
     pub state: MultiWorkspaceState,
+    // photon: the window's other projects, reopened as tabs
+    pub other_workspaces: Vec<SessionWorkspace>,
 }
 
 #[derive(Debug, PartialEq, Clone)]

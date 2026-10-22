@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use gpui::{
     App, Context, Entity, EntityId, Hsla, MouseButton, Pixels, ScrollHandle, SharedString,
-    Subscription, WeakEntity, Window, actions, canvas,
+    Subscription, Task, WeakEntity, Window, actions, canvas,
 };
 use project::Project;
 use settings::Settings;
@@ -13,7 +13,7 @@ use ui::{
 };
 use util::ResultExt as _;
 use workspace::{
-    CloseWindow, ItemSettings, MultiWorkspace, OpenMode, RemovalIntent, Workspace,
+    CloseWindow, ItemSettings, MultiWorkspace, OpenMode, PathList, RemovalIntent, Workspace,
     item::{ClosePosition, ShowCloseButton},
 };
 
@@ -140,7 +140,9 @@ fn open_new_tab(
 }
 
 /// Workspaces can't move between windows, so each project is reopened here, in
-/// order, and its old window closed (which asks about unsaved edits as usual).
+/// order, from its own folders (a PR review is a worktree of its repo, not the
+/// repo). A window is closed only once all its projects are here; remote
+/// projects stay in their window.
 fn merge_all_windows(
     _multi_workspace: &mut MultiWorkspace,
     new_tab: fn(&mut Workspace, &mut Window, &mut Context<Workspace>),
@@ -153,51 +155,61 @@ fn merge_all_windows(
         .into_iter()
         .filter(|other| other.window_id() != this_window)
         .filter_map(|other| other.downcast::<MultiWorkspace>())
-        .collect::<Vec<_>>();
-    let path_lists = others
-        .iter()
         .filter_map(|other| {
-            other
+            let projects = other
                 .read_with(cx, |other, cx| {
                     other
                         .workspaces()
                         .map(|workspace| {
-                            workspace.read(cx).project_group_key(cx).path_list().clone()
+                            let workspace = workspace.read(cx);
+                            let is_remote = workspace.project_group_key(cx).host().is_some();
+                            (!is_remote).then(|| PathList::new(&workspace.root_paths(cx)))
                         })
                         .collect::<Vec<_>>()
                 })
-                .log_err()
+                .log_err()?;
+            Some((other, projects))
         })
-        .flatten()
         .collect::<Vec<_>>();
     cx.spawn_in(window, async move |this, cx| {
-        for path_list in path_lists {
-            let open = this.update_in(cx, |this, window, cx| {
-                if path_list.is_empty() {
-                    let workspace = new_empty_workspace(this, window, cx);
-                    this.add(workspace.clone(), window, cx);
-                    workspace.update(cx, |workspace, cx| new_tab(workspace, window, cx));
-                    None
-                } else {
-                    Some(this.find_or_create_local_workspace(
-                        path_list,
-                        None,
-                        None,
-                        OpenMode::Add,
-                        None,
-                        window,
-                        cx,
-                    ))
+        for (other, projects) in others {
+            let mut all_moved = true;
+            for path_list in projects {
+                let Some(path_list) = path_list else {
+                    all_moved = false;
+                    continue;
+                };
+                let open = this.update_in(cx, |this, window, cx| {
+                    if path_list.is_empty() {
+                        let workspace = new_empty_workspace(this, window, cx);
+                        this.add(workspace.clone(), window, cx);
+                        workspace.update(cx, |workspace, cx| new_tab(workspace, window, cx));
+                        None
+                    } else {
+                        Some(this.find_or_create_local_workspace(
+                            path_list,
+                            None,
+                            None,
+                            OpenMode::Add,
+                            None,
+                            window,
+                            cx,
+                        ))
+                    }
+                })?;
+                if let Some(open) = open
+                    && open.await.log_err().is_none()
+                {
+                    all_moved = false;
                 }
-            })?;
-            if let Some(open) = open {
-                open.await?;
             }
-        }
-        for other in others {
-            other.update(cx, |_, window, cx| {
-                window.dispatch_action(Box::new(CloseWindow), cx)
-            })?;
+            if all_moved {
+                other
+                    .update(cx, |_, window, cx| {
+                        window.dispatch_action(Box::new(CloseWindow), cx)
+                    })
+                    .log_err();
+            }
         }
         anyhow::Ok(())
     })
@@ -223,13 +235,42 @@ struct DraggedProjectTab {
     inactive_background_color: Hsla,
 }
 
+/// The folder names, as the window title shows them, so a PR review tab reads as
+/// its checkout rather than the repo it was made from.
 pub fn tab_label(workspace: &Workspace, cx: &App) -> SharedString {
-    let key = workspace.project_group_key(cx);
-    if key.path_list().is_empty() {
+    let names = workspace
+        .root_paths(cx)
+        .iter()
+        .filter_map(|path| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    if names.is_empty() {
         // The same words the window title uses for a project without folders.
         "empty project".into()
     } else {
-        key.display_name(&HashMap::default())
+        names.join(", ").into()
+    }
+}
+
+/// PR reviews and linked worktrees share their repo's project group, so the
+/// group is only forgotten when no remaining tab belongs to it.
+fn removal_intent(
+    multi_workspace: &MultiWorkspace,
+    removing: &[Entity<Workspace>],
+    cx: &App,
+) -> RemovalIntent {
+    let removing_keys = removing
+        .iter()
+        .map(|workspace| workspace.read(cx).project_group_key(cx))
+        .collect::<Vec<_>>();
+    let shared = multi_workspace
+        .workspaces()
+        .filter(|workspace| !removing.contains(workspace))
+        .any(|workspace| removing_keys.contains(&workspace.read(cx).project_group_key(cx)));
+    if shared {
+        RemovalIntent::KeepProject
+    } else {
+        RemovalIntent::CloseProject
     }
 }
 
@@ -241,38 +282,47 @@ pub fn close_tab(
     window: &mut Window,
     cx: &mut Context<MultiWorkspace>,
 ) {
-    let workspaces = multi_workspace.workspaces().cloned().collect::<Vec<_>>();
-    if workspaces.len() <= 1 {
+    if multi_workspace.workspaces().count() <= 1 {
         window.dispatch_action(Box::new(CloseWindow), cx);
         return;
     }
+    remove_tab(multi_workspace, workspace, window, cx).detach_and_log_err(cx);
+}
+
+/// Removes a tab from a window holding at least two. Resolves to whether it
+/// was removed (the user can cancel the save prompt).
+fn remove_tab(
+    multi_workspace: &mut MultiWorkspace,
+    workspace: Entity<Workspace>,
+    window: &mut Window,
+    cx: &mut Context<MultiWorkspace>,
+) -> Task<anyhow::Result<bool>> {
+    let workspaces = multi_workspace.workspaces().cloned().collect::<Vec<_>>();
     let Some(ix) = workspaces.iter().position(|held| held == &workspace) else {
-        return;
+        return Task::ready(Ok(false));
     };
-    let neighbour = (multi_workspace.workspace() == &workspace)
-        .then(|| {
-            workspaces
-                .get(ix + 1)
-                .or_else(|| workspaces.get(ix.wrapping_sub(1)))
-        })
-        .flatten()
-        .cloned();
-    let remove = multi_workspace.remove([workspace], RemovalIntent::CloseProject, window, cx);
+    // Show the neighbour before removing, so `remove` never has to invent a
+    // replacement (it would make a new empty project when the only other
+    // tab is an empty one).
+    let was_active = multi_workspace.workspace() == &workspace;
+    if was_active
+        && let Some(neighbour) = workspaces
+            .get(ix + 1)
+            .or_else(|| ix.checked_sub(1).and_then(|left| workspaces.get(left)))
+    {
+        multi_workspace.activate(neighbour.clone(), None, window, cx);
+    }
+    let intent = removal_intent(multi_workspace, std::slice::from_ref(&workspace), cx);
+    let remove = multi_workspace.remove([workspace.clone()], intent, window, cx);
     cx.spawn_in(window, async move |this, cx| {
-        // `remove` picks its own replacement from the sidebar's project order;
-        // tabs follow their own order instead.
-        if remove.await? {
-            if let Some(neighbour) = neighbour {
-                this.update_in(cx, |this, window, cx| {
-                    if this.workspaces().any(|held| held == &neighbour) {
-                        this.activate(neighbour, None, window, cx);
-                    }
-                })?;
-            }
+        let removed = remove.await?;
+        if !removed && was_active {
+            this.update_in(cx, |this, window, cx| {
+                this.activate(workspace, None, window, cx)
+            })?;
         }
-        anyhow::Ok(())
+        Ok(removed)
     })
-    .detach_and_log_err(cx);
 }
 
 impl ProjectTabs {
@@ -474,8 +524,9 @@ impl ProjectTabs {
                                     .filter(|held| *held != &workspace)
                                     .cloned()
                                     .collect::<Vec<_>>();
+                                let intent = removal_intent(multi_workspace, &others, cx);
                                 multi_workspace
-                                    .remove(others, RemovalIntent::CloseProject, window, cx)
+                                    .remove(others, intent, window, cx)
                                     .detach_and_log_err(cx);
                             })
                             .log_err();
@@ -523,22 +574,47 @@ impl ProjectTabs {
     }
 }
 
-/// Reopens the tab's project in its own window and closes it here.
+/// Closes the tab here, then reopens its folders in a window of their own.
 pub fn move_tab_to_new_window(
     multi_workspace: &mut MultiWorkspace,
     workspace: Entity<Workspace>,
     window: &mut Window,
     cx: &mut Context<MultiWorkspace>,
 ) {
-    let key = workspace.read(cx).project_group_key(cx);
-    if key.path_list().is_empty() {
-        window.dispatch_action(Box::new(workspace::NewWindow), cx);
-        close_tab(multi_workspace, workspace, window, cx);
+    if multi_workspace.workspaces().count() <= 1 {
         return;
     }
-    multi_workspace
-        .open_project_group_in_new_window(&key, window, cx)
-        .detach_and_log_err(cx);
+    let paths = workspace
+        .read(cx)
+        .root_paths(cx)
+        .iter()
+        .map(|path| path.to_path_buf())
+        .collect::<Vec<_>>();
+    let app_state = workspace.read(cx).app_state().clone();
+    let remove = remove_tab(multi_workspace, workspace, window, cx);
+    cx.spawn_in(window, async move |_, cx| {
+        if !remove.await? {
+            return Ok(());
+        }
+        if paths.is_empty() {
+            cx.update(|window, cx| window.dispatch_action(Box::new(workspace::NewWindow), cx))?;
+        } else {
+            cx.update(|_, cx| {
+                workspace::open_paths(
+                    &paths,
+                    app_state,
+                    workspace::OpenOptions {
+                        open_mode: OpenMode::NewWindow,
+                        ..Default::default()
+                    },
+                    cx,
+                )
+            })?
+            .await?;
+        }
+        anyhow::Ok(())
+    })
+    .detach_and_log_err(cx);
 }
 
 impl Render for ProjectTabs {
@@ -974,5 +1050,112 @@ mod tests {
             })
             .unwrap();
         assert_eq!(other_labels, ["b"]);
+    }
+
+    /// A repo tab and a tab on its linked worktree (how PR reviews are checked
+    /// out); both share the repo's project group key.
+    async fn window_with_worktree_tabs(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<MultiWorkspace>,
+        Entity<ProjectTabs>,
+        VisualTestContext,
+    ) {
+        init_test(cx);
+        let app_state = cx.update(workspace::AppState::test);
+        let fs = app_state.fs.as_fake();
+        fs.insert_tree(
+            "/repo",
+            json!({
+                ".git": {
+                    "HEAD": "ref: refs/heads/main",
+                    "worktrees": { "pr-1": { "commondir": "../../", "HEAD": "ref: refs/heads/pr-1" } }
+                },
+                "a.rs": ""
+            }),
+        )
+        .await;
+        fs.insert_tree(
+            "/pr-1",
+            json!({ ".git": "gitdir: /repo/.git/worktrees/pr-1", "a.rs": "" }),
+        )
+        .await;
+        let repo = Project::test(fs.clone(), ["/repo".as_ref()], cx).await;
+        let review = Project::test(fs.clone(), ["/pr-1".as_ref()], cx).await;
+        cx.run_until_parked();
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(repo, window, cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let multi_workspace = window.root(&mut cx).expect("window root");
+        multi_workspace.update_in(&mut cx, |mw, window, cx| {
+            mw.test_add_workspace(review, window, cx);
+        });
+        cx.run_until_parked();
+        let tabs = cx.new(|cx| ProjectTabs::new(multi_workspace.downgrade(), cx));
+        show_tabs(&multi_workspace, &tabs, &mut cx);
+        (multi_workspace, tabs, cx)
+    }
+
+    #[gpui::test]
+    async fn closing_tab_next_to_empty_project_adds_no_tab(cx: &mut TestAppContext) {
+        let (multi_workspace, _tabs, mut cx) = window_with_projects(&["", "/a"], cx).await;
+        close(&multi_workspace, "a", &mut cx);
+        assert_eq!(labels(&multi_workspace, &mut cx), ["empty project"]);
+    }
+
+    #[gpui::test]
+    async fn worktree_tabs_are_labelled_by_their_folder(cx: &mut TestAppContext) {
+        let (multi_workspace, _tabs, mut cx) = window_with_worktree_tabs(cx).await;
+        assert_eq!(labels(&multi_workspace, &mut cx), ["repo", "pr-1"]);
+    }
+
+    #[gpui::test]
+    async fn closing_worktree_tab_keeps_the_repo_project(cx: &mut TestAppContext) {
+        let (multi_workspace, _tabs, mut cx) = window_with_worktree_tabs(cx).await;
+        let repo_key = multi_workspace.read_with(&cx, |mw, cx| {
+            mw.workspaces()
+                .next()
+                .expect("repo tab")
+                .read(cx)
+                .project_group_key(cx)
+        });
+        close(&multi_workspace, "pr-1", &mut cx);
+        assert_eq!(labels(&multi_workspace, &mut cx), ["repo"]);
+        multi_workspace.read_with(&cx, |mw, _| {
+            assert!(mw.project_group_keys().contains(&repo_key));
+        });
+    }
+
+    #[gpui::test]
+    async fn moving_worktree_tab_keeps_both_projects(cx: &mut TestAppContext) {
+        let (multi_workspace, _tabs, mut cx) = window_with_worktree_tabs(cx).await;
+        dispatch(MoveTabToNewWindow, &mut cx);
+
+        assert_eq!(labels(&multi_workspace, &mut cx), ["repo"]);
+        let other = cx
+            .windows()
+            .into_iter()
+            .filter_map(|window| window.downcast::<MultiWorkspace>())
+            .find(|window| window.entity(&cx).ok() != Some(multi_workspace.clone()))
+            .expect("new window");
+        let other_labels = other
+            .read_with(&cx, |mw, cx| {
+                mw.workspaces()
+                    .map(|workspace| tab_label(workspace.read(cx), cx).to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap();
+        assert_eq!(other_labels, ["pr-1"]);
+    }
+
+    #[gpui::test]
+    async fn merge_all_windows_keeps_worktree_tabs(cx: &mut TestAppContext) {
+        let (multi_workspace, _tabs, mut cx) = window_with_worktree_tabs(cx).await;
+        dispatch(MoveTabToNewWindow, &mut cx);
+        assert_eq!(cx.windows().len(), 2);
+
+        multi_workspace.update_in(&mut cx, |_, window, _| window.activate_window());
+        dispatch(MergeAllWindows, &mut cx);
+        assert_eq!(cx.windows().len(), 1);
+        assert_eq!(labels(&multi_workspace, &mut cx), ["repo", "pr-1"]);
     }
 }

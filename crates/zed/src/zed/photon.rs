@@ -214,6 +214,44 @@ mod tests {
     use super::*;
     use gpui::TestAppContext;
 
+    /// `cmd-ctrl-t` and `ctrl-cmd-t` are the same keystroke, and a JSON object
+    /// keeps only one of two equal keys, so a clash silently drops a binding.
+    #[test]
+    fn photon_tab_shortcuts_are_unique_in_their_keymap_block() {
+        fn normalize(keystrokes: &str) -> String {
+            keystrokes
+                .split(' ')
+                .map(|keystroke| {
+                    let mut parts = keystroke.split('-').collect::<Vec<_>>();
+                    let key = parts.pop().unwrap_or_default();
+                    parts.sort_unstable();
+                    format!("{}|{key}", parts.join("-"))
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+        let keymap = include_str!("../../../../assets/keymaps/default-macos.json");
+        for block in keymap.split("\"bindings\"") {
+            if !block.contains("photon_tabs::") {
+                continue;
+            }
+            let block = block.split("\n    }").next().unwrap_or(block);
+            let mut seen = std::collections::HashMap::new();
+            for line in block.lines() {
+                let line = line.trim();
+                let Some(rest) = line.strip_prefix('"') else {
+                    continue;
+                };
+                let Some((keystrokes, _)) = rest.split_once("\":") else {
+                    continue;
+                };
+                if let Some(previous) = seen.insert(normalize(keystrokes), line) {
+                    panic!("{previous} and {line} bind the same keys");
+                }
+            }
+        }
+    }
+
     #[gpui::test]
     fn offline_actions_hidden(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -506,7 +544,11 @@ mod tests {
         cx.run_until_parked();
 
         let center_terminals = workspace.read_with(cx, |workspace, cx| {
-            workspace.active_pane().read(cx).items_of_type::<TerminalView>().count()
+            workspace
+                .active_pane()
+                .read(cx)
+                .items_of_type::<TerminalView>()
+                .count()
         });
         assert_eq!(center_terminals, 1);
     }

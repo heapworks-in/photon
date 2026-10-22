@@ -463,31 +463,25 @@ impl MultiWorkspace {
         });
     }
 
-    // photon: reopen every project of a restored window as a tab, not only the active one.
+    // photon: reopen a restored window's other projects as tabs, then put them in tab order.
     pub fn restore_project_tabs(
         &mut self,
+        path_lists: Vec<PathList>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
-        let keys = self
-            .project_groups
-            .iter()
-            .rev()
-            .map(|group| group.key.clone())
-            .filter(|key| key.host().is_none())
-            .collect::<Vec<_>>();
         cx.spawn_in(window, async move |this, cx| {
-            for key in &keys {
+            for path_list in path_lists {
+                if path_list.is_empty() {
+                    continue;
+                }
                 let open = this.update_in(cx, |this, window, cx| {
-                    if this
-                        .workspace_for_paths(key.path_list(), None, cx)
-                        .is_some()
-                    {
+                    if this.workspace_for_paths(&path_list, None, cx).is_some() {
                         return None;
                     }
                     Some(this.find_or_create_local_workspace(
-                        key.path_list().clone(),
-                        Some(key.clone()),
+                        path_list,
+                        None,
                         None,
                         OpenMode::Add,
                         None,
@@ -500,9 +494,19 @@ impl MultiWorkspace {
                 }
             }
             this.update(cx, |this, cx| {
+                // Tabs run in the reverse of the sidebar's newest-first project order.
+                let tab_keys = this
+                    .project_groups
+                    .iter()
+                    .rev()
+                    .map(|group| group.key.clone())
+                    .collect::<Vec<_>>();
                 this.held.sort_by_key(|held| {
                     let key = held.workspace.read(cx).project_group_key(cx);
-                    keys.iter().position(|restored| restored == &key)
+                    tab_keys
+                        .iter()
+                        .position(|tab_key| tab_key == &key)
+                        .unwrap_or(usize::MAX)
                 });
                 cx.notify();
             })

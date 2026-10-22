@@ -348,7 +348,7 @@ pub fn read_serialized_multi_workspaces(
 
     window_groups
         .into_iter()
-        .filter_map(|group| {
+        .filter_map(|mut group| {
             let window_id = group.first().and_then(|sw| sw.window_id);
             let state = window_id
                 .map(|wid| read_multi_workspace_state(wid, cx))
@@ -364,10 +364,12 @@ pub fn read_serialized_multi_workspaces(
                 // fall back to the first entry.
                 .or_else(|| group.iter().position(|ws| !ws.paths.is_empty()))
                 .or(Some(0))
-                .and_then(|index| group.into_iter().nth(index))?;
+                .filter(|index| *index < group.len())
+                .map(|index| group.remove(index))?;
             Some(model::SerializedMultiWorkspace {
                 active_workspace,
                 state,
+                other_workspaces: group, // photon: reopened as tabs
             })
         })
         .collect()

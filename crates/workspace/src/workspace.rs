@@ -10379,6 +10379,7 @@ pub async fn restore_multiworkspace(
     let SerializedMultiWorkspace {
         active_workspace,
         state,
+        other_workspaces,
     } = multi_workspace;
 
     let workspace_result = if active_workspace.paths.is_empty() {
@@ -10449,6 +10450,18 @@ pub async fn restore_multiworkspace(
 
     apply_restored_multiworkspace_state(window_handle, &state, app_state.fs.clone(), cx).await;
 
+    // photon: reopen every local project of the window as a tab, not only the active one
+    let other_paths = other_workspaces
+        .into_iter()
+        .filter(|workspace| matches!(workspace.location, SerializedWorkspaceLocation::Local))
+        .map(|workspace| workspace.paths)
+        .collect::<Vec<_>>();
+    if let Ok(restore) = window_handle.update(cx, |multi_workspace, window, cx| {
+        multi_workspace.restore_project_tabs(other_paths, window, cx)
+    }) {
+        restore.await.log_err();
+    }
+
     window_handle
         .update(cx, |_, window, _cx| {
             window.activate_window();
@@ -10507,13 +10520,6 @@ pub async fn apply_restored_multiworkspace_state(
                 multi_workspace.restore_project_groups(resolved_groups, cx);
             })
             .ok();
-
-        // photon: reopen every project tab, not only the active one
-        if let Ok(restore) = window_handle.update(cx, |multi_workspace, window, cx| {
-            multi_workspace.restore_project_tabs(window, cx)
-        }) {
-            restore.await.log_err();
-        }
     }
 
     if *sidebar_open {
