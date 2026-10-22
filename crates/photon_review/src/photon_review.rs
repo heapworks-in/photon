@@ -26,9 +26,15 @@ pub use run_locally::*;
 pub use since_review::*;
 pub use store::*;
 
-use gpui::App;
+use gpui::{App, ElementId, SharedString};
+use ui::{Button, ButtonCommon, ButtonSize};
 
 pub fn init(cx: &mut App) {
     inbox::init_inbox(cx);
     review::refuse_parent_trust(checkout::review_root(), cx);
+}
+
+/// Every text button in the review UI comes from here, so they all get the same height and padding.
+pub(crate) fn button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Button {
+    Button::new(id, label).size(ButtonSize::Medium)
 }

@@ -559,7 +559,7 @@ impl InboxPanel {
                     .child(Label::new(detail).color(color).size(LabelSize::Small))
             }))
             .children(button_label.map(|label| {
-                Button::new("photon-review-load", label)
+                crate::button("photon-review-load", label)
                     .style(ButtonStyle::Tinted(TintColor::Accent))
                     .on_click(|_, window, cx| {
                         window.dispatch_action(RefreshInbox.boxed_clone(), cx)
@@ -606,7 +606,7 @@ impl InboxPanel {
                 h_flex()
                     .gap_1p5()
                     .child(
-                        Button::new(SharedString::from(format!("{id}-run")), "Run locally")
+                        crate::button(SharedString::from(format!("{id}-run")), "Run locally")
                             .style(ButtonStyle::Outlined)
                             .on_click(move |_, window, cx| {
                                 local_workspace
@@ -618,7 +618,7 @@ impl InboxPanel {
                             }),
                     )
                     .child(
-                        Button::new(
+                        crate::button(
                             SharedString::from(format!("{id}-review")),
                             row.primary_action,
                         )

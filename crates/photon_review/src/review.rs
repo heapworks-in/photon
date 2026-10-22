@@ -724,9 +724,8 @@ fn draft_renderer(
                                 .color(Color::Warning),
                         )
                         .child(
-                            Button::new("include", "Include again")
+                            crate::button("include", "Include again")
                                 .style(ButtonStyle::Outlined)
-                                .label_size(LabelSize::XSmall)
                                 .on_click(move |_, _, cx| {
                                     include_item
                                         .update(cx, |item, cx| item.include_again(local_id, cx))
@@ -744,9 +743,8 @@ fn draft_renderer(
                             .color(Color::Error),
                     )
                     .child(
-                        Button::new("retry", "Retry")
+                        crate::button("retry", "Retry")
                             .style(ButtonStyle::Outlined)
-                            .label_size(LabelSize::XSmall)
                             .on_click(move |_, _, cx| {
                                 retry_item
                                     .update(cx, |item, cx| item.queue_save(local_id, cx))
@@ -759,7 +757,7 @@ fn draft_renderer(
                     h_flex()
                         .gap_1()
                         .child(
-                            Button::new("add", "Add to review")
+                            crate::button("add", "Add to review")
                                 .style(ButtonStyle::Tinted(TintColor::Accent))
                                 .on_click(move |_, _, cx| {
                                     add_item
@@ -768,7 +766,7 @@ fn draft_renderer(
                                 }),
                         )
                         .child(
-                            Button::new("cancel", "Cancel")
+                            crate::button("cancel", "Cancel")
                                 .style(ButtonStyle::Outlined)
                                 .on_click(move |_, window, cx| {
                                     cancel_item
@@ -785,7 +783,7 @@ fn draft_renderer(
                     h_flex()
                         .gap_1()
                         .child(
-                            Button::new("edit", "Edit")
+                            crate::button("edit", "Edit")
                                 .style(ButtonStyle::Outlined)
                                 .on_click(move |_, window, cx| {
                                     edit_item
@@ -796,7 +794,7 @@ fn draft_renderer(
                                 }),
                         )
                         .child(
-                            Button::new("delete", "Delete")
+                            crate::button("delete", "Delete")
                                 .style(ButtonStyle::Outlined)
                                 .on_click(move |_, window, cx| {
                                     delete_item
@@ -842,7 +840,7 @@ fn thread_renderer(
                     .gap_1()
                     .children(reply.clone().map(|editor| div().flex_1().child(editor)))
                     .child(
-                        Button::new("reply", "Reply")
+                        crate::button("reply", "Reply")
                             .style(if reply.is_some() {
                                 ButtonStyle::Tinted(TintColor::Accent)
                             } else {
@@ -857,7 +855,7 @@ fn thread_renderer(
                             }),
                     )
                     .child(
-                        Button::new("resolve", if resolved { "Unresolve" } else { "Resolve" })
+                        crate::button("resolve", if resolved { "Unresolve" } else { "Resolve" })
                             .style(ButtonStyle::Outlined)
                             .disabled(resolve_pending)
                             .on_click(move |_, _, cx| {
@@ -2784,7 +2782,7 @@ impl ReviewItem {
             .when(self.changes_since_review_offered(), |header| {
                 let showing = self.showing_changes_since_review();
                 header.child(
-                    Button::new(
+                    crate::button(
                         "since-review",
                         if self.loading_since_review {
                             "Loading changes… (click to cancel)"
@@ -3021,7 +3019,7 @@ impl ReviewItem {
                                 .gap_1()
                                 .flex_wrap()
                                 .child(
-                                    Button::new("replace", "Re-place here")
+                                    crate::button("replace", "Re-place here")
                                         .style(ButtonStyle::Outlined)
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.replace_draft(local_id, cx)
@@ -3031,7 +3029,7 @@ impl ReviewItem {
                                 // before anything else can send it.
                                 .map(|this| match posted_note {
                                     Some(_) => this.child(
-                                        Button::new("include", "Include again")
+                                        crate::button("include", "Include again")
                                             .style(ButtonStyle::Outlined)
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.include_again(local_id, cx)
@@ -3043,7 +3041,7 @@ impl ReviewItem {
                                             .color(Color::Muted),
                                     ),
                                     None => this.child(
-                                        Button::new("general", "Post as general comment")
+                                        crate::button("general", "Post as general comment")
                                             .style(ButtonStyle::Outlined)
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.post_as_general(local_id, cx)
@@ -3051,7 +3049,7 @@ impl ReviewItem {
                                     ),
                                 })
                                 .child(
-                                    Button::new("delete", "Delete")
+                                    crate::button("delete", "Delete")
                                         .style(ButtonStyle::Outlined)
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.cancel_draft(local_id, window, cx)
@@ -3095,7 +3093,7 @@ impl ReviewItem {
                     )
                     .when(reason.as_ref() == TRUST_REASON, |this| {
                         this.child(
-                            Button::new("photon-review-trust", "Trust worktree…")
+                            crate::button("photon-review-trust", "Trust worktree…")
                                 .style(ButtonStyle::Tinted(TintColor::Accent))
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(ToggleWorktreeSecurity.boxed_clone(), cx)
@@ -3189,19 +3187,19 @@ impl ReviewItem {
                             .gap_1()
                             .flex_wrap()
                             .child(
-                                Button::new("photon-review-comment", "Comment")
+                                crate::button("photon-review-comment", "Comment")
                                     .style(ButtonStyle::Outlined)
                                     .disabled(self.submitting || !self.can_comment(cx))
                                     .on_click(submit(ReviewEvent::Comment)),
                             )
                             .child(
-                                Button::new("photon-review-approve", "Approve")
+                                crate::button("photon-review-approve", "Approve")
                                     .style(ButtonStyle::Tinted(TintColor::Success))
                                     .disabled(self.submitting)
                                     .on_click(submit(ReviewEvent::Approve)),
                             )
                             .child(
-                                Button::new("photon-review-request-changes", "Request changes")
+                                crate::button("photon-review-request-changes", "Request changes")
                                     .style(ButtonStyle::Tinted(TintColor::Error))
                                     .disabled(self.submitting)
                                     .on_click(submit(ReviewEvent::RequestChanges)),
