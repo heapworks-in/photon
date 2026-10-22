@@ -8258,11 +8258,13 @@ impl Panel for ProjectPanel {
         }
 
         let project = &self.project.read(cx);
-        project.visible_worktrees(cx).any(|tree| {
-            tree.read(cx)
-                .root_entry()
-                .is_some_and(|entry| entry.is_dir())
-        })
+        // photon: a window with no folder opens the panel too, for its Open Project button
+        project.visible_worktrees(cx).next().is_none()
+            || project.visible_worktrees(cx).any(|tree| {
+                tree.read(cx)
+                    .root_entry()
+                    .is_some_and(|entry| entry.is_dir())
+            })
     }
 
     fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {

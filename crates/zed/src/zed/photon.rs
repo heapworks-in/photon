@@ -1,8 +1,7 @@
 use command_palette_hooks::CommandPaletteFilter;
 use editor::Editor;
 use gpui::{App, Context, Focusable as _, Window};
-use recent_projects::RecentProjects;
-use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
+use terminal_view::TerminalView;
 use ui::{IconButton, IconName, IconSize, Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::{
@@ -33,33 +32,14 @@ pub fn hide_offline_actions(cx: &mut App) {
 }
 
 /// Photon is terminal-first: a workspace with nothing open starts with a terminal in the center.
-/// A window with no folder (a new tab) also offers the recent projects to open in it.
 pub fn ensure_center_terminal(
     workspace: &mut Workspace,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    if !should_open_center_terminal(workspace, cx) {
-        return;
+    if should_open_center_terminal(workspace, cx) {
+        TerminalView::deploy(workspace, &center_terminal_action(), window, cx);
     }
-    // A shell on the project's host, so remote projects don't get a terminal on this machine.
-    let working_directory = terminal_view::default_working_directory(workspace, cx);
-    let terminal = TerminalPanel::add_center_terminal(workspace, window, cx, move |project, cx| {
-        project.create_terminal_shell(working_directory, cx)
-    });
-    let offer_projects = should_offer_projects(workspace, cx);
-    cx.spawn_in(window, async move |workspace, cx| {
-        // The new terminal takes focus, which would dismiss a picker opened before it.
-        terminal.await?;
-        if offer_projects {
-            workspace.update_in(cx, |workspace, window, cx| {
-                let focus_handle = workspace.focus_handle(cx);
-                RecentProjects::open(workspace, Some(false), Vec::new(), window, focus_handle, cx);
-            })?;
-        }
-        anyhow::Ok(())
-    })
-    .detach_and_log_err(cx);
 }
 
 /// [`ensure_center_terminal`] for a window opened asynchronously (e.g. a remote/SSH project).
@@ -82,15 +62,6 @@ fn should_open_center_terminal(workspace: &Workspace, cx: &App) -> bool {
 
 fn center_terminal_action() -> NewCenterTerminal {
     NewCenterTerminal { local: false }
-}
-
-fn should_offer_projects(workspace: &Workspace, cx: &App) -> bool {
-    workspace
-        .project()
-        .read(cx)
-        .visible_worktrees(cx)
-        .next()
-        .is_none()
 }
 
 gpui::actions!(
@@ -348,8 +319,6 @@ mod tests {
             .unwrap();
 
         cx.read(|cx| assert!(should_open_center_terminal(workspace.read(cx), cx)));
-        // A window with a folder already has its project; only an empty window offers one.
-        cx.read(|cx| assert!(!should_offer_projects(workspace.read(cx), cx)));
 
         let file = cx.read(|cx| workspace.file_project_paths(cx))[0].clone();
         window
@@ -364,20 +333,6 @@ mod tests {
 
         // A restored or opened file means the user already has content; don't add a terminal.
         cx.read(|cx| assert!(!should_open_center_terminal(workspace.read(cx), cx)));
-    }
-
-    #[gpui::test]
-    async fn empty_window_offers_projects(cx: &mut TestAppContext) {
-        use project::Project;
-        use workspace::MultiWorkspace;
-
-        let app_state = super::super::tests::init_test(cx);
-        let project = Project::test(app_state.fs.clone(), [], cx).await;
-        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
-        let workspace = window
-            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
-            .unwrap();
-        cx.read(|cx| assert!(should_offer_projects(workspace.read(cx), cx)));
     }
 
     #[gpui::test]
@@ -551,11 +506,7 @@ mod tests {
         cx.run_until_parked();
 
         let center_terminals = workspace.read_with(cx, |workspace, cx| {
-            workspace
-                .active_pane()
-                .read(cx)
-                .items_of_type::<TerminalView>()
-                .count()
+            workspace.active_pane().read(cx).items_of_type::<TerminalView>().count()
         });
         assert_eq!(center_terminals, 1);
     }
