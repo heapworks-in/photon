@@ -610,7 +610,7 @@
     "code_actions": false,
   },
   // Whether to allow windows to tab together based on the user's tabbing preference (macOS only).
-  "use_system_window_tabs": true, // photon: one window, a tab per open project, like Warp
+  "use_system_window_tabs": false, // photon: projects are tabs inside one window (photon_tabs), like Warp
   // Which fullscreen mode the `zed::ToggleFullScreen` action enters (macOS only).
   //
   // 1. Use macOS's native fullscreen, which moves the window into its own Mission Control space.
@@ -1197,7 +1197,7 @@
       // Default width of the Threads Sidebar.
       "default_width": 300,
       // Automatically open the Threads Sidebar when opening a folder in an existing window.
-      "auto_open": true,
+      "auto_open": false, // photon: project tabs, not the sidebar, show the projects in a window
     },
     // Default fixed width when the agent panel is docked to the left or right and
     // `flexible` is false.

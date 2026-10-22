@@ -344,10 +344,8 @@ async fn test_open_directory_in_existing_window_opens_sidebar(cx: &mut TestAppCo
 
     window
         .read_with(cx, |mw, _cx| {
-            assert!(
-                mw.sidebar_open(),
-                "adding a directory to an existing window opens the sidebar by default",
-            );
+            // photon: the project becomes a tab; the sidebar stays closed by default
+            assert!(!mw.sidebar_open());
             assert_eq!(mw.workspaces().count(), 2);
         })
         .unwrap();

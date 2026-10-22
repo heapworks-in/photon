@@ -3297,7 +3297,7 @@ mod tests {
         multi_workspace_1
             .update(cx, |multi_workspace, _window, cx| {
                 assert_eq!(multi_workspace.workspaces().count(), 2);
-                assert!(multi_workspace.sidebar_open());
+                assert!(!multi_workspace.sidebar_open()); // photon: projects are tabs, the sidebar stays closed
                 let workspace = multi_workspace.workspace().read(cx);
                 assert_eq!(
                     workspace
@@ -3869,6 +3869,144 @@ mod tests {
                 });
             })
             .unwrap();
+    }
+
+    // photon: projects open as tabs inside one window.
+    #[gpui::test]
+    async fn photon_open_second_project_shows_two_tabs(cx: &mut TestAppContext) {
+        let app_state = init_test(cx);
+        cx.executor().allow_parking();
+        let fs = app_state.fs.as_fake();
+        fs.insert_tree(path!("/a"), json!({ "a.txt": "" })).await;
+        fs.insert_tree(path!("/b"), json!({ "b.txt": "" })).await;
+
+        for dir in [path!("/a"), path!("/b")] {
+            cx.update(|cx| {
+                workspace::open_paths(
+                    &[PathBuf::from(dir)],
+                    app_state.clone(),
+                    workspace::OpenOptions::default(),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+            cx.run_until_parked();
+        }
+
+        assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+        let window = cx
+            .update(|cx| cx.windows().first().unwrap().downcast::<MultiWorkspace>())
+            .unwrap();
+        window
+            .read_with(cx, |multi_workspace, _| {
+                assert_eq!(multi_workspace.workspaces().count(), 2)
+            })
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("photon-project-tab-1").is_some());
+    }
+
+    #[gpui::test]
+    async fn photon_tabs_restore_in_order(cx: &mut TestAppContext) {
+        use session::Session;
+
+        let app_state = init_test(cx);
+        cx.executor().allow_parking();
+        let fs = app_state.fs.as_fake();
+        for dir in [path!("/a"), path!("/b"), path!("/c")] {
+            fs.insert_tree(dir, json!({ "file.txt": "" })).await;
+        }
+        let session_id = cx.read(|cx| app_state.session.read(cx).id().to_owned());
+
+        let workspace::OpenResult { window, .. } = cx
+            .update(|cx| {
+                Workspace::new_local(
+                    vec![path!("/a").into()],
+                    app_state.clone(),
+                    None,
+                    None,
+                    None,
+                    workspace::OpenMode::Activate,
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        for dir in [path!("/b"), path!("/c")] {
+            window
+                .update(cx, |multi_workspace, window, cx| {
+                    multi_workspace.open_project(
+                        vec![dir.into()],
+                        workspace::OpenMode::Activate,
+                        window,
+                        cx,
+                    )
+                })
+                .unwrap()
+                .await
+                .unwrap();
+            cx.run_until_parked();
+        }
+        window
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.move_workspace(2, 0, cx);
+                let a = multi_workspace
+                    .workspaces()
+                    .find(|workspace| photon_tabs::tab_label(workspace.read(cx), cx) == "a")
+                    .unwrap()
+                    .clone();
+                multi_workspace.activate(a, None, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        flush_workspace_serialization(&window, cx).await;
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            app_state.session.update(cx, |app_session, _| {
+                app_session
+                    .replace_session_for_test(Session::test_with_old_session(session_id.clone()));
+            });
+        });
+        let mut async_cx = cx.to_async();
+        crate::restore_or_create_workspace(app_state.clone(), &mut async_cx)
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        let windows: Vec<WindowHandle<MultiWorkspace>> = cx.read(|cx| {
+            cx.windows()
+                .into_iter()
+                .filter_map(|window| window.downcast::<MultiWorkspace>())
+                .collect()
+        });
+        assert_eq!(windows.len(), 1);
+        windows[0]
+            .read_with(cx, |multi_workspace, cx| {
+                let labels = multi_workspace
+                    .workspaces()
+                    .map(|workspace| photon_tabs::tab_label(workspace.read(cx), cx).to_string())
+                    .collect::<Vec<_>>();
+                assert_eq!(labels, ["c", "a", "b"]);
+                assert_eq!(
+                    photon_tabs::tab_label(multi_workspace.workspace().read(cx), cx),
+                    "a"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn photon_native_window_tabs_off_by_default(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            assert!(!WorkspaceSettings::get_global(cx).use_system_window_tabs);
+        });
     }
 
     #[gpui::test]
@@ -7917,7 +8055,8 @@ mod tests {
                         ProjectGroupKey::new(None, PathList::new(&[dir1])),
                     ]
                 );
-                assert_eq!(mw.workspaces().count(), 1);
+                // photon: every project of the window comes back as a tab
+                assert_eq!(mw.workspaces().count(), 2);
             })
             .unwrap();
 

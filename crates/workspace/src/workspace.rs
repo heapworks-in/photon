@@ -10507,6 +10507,13 @@ pub async fn apply_restored_multiworkspace_state(
                 multi_workspace.restore_project_groups(resolved_groups, cx);
             })
             .ok();
+
+        // photon: reopen every project tab, not only the active one
+        if let Ok(restore) = window_handle.update(cx, |multi_workspace, window, cx| {
+            multi_workspace.restore_project_tabs(window, cx)
+        }) {
+            restore.await.log_err();
+        }
     }
 
     if *sidebar_open {

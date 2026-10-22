@@ -439,8 +439,74 @@ impl MultiWorkspace {
         }
         let held = self.held.remove(from);
         self.held.insert(to, held);
+        self.sync_project_group_order(cx);
         self.serialize(cx);
         cx.notify();
+    }
+
+    // photon: tabs run left to right in the reverse of the sidebar's newest-first project
+    // order. Keeping the two in step lets the saved project order bring the tabs back in order.
+    fn sync_project_group_order(&mut self, cx: &App) {
+        let mut tab_keys: Vec<ProjectGroupKey> = Vec::new();
+        for held in &self.held {
+            let key = held.workspace.read(cx).project_group_key(cx);
+            if !tab_keys.contains(&key) {
+                tab_keys.push(key);
+            }
+        }
+        tab_keys.reverse();
+        self.project_groups.sort_by_key(|group| {
+            tab_keys
+                .iter()
+                .position(|key| key == &group.key)
+                .unwrap_or(usize::MAX)
+        });
+    }
+
+    // photon: reopen every project of a restored window as a tab, not only the active one.
+    pub fn restore_project_tabs(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let keys = self
+            .project_groups
+            .iter()
+            .rev()
+            .map(|group| group.key.clone())
+            .filter(|key| key.host().is_none())
+            .collect::<Vec<_>>();
+        cx.spawn_in(window, async move |this, cx| {
+            for key in &keys {
+                let open = this.update_in(cx, |this, window, cx| {
+                    if this
+                        .workspace_for_paths(key.path_list(), None, cx)
+                        .is_some()
+                    {
+                        return None;
+                    }
+                    Some(this.find_or_create_local_workspace(
+                        key.path_list().clone(),
+                        Some(key.clone()),
+                        None,
+                        OpenMode::Add,
+                        None,
+                        window,
+                        cx,
+                    ))
+                })?;
+                if let Some(open) = open {
+                    open.await.log_err();
+                }
+            }
+            this.update(cx, |this, cx| {
+                this.held.sort_by_key(|held| {
+                    let key = held.workspace.read(cx).project_group_key(cx);
+                    keys.iter().position(|restored| restored == &key)
+                });
+                cx.notify();
+            })
+        })
     }
 
     pub fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {

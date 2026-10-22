@@ -56,6 +56,7 @@ pub struct PlatformTitleBar {
     system_window_tabs: Entity<SystemWindowTabs>,
     button_layout: Option<WindowButtonLayout>,
     multi_workspace: Option<WeakEntity<MultiWorkspace>>,
+    project_tabs: Option<Entity<photon_tabs::ProjectTabs>>, // photon: in-window project tabs
 }
 
 impl PlatformTitleBar {
@@ -71,6 +72,7 @@ impl PlatformTitleBar {
             system_window_tabs,
             button_layout: None,
             multi_workspace: None,
+            project_tabs: None, // photon: in-window project tabs
         }
     }
 
@@ -350,10 +352,24 @@ impl Render for PlatformTitleBar {
                 },
             );
 
+        // photon: in-window project tabs
+        if self.project_tabs.is_none()
+            && let Some(multi_workspace) = self.multi_workspace.clone().or_else(|| {
+                window
+                    .root::<MultiWorkspace>()
+                    .flatten()
+                    .map(|multi_workspace| multi_workspace.downgrade())
+            })
+        {
+            self.project_tabs =
+                Some(cx.new(|cx| photon_tabs::ProjectTabs::new(multi_workspace, cx)));
+        }
+
         v_flex()
             .w_full()
             .child(title_bar)
             .child(self.system_window_tabs.clone().into_any_element())
+            .children(self.project_tabs.clone()) // photon: in-window project tabs
     }
 }
 

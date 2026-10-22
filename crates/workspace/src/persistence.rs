@@ -6068,6 +6068,8 @@ mod tests {
         crate::tests::init_test(cx);
 
         let fs = fs::FakeFs::new(cx.executor());
+        // photon: restoring reopens every project tab, which needs the app's file system, as in the app
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
 
         // Main git repo at /repo
         fs.insert_tree(
