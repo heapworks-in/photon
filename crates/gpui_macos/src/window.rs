@@ -1269,9 +1269,8 @@ impl MacWindow {
                     .contains(NSWindowStyleMask::NSFullScreenWindowMask);
                 let user_tabbing_preference = Self::get_user_tabbing_preference()
                     .unwrap_or(UserTabbingPreference::InFullScreen);
-                let should_add_as_tab = user_tabbing_preference == UserTabbingPreference::Always
-                    || user_tabbing_preference == UserTabbingPreference::InFullScreen
-                        && main_window_is_fullscreen;
+                // photon: tab new windows unless the user chose "never" (macOS's default only tabs in full screen)
+                let should_add_as_tab = user_tabbing_preference != UserTabbingPreference::Never;
 
                 if should_add_as_tab {
                     let main_window_can_tab: BOOL =

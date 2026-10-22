@@ -607,7 +607,7 @@
     "code_actions": false,
   },
   // Whether to allow windows to tab together based on the user's tabbing preference (macOS only).
-  "use_system_window_tabs": false,
+  "use_system_window_tabs": true, // photon: one window, a tab per open project, like Warp
   // Which fullscreen mode the `zed::ToggleFullScreen` action enters (macOS only).
   //
   // 1. Use macOS's native fullscreen, which moves the window into its own Mission Control space.
