@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::{Range, RangeInclusive};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
@@ -30,7 +30,7 @@ use project::{
 use ui::{Checkbox, TintColor, ToggleState, Tooltip, prelude::*};
 use util::{ResultExt as _, rel_path::RelPath};
 use workspace::{
-    AppState, Item, OpenMode, OpenOptions, Toast, ToggleWorktreeSecurity, Workspace, WorkspaceDb,
+    AppState, Item, OpenOptions, Toast, ToggleWorktreeSecurity, Workspace, WorkspaceDb,
     notifications::NotificationId, open_paths,
 };
 
@@ -313,7 +313,7 @@ pub fn open_review(
     let runner = gh_runner(cx);
     let database = ReviewDb::global(cx);
     cx.spawn_in(window, async move |workspace, cx| {
-        let result = open_in_new_window(summary, app_state, runner, database, cx).await;
+        let result = open_review_tab(summary, app_state, runner, database, cx).await;
         drop(guard);
         if let Err(error) = &result {
             let message = format!("{error:#}");
@@ -382,7 +382,34 @@ fn find_open_review(
         })
 }
 
-async fn open_in_new_window(
+/// Opens a PR checkout as a tab in the current window.
+pub(crate) async fn open_checkout(
+    worktree: &Path,
+    app_state: Arc<AppState>,
+    cx: &mut AsyncApp,
+) -> Result<workspace::OpenResult> {
+    cx.update(|cx| {
+        open_paths(
+            &[worktree.to_path_buf()],
+            app_state,
+            OpenOptions::default(),
+            cx,
+        )
+    })
+    .await
+}
+
+/// Brings an already open review's project to the front: its window, and its tab in that window.
+pub(crate) fn show_tab(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) {
+    window.activate_window();
+    if let Some(multi_workspace) = window.root::<workspace::MultiWorkspace>().flatten() {
+        multi_workspace.update(cx, |multi_workspace, cx| {
+            multi_workspace.activate(workspace.clone(), None, window, cx)
+        });
+    }
+}
+
+async fn open_review_tab(
     summary: PrSummary,
     app_state: Arc<AppState>,
     runner: Arc<dyn GhRunner>,
@@ -393,10 +420,10 @@ async fn open_in_new_window(
     if let Some((window, workspace, item)) = open
         && item.read_with(cx, |item, _| item.checkout.head_sha == summary.head_sha)
     {
-        window.update(cx, |_, window, cx| {
-            window.activate_window();
+        window.update(cx, |_, window_context, cx| {
+            show_tab(&workspace, window_context, cx);
             workspace.update(cx, |workspace, cx| {
-                workspace.activate_item(&item, true, true, window, cx)
+                workspace.activate_item(&item, true, true, window_context, cx)
             })
         })?;
         return Ok(());
@@ -423,19 +450,7 @@ async fn open_in_new_window(
         })
         .await?;
     cx.update(|_, cx| forget_stale_trust(&prepared.checkout, cx))?;
-    let opened = cx
-        .update(|_, cx| {
-            open_paths(
-                std::slice::from_ref(&prepared.checkout.worktree),
-                app_state,
-                OpenOptions {
-                    open_mode: OpenMode::NewWindow,
-                    ..OpenOptions::default()
-                },
-                cx,
-            )
-        })?
-        .await?;
+    let opened = open_checkout(&prepared.checkout.worktree, app_state, cx).await?;
     place_review(
         opened.workspace,
         opened.window.into(),
@@ -4159,6 +4174,76 @@ fn verify_password(user: &str, password: &str) -> bool {
         });
         let error = task.await.err().expect("logged out");
         assert!(error.to_string().contains("Not logged in"), "{error:#}");
+    }
+
+    #[gpui::test]
+    async fn photon_review_opens_as_tab_in_current_window(cx: &mut TestAppContext) {
+        init_test(cx);
+        let app_state = cx.update(AppState::test);
+        cx.update(|cx| AppState::set_global(app_state.clone(), cx));
+        let fs = app_state.fs.as_fake();
+        fs.insert_tree(path!("/repo"), json!({ "a.rs": "" })).await;
+        fs.insert_tree(path!("/reviews/pr-1"), json!({ "a.rs": "" }))
+            .await;
+        let project = Project::test(app_state.fs.clone(), [path!("/repo").as_ref()], cx).await;
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        cx.run_until_parked();
+
+        let opened = open_checkout(
+            Path::new(path!("/reviews/pr-1")),
+            app_state.clone(),
+            &mut cx.to_async(),
+        )
+        .await
+        .expect("opened");
+        cx.run_until_parked();
+
+        assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+        assert_eq!(opened.window, window);
+        window
+            .read_with(cx, |multi_workspace, cx| {
+                assert_eq!(multi_workspace.workspaces().count(), 2);
+                assert_eq!(multi_workspace.workspace(), &opened.workspace);
+                let roots = opened.workspace.read(cx).root_paths(cx);
+                assert_eq!(
+                    roots.first().map(|root| root.as_ref()),
+                    Some(Path::new(path!("/reviews/pr-1")))
+                );
+            })
+            .expect("window");
+    }
+
+    #[gpui::test]
+    async fn photon_show_tab_activates_background_review(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let review_project = Project::test(fs.clone(), [], cx).await;
+        let other_project = Project::test(fs, [], cx).await;
+        let window =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(review_project, window, cx));
+        let review_workspace = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .expect("window");
+        window
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.test_add_workspace(other_project, window, cx);
+            })
+            .expect("window");
+
+        // The callers hold an untyped handle, which leaves the window's root free to update.
+        let any_window: AnyWindowHandle = window.into();
+        any_window
+            .update(cx, |_, window_context, cx| {
+                show_tab(&review_workspace, window_context, cx)
+            })
+            .expect("window");
+        cx.run_until_parked();
+
+        window
+            .read_with(cx, |multi_workspace, _| {
+                assert_eq!(multi_workspace.workspace(), &review_workspace)
+            })
+            .expect("window");
     }
 
     #[gpui::test]

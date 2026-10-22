@@ -9,9 +9,7 @@ use paths::local_settings_file_relative_path;
 use settings::{ProjectSettingsContent, RegisterSetting, RootUserSettings as _, Settings};
 use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
 use util::ResultExt as _;
-use workspace::{
-    AppState, OpenMode, OpenOptions, Toast, Workspace, notifications::NotificationId, open_paths,
-};
+use workspace::{AppState, Toast, Workspace, notifications::NotificationId};
 
 use crate::{
     Checkout, FetchedCheckout, PrKey, PrSummary, ReviewDb, Tracked, candidate_repos,
@@ -241,28 +239,16 @@ async fn open_terminal(
     let (window, workspace) = match existing {
         Some(found) => found,
         None => {
-            let opened = cx
-                .update(|_, cx| {
-                    open_paths(
-                        std::slice::from_ref(&worktree),
-                        app_state,
-                        OpenOptions {
-                            open_mode: OpenMode::NewWindow,
-                            ..OpenOptions::default()
-                        },
-                        cx,
-                    )
-                })?
-                .await?;
+            let opened = crate::review::open_checkout(&worktree, app_state, cx).await?;
             (opened.window.into(), opened.workspace)
         }
     };
 
-    let creating = window.update(cx, |_, window, cx| {
-        window.activate_window();
+    let creating = window.update(cx, |_, window_context, cx| {
+        crate::review::show_tab(&workspace, window_context, cx);
         workspace.update(cx, |workspace, cx| {
             let cwd = worktree.clone();
-            TerminalPanel::add_center_terminal(workspace, window, cx, move |project, cx| {
+            TerminalPanel::add_center_terminal(workspace, window_context, cx, move |project, cx| {
                 project.create_terminal_shell(Some(cwd), cx)
             })
         })
