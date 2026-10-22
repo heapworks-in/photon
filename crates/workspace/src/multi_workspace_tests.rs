@@ -1827,3 +1827,27 @@ async fn open_existing_project_activates_its_tab(cx: &mut TestAppContext) {
         })
         .unwrap();
 }
+
+#[gpui::test]
+async fn photon_move_workspace_reorders(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    let mut projects = Vec::new();
+    for root in ["/root_a", "/root_b", "/root_c"] {
+        fs.insert_tree(root, json!({ "file.txt": "" })).await;
+        projects.push(Project::test(fs.clone(), [root.as_ref()], cx).await);
+    }
+    let (multi_workspace, cx) = setup_multi_workspace(&projects, cx);
+    let order = |multi_workspace: &Entity<MultiWorkspace>, cx: &mut VisualTestContext| {
+        multi_workspace.read_with(cx, |mw, _| mw.workspaces().cloned().collect::<Vec<_>>())
+    };
+    let [a, b, c] = <[_; 3]>::try_from(order(&multi_workspace, cx)).unwrap();
+    let active = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+    multi_workspace.update(cx, |mw, cx| mw.move_workspace(0, 2, cx));
+    assert_eq!(order(&multi_workspace, cx), vec![b.clone(), c.clone(), a.clone()]);
+
+    multi_workspace.update(cx, |mw, cx| mw.move_workspace(5, 0, cx));
+    assert_eq!(order(&multi_workspace, cx), vec![b, c, a]);
+    multi_workspace.read_with(cx, |mw, _| assert_eq!(mw.workspace(), &active));
+}

@@ -432,6 +432,17 @@ impl MultiWorkspace {
         true
     }
 
+    // photon: drag to reorder tabs. The displayed workspace is tracked by `activated_at`, so moving rows keeps it.
+    pub fn move_workspace(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        if from >= self.held.len() || to >= self.held.len() || from == to {
+            return;
+        }
+        let held = self.held.remove(from);
+        self.held.insert(to, held);
+        self.serialize(cx);
+        cx.notify();
+    }
+
     pub fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.multi_workspace_enabled(cx) {
             return;
