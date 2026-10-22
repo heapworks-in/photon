@@ -13504,6 +13504,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "photon_tabs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fs",
+ "gpui",
+ "project",
+ "serde_json",
+ "settings",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "photon_terminal"
 version = "0.1.0"
 dependencies = [

@@ -1845,7 +1845,10 @@ async fn photon_move_workspace_reorders(cx: &mut TestAppContext) {
     let active = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
 
     multi_workspace.update(cx, |mw, cx| mw.move_workspace(0, 2, cx));
-    assert_eq!(order(&multi_workspace, cx), vec![b.clone(), c.clone(), a.clone()]);
+    assert_eq!(
+        order(&multi_workspace, cx),
+        vec![b.clone(), c.clone(), a.clone()]
+    );
 
     multi_workspace.update(cx, |mw, cx| mw.move_workspace(5, 0, cx));
     assert_eq!(order(&multi_workspace, cx), vec![b, c, a]);

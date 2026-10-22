@@ -6851,7 +6851,8 @@ impl Workspace {
         self.last_window_title = Some(title);
     }
 
-    fn is_window_edited(&self, cx: &App) -> bool {
+    // photon: project tabs show a dot for every project with unsaved edits, not just the active one
+    pub fn is_window_edited(&self, cx: &App) -> bool {
         !self.project.read(cx).is_disconnected(cx) && !self.dirty_items.is_empty()
     }
 
