@@ -123,10 +123,12 @@ impl PostState {
     }
 }
 
-/// Saves that fail before reaching the database, for testing the retry path.
+// Per thread so a test's injected failures can't hit a test running in parallel.
 #[cfg(test)]
-pub(crate) static FAILING_SAVES: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    /// Saves that fail before reaching the database, for testing the retry path.
+    pub(crate) static FAILING_SAVES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 type DraftRow = (
     (i64, String, String, i64, i64),
@@ -261,14 +263,8 @@ impl ReviewDb {
     /// Inserts a draft without an id, otherwise updates the row with its id. Returns the id.
     pub async fn save_draft(&self, draft: Draft) -> Result<i64> {
         #[cfg(test)]
-        if FAILING_SAVES
-            .fetch_update(
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
-                |count| count.checked_sub(1),
-            )
-            .is_ok()
-        {
+        if let Some(remaining) = FAILING_SAVES.get().checked_sub(1) {
+            FAILING_SAVES.set(remaining);
             anyhow::bail!("injected save failure");
         }
         let number = i64::try_from(draft.key.number)?;

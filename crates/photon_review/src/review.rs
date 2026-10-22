@@ -4811,7 +4811,7 @@ fn verify_password(user: &str, password: &str) -> bool {
         select_text(&item, "audit(user);", &mut cx);
         cx.dispatch_action(AddComment);
         cx.run_until_parked();
-        crate::store::FAILING_SAVES.store(1, Ordering::SeqCst);
+        crate::store::FAILING_SAVES.set(1);
         type_text(&composer(&item, &mut cx), "Keep me", &mut cx);
         cx.run_until_parked();
         assert!(bodies(&database).is_empty());
@@ -5557,7 +5557,7 @@ fn verify_password(user: &str, password: &str) -> bool {
         let (item, mut cx, database) = open_with_drafts(cx, Vec::new()).await;
         let fake = install_fake(&mut cx);
         fake.respond(is_review_post, Ok("{}".into()));
-        crate::store::FAILING_SAVES.store(1, Ordering::SeqCst);
+        crate::store::FAILING_SAVES.set(1);
         let task = item.update_in(&mut cx, |item, window, cx| {
             let local_id = item.push_draft(current_draft("src/login.rs", 3, "    audit(user);"));
             item.queue_save(local_id, cx);

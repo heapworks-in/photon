@@ -923,15 +923,16 @@ mod tests {
         cx.executor().advance_clock(Duration::from_secs(600));
         cx.run_until_parked();
         assert!(fake.requests().is_empty());
-        let network_commands: Vec<_> = crate::checkout::COMMAND_LOG
-            .lock()
-            .iter()
-            .filter(|argv| {
-                argv.iter()
-                    .any(|arg| matches!(arg.as_str(), "clone" | "fetch" | "worktree" | "checkout"))
-            })
-            .cloned()
-            .collect();
+        let network_commands: Vec<_> = crate::checkout::COMMAND_LOG.with_borrow(|log| {
+            log.iter()
+                .filter(|argv| {
+                    argv.iter().any(|arg| {
+                        matches!(arg.as_str(), "clone" | "fetch" | "worktree" | "checkout")
+                    })
+                })
+                .cloned()
+                .collect()
+        });
         assert!(network_commands.is_empty(), "{network_commands:?}");
     }
 

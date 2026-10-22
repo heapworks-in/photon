@@ -372,9 +372,12 @@ pub(crate) async fn force_remove_worktree(checkout_repo: &Path, worktree: &Path)
     Ok(())
 }
 
+// Per thread so a test only sees the commands it ran, not those of tests running in parallel.
 #[cfg(test)]
-pub(crate) static COMMAND_LOG: parking_lot::Mutex<Vec<Vec<String>>> =
-    parking_lot::Mutex::new(Vec::new());
+thread_local! {
+    pub(crate) static COMMAND_LOG: std::cell::RefCell<Vec<Vec<String>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
 pub(crate) async fn git(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(git_raw(dir, args).await?.trim().to_string())
@@ -383,12 +386,14 @@ pub(crate) async fn git(dir: &Path, args: &[&str]) -> Result<String> {
 // Patches and file contents must keep their trailing whitespace, which `git` trims.
 pub(crate) async fn git_raw(dir: &Path, args: &[&str]) -> Result<String> {
     #[cfg(test)]
-    COMMAND_LOG.lock().push(
-        ["-C".to_string(), dir.to_string_lossy().into_owned()]
-            .into_iter()
-            .chain(args.iter().map(|arg| arg.to_string()))
-            .collect(),
-    );
+    COMMAND_LOG.with_borrow_mut(|log| {
+        log.push(
+            ["-C".to_string(), dir.to_string_lossy().into_owned()]
+                .into_iter()
+                .chain(args.iter().map(|arg| arg.to_string()))
+                .collect(),
+        )
+    });
     let output = new_command("git")
         .arg("-C")
         .arg(dir)
@@ -633,7 +638,7 @@ pub(crate) mod tests {
             "HEAD"
         );
 
-        let logged = COMMAND_LOG.lock().clone();
+        let logged = COMMAND_LOG.with_borrow(|log| log.clone());
         let fetch = logged
             .iter()
             .find(|argv| argv.iter().any(|arg| arg == "fetch"))
