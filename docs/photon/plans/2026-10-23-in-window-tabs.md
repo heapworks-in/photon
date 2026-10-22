@@ -142,3 +142,20 @@ Behaviour: one tab per entry of `workspaces()` in order; active = `workspace()`;
 - [ ] **Step 4: Run** `cargo nextest run -p zed -p workspace -p photon_tabs -p platform_title_bar` and `./script/clippy` — Expected: all pass, clippy clean; `git grep -n "photon:" crates/gpui_macos` returns nothing.
 - [ ] **Step 5: Manual check on the release build** (`script/bundle-mac aarch64-apple-darwin`, copy app, user data dir in the scratchpad): open 3 projects; `vmmap --summary <pid> | grep -c "CAMetalLayer Display Drawable"`-style count of drawables is 3 (was 9); `footprint` within ~40 MB per extra project of the 1-project value; switching tabs shows no blank frame (screen recording, test window frontmost); `script/photon-perf --no-build --binary <app binary>` passes its budgets.
 - [ ] **Step 6: Commit** "Show project tabs in the title bar and turn native window tabs off".
+
+### Task 6: PR reviews open as tabs
+
+Added at the user's request during execution.
+
+**Files:**
+- Modify: `crates/photon_review/src/review.rs` (~line 428), `crates/photon_review/src/run_locally.rs` (~line 246)
+- Test: `crates/photon_review/src/review.rs` tests
+
+**Interfaces:**
+- Consumes: Task 1 retention (opening a project adds a tab).
+
+- [ ] **Step 1: Write failing test** `photon_review_opens_as_tab_in_current_window`: with one window open on `/repo`, place a review for a PR whose worktree is `/reviews/pr-1` → still one window, 2 workspaces, the active one is the review's worktree.
+- [ ] **Step 2: Run** `cargo nextest run -p photon_review photon_review_opens_as_tab` — Expected: FAIL (2 windows).
+- [ ] **Step 3: Implement**: both `open_paths` calls use `OpenOptions::default()` (open into the active window; an already open review worktree is activated wherever it is).
+- [ ] **Step 4: Run** `cargo nextest run -p photon_review` — Expected: all pass.
+- [ ] **Step 5: Commit** "Open PR reviews as tabs in the current window".
