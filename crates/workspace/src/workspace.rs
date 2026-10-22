@@ -11351,7 +11351,8 @@ pub fn open_paths(
                     window.filter(|window| {
                         window
                             .read(cx)
-                            .is_ok_and(|mw| mw.multi_workspace_enabled(cx))
+                            // photon: tabs keep every project in the window
+                            .is_ok_and(|mw| mw.retains_workspaces(cx))
                     })
                 });
 

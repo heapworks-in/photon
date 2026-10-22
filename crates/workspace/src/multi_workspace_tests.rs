@@ -149,8 +149,8 @@ async fn test_multi_workspace_collapses_when_agent_is_disabled(cx: &mut TestAppC
     multi_workspace.read_with(cx, |multi_workspace, cx| {
         assert!(!multi_workspace.multi_workspace_enabled(cx));
         assert!(!multi_workspace.sidebar_open());
-        assert_eq!(multi_workspace.workspaces().count(), 1);
-        assert!(multi_workspace.project_group_keys().is_empty());
+        // photon: project tabs stay open when the agent is turned off
+        assert_eq!(multi_workspace.workspaces().count(), 2);
     });
 }
 
@@ -1730,4 +1730,100 @@ async fn test_nearest_retained_workspace_skips_disconnected_workspace(cx: &mut T
             "a disconnected workspace should not be selected as a fallback"
         );
     });
+}
+
+// photon: tabs keep every project in the window, with or without AI.
+#[gpui::test]
+async fn photon_activate_retains_workspace_with_ai_disabled(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(|cx| DisableAiSettings::override_global(DisableAiSettings { disable_ai: true }, cx));
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs, ["/root_b".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+    let workspace_a = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b, window, cx);
+    });
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |mw, _| {
+        assert_eq!(mw.workspaces().count(), 2);
+        assert!(mw.workspaces().any(|workspace| workspace == &workspace_a));
+    });
+}
+
+#[gpui::test]
+async fn photon_open_project_adds_tab_with_ai_disabled(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(|cx| DisableAiSettings::override_global(DisableAiSettings { disable_ai: true }, cx));
+    let app_state = cx.update(AppState::test);
+    let fs = app_state.fs.as_fake();
+    fs.insert_tree(path!("/project_a"), json!({ "file_a.txt": "" }))
+        .await;
+    fs.insert_tree(path!("/project_b"), json!({ "file_b.txt": "" }))
+        .await;
+    let project = Project::test(app_state.fs.clone(), [path!("/project_a").as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    cx.run_until_parked();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+
+    let open_task = window
+        .update(cx, |mw, window, cx| {
+            mw.open_project(
+                vec![PathBuf::from(path!("/project_b"))],
+                OpenMode::Activate,
+                window,
+                cx,
+            )
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let workspace_b = open_task.await.unwrap();
+
+    window
+        .read_with(cx, |mw, _| {
+            assert_eq!(mw.workspaces().count(), 2);
+            assert_eq!(mw.workspace(), &workspace_b);
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+async fn open_existing_project_activates_its_tab(cx: &mut TestAppContext) {
+    init_test(cx);
+    let app_state = cx.update(AppState::test);
+    let fs = app_state.fs.as_fake();
+    fs.insert_tree(path!("/project_a"), json!({ "file_a.txt": "" }))
+        .await;
+    fs.insert_tree(path!("/project_b"), json!({ "file_b.txt": "" }))
+        .await;
+    let project = Project::test(app_state.fs.clone(), [path!("/project_a").as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    cx.run_until_parked();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    let workspace_a = window
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+
+    for path in [path!("/project_b"), path!("/project_a")] {
+        let open_task = window
+            .update(cx, |mw, window, cx| {
+                mw.open_project(vec![PathBuf::from(path)], OpenMode::Activate, window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        open_task.await.unwrap();
+    }
+
+    window
+        .read_with(cx, |mw, _| {
+            assert_eq!(mw.workspaces().count(), 2);
+            assert_eq!(mw.workspace(), &workspace_a);
+        })
+        .unwrap();
 }

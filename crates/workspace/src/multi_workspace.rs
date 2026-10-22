@@ -427,6 +427,11 @@ impl MultiWorkspace {
         !DisableAiSettings::get_global(cx).disable_ai && AgentSettings::get_global(cx).enabled
     }
 
+    // photon: tabs keep every project in the window, with or without AI.
+    pub fn retains_workspaces(&self, _cx: &App) -> bool {
+        true
+    }
+
     pub fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.multi_workspace_enabled(cx) {
             return;
@@ -1318,7 +1323,8 @@ impl MultiWorkspace {
 
         let old_active_workspace = self.workspace().clone();
         let old_active_was_retained = self.active_workspace_is_retained();
-        let should_retain_workspaces = self.multi_workspace_enabled(cx);
+        // photon: tabs keep every project in the window
+        let should_retain_workspaces = self.retains_workspaces(cx);
 
         if should_retain_workspaces && !old_active_was_retained {
             let key = old_active_workspace.read(cx).project_group_key(cx);
@@ -1381,6 +1387,10 @@ impl MultiWorkspace {
     fn collapse_to_single_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.sidebar_open {
             self.close_sidebar(window, cx);
+        }
+        // photon: turning AI off closes the sidebar but keeps the project tabs
+        if self.retains_workspaces(cx) {
+            return;
         }
 
         let displayed_workspace = self.workspace().clone();
@@ -1928,7 +1938,8 @@ impl MultiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<Entity<Workspace>>> {
-        if self.multi_workspace_enabled(cx) {
+        // photon: tabs keep every project in the window
+        if self.retains_workspaces(cx) {
             let empty_workspace = if self
                 .workspace()
                 .read(cx)
