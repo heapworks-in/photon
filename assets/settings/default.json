@@ -223,7 +223,10 @@
   //         "on_new_window": "empty_tab"
   //  2. Show the launchpad with recent projects
   //         "on_new_window": "launchpad"
-  //  3. Open a terminal in the center
+  //  3. Open a root-level README in a preview tab when the project has no open items.
+  //     Leave the pane empty if no README is found.
+  //         "on_new_window": "readme"
+  //  4. Open a terminal in the center
   //         "on_new_window": "terminal"
   // photon: terminal-first.
   "on_new_window": "terminal",
@@ -970,7 +973,7 @@
     //    "files_first"
     "sort_mode": "directories_first",
     // Whether to sort file and folder names case-sensitively in the project panel.
-    // This setting can take four values:
+    // This setting can take five values:
     //
     // 1. Case-insensitive natural sort with lowercase preferred in ties (default):
     //    "default"
@@ -983,6 +986,10 @@
     // 4. Pure Unicode codepoint comparison.
     //    No case folding, no natural number sorting:
     //    "unicode"
+    // 5. Files are grouped by extension, with extensionless files (including
+    //    dotfiles such as ".gitignore") first and natural sort by name within
+    //    each group:
+    //    "extension"
     "sort_order": "default",
     // Whether to show error and warning count badges next to file names in the project panel.
     "diagnostic_badges": false,

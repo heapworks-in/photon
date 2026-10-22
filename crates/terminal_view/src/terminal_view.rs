@@ -13,8 +13,8 @@ use editor::{
 use gpui::{
     Action, AnyElement, App, ClipboardEntry, Corners, DismissEvent, Entity, EventEmitter,
     ExternalPaths, FocusHandle, Focusable, Font, KeyContext, KeyDownEvent, Keystroke, MouseButton,
-    MouseDownEvent, Pixels, Point as GpuiPoint, Rems, Render, ScrollWheelEvent, Styled,
-    Subscription, Task, TaskExt, WeakEntity, actions, anchored, deferred, div,
+    MouseDownEvent, Pixels, Point as GpuiPoint, Rems, Render, ScrollEvent, Styled, Subscription,
+    Task, TaskExt, WeakEntity, actions, anchored, deferred, div,
 };
 use menu;
 use persistence::TerminalDb;
@@ -799,7 +799,7 @@ impl TerminalView {
         max_scroll_top_in_lines as f32 * line_height
     }
 
-    fn scroll_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+    fn scroll_wheel(&mut self, event: &ScrollEvent, cx: &mut Context<Self>) {
         let terminal_content = self.terminal.read(cx).last_content();
 
         if self.block_below_cursor.is_some() && terminal_content.display_offset == 0 {
@@ -1113,7 +1113,8 @@ impl TerminalView {
         if self.block_input_focused(window, cx) {
             return;
         }
-        if let Some(keystroke) = Keystroke::parse(&text.0).log_err() {
+        if let Some(keystroke) = Keystroke::parse_with_os(&text.0, cx.platform_info().os).log_err()
+        {
             self.clear_bell(cx);
             self.blink_manager.update(cx, BlinkManager::pause_blinking);
             self.process_keystroke(&keystroke, cx);
@@ -1121,7 +1122,7 @@ impl TerminalView {
     }
 
     fn dispatch_context(&self, cx: &App) -> KeyContext {
-        let mut dispatch_context = KeyContext::new_with_defaults();
+        let mut dispatch_context = KeyContext::new_with_defaults(cx.platform_info().os);
         dispatch_context.add("Terminal");
 
         if self.terminal.read(cx).vi_mode_enabled() {
@@ -5317,16 +5318,9 @@ mod tests {
         // "commit " is 7 cells; click inside the hash.
         let position =
             bounds.bounds.origin + gpui::point(bounds.cell_width * 10.5, bounds.line_height * row);
-        cx.simulate_mouse_down(
-            position,
-            MouseButton::Left,
-            gpui::Modifiers::secondary_key(),
-        );
-        cx.simulate_mouse_up(
-            position,
-            MouseButton::Left,
-            gpui::Modifiers::secondary_key(),
-        );
+        let secondary = cx.read(gpui::Modifiers::secondary_key);
+        cx.simulate_mouse_down(position, MouseButton::Left, secondary);
+        cx.simulate_mouse_up(position, MouseButton::Left, secondary);
         cx.run_until_parked();
         let opened = workspace.read_with(&cx, |workspace, cx| {
             workspace
