@@ -9,9 +9,10 @@ use parking_lot::Mutex;
 use anyhow::Result;
 use futures::future::join_all;
 use gpui::{
-    Action, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels,
-    Render, SharedString, Task, WeakEntity, Window, actions, px,
+    Action, AnyElement, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, Pixels, Render, SharedString, Task, WeakEntity, Window, actions, px,
 };
+use task::{SpawnInTerminal, TaskId};
 use ui::{Tab, TintColor, Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::{
@@ -20,8 +21,8 @@ use workspace::{
 };
 
 use crate::{
-    ChecksState, GhError, GhRunner, Inbox, InboxGroup, PrKey, PrSummary, RepoId, ReviewDb,
-    SinceReview, Tracked, auth_status_request,
+    ChecksState, GhError, GhFix, GhRunner, HostAuth, Inbox, InboxGroup, PrKey, PrSummary, RepoId,
+    ReviewDb, SinceReview, Tracked, auth_status_request,
     checkout::{
         ensure_safe_segment, force_remove_worktree, parse_remote_url, review_root, worktree_path,
     },
@@ -83,6 +84,8 @@ pub enum InboxState {
     Loading,
     /// The window has no repository with a GitHub remote, so there is nothing to ask GitHub.
     NoRepository,
+    /// Every repository is on a host that isn't GitHub, like gitlab.com.
+    NotGitHub(Vec<String>),
     Loaded(Vec<HostInbox>),
     Failed(GhError),
 }
@@ -183,6 +186,7 @@ pub struct InboxPanel {
     // Dock restoration calls `set_active(true)` at startup; nothing may load until the user acts.
     user_activated: bool,
     with_drafts: HashSet<PrKey>,
+    detected: Vec<RepoId>,
     load_task: Task<()>,
 }
 
@@ -201,6 +205,7 @@ impl InboxPanel {
                     in_flight_cleanups: Arc::default(),
                     user_activated: false,
                     with_drafts: HashSet::default(),
+                    detected: Vec::new(),
                     load_task: Task::ready(()),
                 })
             })
@@ -225,13 +230,15 @@ impl InboxPanel {
             let Ok(repos) = this.update(cx, |this, cx| window_repos(&this.workspace, cx)) else {
                 return;
             };
-            let (state, closed, with_drafts) = cx
+            let (state, closed, with_drafts, repos) = cx
                 .background_spawn({
                     let database = database.clone();
                     async move {
-                        let (state, closed) = load_inbox(runner, database.clone(), repos).await;
+                        let repos = resolve_ssh_aliases(&runner, repos).await;
+                        let (state, closed) =
+                            load_inbox(runner, database.clone(), repos.clone()).await;
                         let with_drafts = prs_with_drafts(&state, &database);
-                        (state, closed, with_drafts)
+                        (state, closed, with_drafts, repos)
                     }
                 })
                 .await;
@@ -241,6 +248,7 @@ impl InboxPanel {
             this.update(cx, |this, cx| {
                 this.state = state;
                 this.with_drafts = with_drafts;
+                this.detected = repos;
                 this.refreshing = false;
                 cx.notify();
             })
@@ -248,6 +256,78 @@ impl InboxPanel {
         });
         cx.notify();
     }
+
+    pub fn detected_line(&self) -> String {
+        if self.detected.is_empty() {
+            return String::new();
+        }
+        let repos: Vec<String> = self
+            .detected
+            .iter()
+            .map(|repo| format!("{}/{}/{}", repo.host, repo.owner, repo.repo))
+            .collect();
+        format!("Found {}", repos.join(", "))
+    }
+
+    /// Runs the fix in a terminal, since it may prompt, and reloads once it ends.
+    pub fn run_fix(&mut self, fix: GhFix, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(workspace), Some((command, args))) =
+            (self.workspace.upgrade(), fix.args.split_first())
+        else {
+            return;
+        };
+        let line = fix.args.join(" ");
+        let spawn = SpawnInTerminal {
+            id: TaskId(format!("photon-review-fix: {line}")),
+            label: line.clone(),
+            full_label: line.clone(),
+            command_label: line,
+            command: Some(command.clone()),
+            args: args.to_vec(),
+            use_new_terminal: true,
+            show_command: true,
+            show_summary: true,
+            ..SpawnInTerminal::default()
+        };
+        let running = workspace.update(cx, |workspace, cx| {
+            workspace.spawn_in_terminal(spawn, window, cx)
+        });
+        cx.spawn(async move |this, cx| {
+            running.await;
+            this.update(cx, |this, cx| this.refresh(cx)).log_err();
+        })
+        .detach();
+    }
+
+    fn render_fix(&self, fix: GhFix, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::button(
+            SharedString::from(format!("photon-review-fix-{}", fix.label)),
+            fix.label.clone(),
+        )
+        .style(ButtonStyle::Tinted(TintColor::Accent))
+        .on_click(cx.listener(move |this, _, window, cx| this.run_fix(fix.clone(), window, cx)))
+    }
+}
+
+/// `git@work-gh:org/repo` names an SSH alias; gh only knows the host it stands for.
+async fn resolve_ssh_aliases(runner: &Arc<dyn GhRunner>, repos: Vec<RepoId>) -> Vec<RepoId> {
+    let mut resolved = Vec::new();
+    for mut repo in repos {
+        if let Some(host) = runner.ssh_hostname(&repo.host).await {
+            repo.host = host;
+        }
+        if !resolved.contains(&repo) {
+            resolved.push(repo);
+        }
+    }
+    resolved
+}
+
+// ponytail: well-known non-GitHub hosts only; a self-hosted GitLab shows as "not logged in".
+fn is_github_host(host: &str) -> bool {
+    !["gitlab", "bitbucket", "codeberg", "azure.com", "sr.ht"]
+        .iter()
+        .any(|other| host.contains(other))
 }
 
 /// GitHub repositories behind the `origin` and `upstream` remotes of the window's projects.
@@ -321,6 +401,15 @@ async fn load_inbox(
     if repos.is_empty() {
         return (InboxState::NoRepository, Vec::new());
     }
+    let (repos, elsewhere): (Vec<_>, Vec<_>) = repos
+        .into_iter()
+        .partition(|repo| is_github_host(&repo.host));
+    if repos.is_empty() {
+        let mut hosts: Vec<String> = elsewhere.into_iter().map(|repo| repo.host).collect();
+        hosts.sort();
+        hosts.dedup();
+        return (InboxState::NotGitHub(hosts), Vec::new());
+    }
     let hosts = match runner.run(auth_status_request()).await {
         Ok(output) => match parse_auth_status(&output) {
             Ok(hosts) => hosts,
@@ -328,14 +417,7 @@ async fn load_inbox(
         },
         Err(error) => return (InboxState::Failed(error), Vec::new()),
     };
-    if hosts.is_empty() {
-        return (
-            InboxState::Failed(GhError::LoggedOut { host: None }),
-            Vec::new(),
-        );
-    }
-
-    let hosts: Vec<_> = hosts
+    let mut hosts: Vec<_> = hosts
         .into_iter()
         .filter(|auth| {
             repos
@@ -346,6 +428,18 @@ async fn load_inbox(
     if hosts.is_empty() {
         let host = repos.first().map(|repo| repo.host.clone());
         return (InboxState::Failed(GhError::LoggedOut { host }), Vec::new());
+    }
+    // A host gh has never logged in to is missing from `gh auth status`; list it as logged out.
+    for repo in &repos {
+        if !hosts
+            .iter()
+            .any(|auth: &HostAuth| auth.host.to_lowercase() == repo.host)
+        {
+            hosts.push(HostAuth {
+                host: repo.host.clone(),
+                login: None,
+            });
+        }
     }
 
     let tracked = database.tracked().log_err().unwrap_or_default();
@@ -543,6 +637,7 @@ impl InboxPanel {
         title: impl Into<SharedString>,
         detail: Option<(SharedString, Color)>,
         button_label: Option<&'static str>,
+        extra: Option<AnyElement>,
     ) -> impl IntoElement {
         v_flex()
             .flex_1()
@@ -565,6 +660,7 @@ impl InboxPanel {
                         window.dispatch_action(RefreshInbox.boxed_clone(), cx)
                     })
             }))
+            .children(extra)
     }
 
     fn row(&self, summary: &PrSummary) -> RowMeta {
@@ -653,12 +749,14 @@ impl Render for InboxPanel {
                         Color::Muted,
                     )),
                     Some("Load pull requests"),
+                    None,
                 ))
             }
             InboxState::Loading => {
                 body = body.child(Self::render_empty_state(
                     IconName::PullRequest,
                     "Loading pull requests…",
+                    None,
                     None,
                     None,
                 ))
@@ -669,14 +767,42 @@ impl Render for InboxPanel {
                     NO_REPOSITORY_TEXT,
                     Some((NO_REPOSITORY_DETAIL.into(), Color::Muted)),
                     None,
+                    None,
+                ))
+            }
+            InboxState::NotGitHub(hosts) => {
+                body = body.child(Self::render_empty_state(
+                    IconName::Github,
+                    "Not a GitHub repository",
+                    Some((
+                        format!(
+                            "Pull requests work with GitHub and GitHub Enterprise. This window's repositories are on {}.",
+                            hosts.join(", ")
+                        )
+                        .into(),
+                        Color::Muted,
+                    )),
+                    None,
+                    None,
                 ))
             }
             InboxState::Failed(error) => {
+                let fix = error.fix();
+                let detected = self.detected_line();
+                let extra = v_flex()
+                    .items_center()
+                    .gap_2()
+                    .when(!detected.is_empty(), |extra| {
+                        extra.child(Label::new(detected).color(Color::Muted).size(LabelSize::Small))
+                    })
+                    .children(fix.clone().map(|fix| self.render_fix(fix, cx)))
+                    .into_any_element();
                 body = body.child(Self::render_empty_state(
                     IconName::Warning,
                     "Couldn't load pull requests",
                     Some((error.to_string().into(), Color::Error)),
-                    Some("Try again"),
+                    fix.is_none().then_some("Try again"),
+                    Some(extra),
                 ))
             }
             InboxState::Loaded(hosts) => {
@@ -688,7 +814,11 @@ impl Render for InboxPanel {
                     }
                     match &host.result {
                         Err(error) => {
-                            body = body.child(Self::render_note(error.to_string(), Color::Error))
+                            body = body
+                                .child(Self::render_note(error.to_string(), Color::Error))
+                                .children(error.fix().map(|fix| {
+                                    div().px_2().pb_1().child(self.render_fix(fix, cx))
+                                }))
                         }
                         Ok(inbox) => {
                             for (group, rows) in &inbox.sections {
@@ -712,6 +842,7 @@ impl Render for InboxPanel {
                         IconName::Check,
                         EMPTY_INBOX_TEXT,
                         Some((EMPTY_INBOX_DETAIL.into(), Color::Muted)),
+                        None,
                         None,
                     ));
                 }
@@ -1046,7 +1177,9 @@ mod tests {
         panel.read_with(&cx, |panel, _| {
             assert!(matches!(
                 panel.state(),
-                InboxState::Failed(GhError::LoggedOut { host: None })
+                InboxState::Failed(GhError::LoggedOut {
+                    host: Some(host)
+                }) if host == "github.com"
             ));
         });
     }
@@ -1082,6 +1215,105 @@ mod tests {
             assert_eq!(host_line(hosts), "ghe.corp + github.com");
         });
         render(&panel, &mut cx);
+    }
+
+    #[gpui::test]
+    async fn enterprise_host_without_login_is_reported(cx: &mut TestAppContext) {
+        let fake = FakeGh::new();
+        init_test(cx, &fake);
+        respond_auth(&fake, AUTH_ONE_HOST);
+        respond_inbox(&fake, "github.com");
+        let (_workspace, panel, mut cx) =
+            add_panel(cx, &[ORIGIN, ("upstream", "https://ghe.corp/acme/app.git")]).await;
+        set_active(&panel, true, &mut cx);
+        panel.read_with(&cx, |panel, _| {
+            let InboxState::Loaded(hosts) = panel.state() else {
+                panic!("expected Loaded, got {:?}", panel.state());
+            };
+            let ghe = hosts
+                .iter()
+                .find(|host| host.host == "ghe.corp")
+                .expect("ghe.corp listed");
+            assert_eq!(
+                ghe.result,
+                Err(GhError::LoggedOut {
+                    host: Some("ghe.corp".into())
+                })
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn ssh_alias_remote_uses_the_real_host(cx: &mut TestAppContext) {
+        let fake = FakeGh::new();
+        init_test(cx, &fake);
+        fake.alias("work-gh", "ghe.corp");
+        respond_auth(
+            &fake,
+            r#"{"hosts":{"ghe.corp":[{"state":"success","active":true,"login":"alice"}]}}"#,
+        );
+        respond_inbox(&fake, "ghe.corp");
+        let (_workspace, panel, mut cx) =
+            add_panel(cx, &[("origin", "git@work-gh:acme/app.git")]).await;
+        set_active(&panel, true, &mut cx);
+        assert_eq!(request_summary(&fake), ["auth", "api ghe.corp"]);
+        let requests = fake.requests();
+        let query = requests[1].stdin.as_deref().expect("graphql body");
+        assert!(query.contains("repo:acme/app"), "{query}");
+    }
+
+    #[gpui::test]
+    async fn gitlab_remote_is_not_github(cx: &mut TestAppContext) {
+        let fake = FakeGh::new();
+        init_test(cx, &fake);
+        let (_workspace, panel, mut cx) =
+            add_panel(cx, &[("origin", "git@gitlab.com:acme/app.git")]).await;
+        set_active(&panel, true, &mut cx);
+        assert!(fake.requests().is_empty());
+        panel.read_with(&cx, |panel, _| {
+            assert_eq!(
+                panel.state(),
+                &InboxState::NotGitHub(vec!["gitlab.com".into()])
+            )
+        });
+        render(&panel, &mut cx);
+    }
+
+    #[gpui::test]
+    async fn failure_shows_the_detected_repository(cx: &mut TestAppContext) {
+        let fake = FakeGh::new();
+        init_test(cx, &fake);
+        respond_auth(&fake, r#"{"hosts":{}}"#);
+        let (_workspace, panel, mut cx) =
+            add_panel(cx, &[("origin", "https://ghe.corp/acme/app.git")]).await;
+        set_active(&panel, true, &mut cx);
+        panel.read_with(&cx, |panel, _| {
+            assert_eq!(panel.detected_line(), "Found ghe.corp/acme/app")
+        });
+        render(&panel, &mut cx);
+    }
+
+    #[gpui::test]
+    async fn fix_reloads_the_panel_when_its_command_ends(cx: &mut TestAppContext) {
+        let fake = FakeGh::new();
+        init_test(cx, &fake);
+        respond_auth(&fake, r#"{"hosts":{}}"#);
+        respond_auth(&fake, AUTH_ONE_HOST);
+        respond_inbox(&fake, "github.com");
+        let (_workspace, panel, mut cx) = add_panel(cx, &[ORIGIN]).await;
+        set_active(&panel, true, &mut cx);
+        panel.update_in(&mut cx, |panel, window, cx| {
+            let InboxState::Failed(error) = panel.state() else {
+                panic!("expected Failed");
+            };
+            let fix = error.fix().expect("login fix");
+            panel.run_fix(fix, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(request_summary(&fake), ["auth", "auth", "api github.com"]);
+        panel.read_with(&cx, |panel, _| {
+            assert!(matches!(panel.state(), InboxState::Loaded(_)))
+        });
     }
 
     #[gpui::test]

@@ -13,8 +13,14 @@ pub struct GhRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub enum GhError {
     NotInstalled,
-    LoggedOut { host: Option<String> },
-    Failed { message: String },
+    /// Too old to know `--json`, which Photon relies on.
+    Outdated,
+    LoggedOut {
+        host: Option<String>,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 impl fmt::Display for GhError {
@@ -23,6 +29,10 @@ impl fmt::Display for GhError {
             GhError::NotInstalled => write!(
                 formatter,
                 "GitHub CLI not found. Install it with \"brew install gh\", then refresh."
+            ),
+            GhError::Outdated => write!(
+                formatter,
+                "GitHub CLI is too old. Update it with \"brew upgrade gh\", then refresh."
             ),
             GhError::LoggedOut { host: Some(host) } => write!(
                 formatter,
@@ -39,8 +49,56 @@ impl fmt::Display for GhError {
 
 impl std::error::Error for GhError {}
 
+/// A command that resolves a `GhError`, run in a terminal because it may prompt.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GhFix {
+    pub label: String,
+    pub args: Vec<String>,
+}
+
+impl GhError {
+    pub fn fix(&self) -> Option<GhFix> {
+        let (label, line) = match self {
+            GhError::NotInstalled => (
+                "Install GitHub CLI".to_string(),
+                "brew install gh".to_string(),
+            ),
+            GhError::Outdated => (
+                "Update GitHub CLI".to_string(),
+                "brew upgrade gh".to_string(),
+            ),
+            GhError::LoggedOut { host: Some(host) } => (
+                format!("Log in to {host}"),
+                format!("gh auth login --hostname {host} --web"),
+            ),
+            GhError::LoggedOut { host: None } => (
+                "Log in to GitHub".to_string(),
+                "gh auth login --web".to_string(),
+            ),
+            GhError::Failed { .. } => return None,
+        };
+        Some(GhFix {
+            label,
+            args: line.split(' ').map(String::from).collect(),
+        })
+    }
+}
+
+/// The `hostname` line of `ssh -G <alias>`.
+pub fn parse_ssh_hostname(config: &str) -> Option<String> {
+    config
+        .lines()
+        .find_map(|line| line.strip_prefix("hostname "))
+        .map(|host| host.trim().to_lowercase())
+}
+
 pub trait GhRunner: Send + Sync + 'static {
     fn run(&self, request: GhRequest) -> BoxFuture<'static, Result<String, GhError>>;
+
+    /// The real host behind an SSH alias like `git@work-gh:org/repo`.
+    fn ssh_hostname(&self, _alias: &str) -> BoxFuture<'static, Option<String>> {
+        Box::pin(std::future::ready(None))
+    }
 }
 
 pub struct SystemGh {
@@ -123,6 +181,9 @@ impl GhRunner for SystemGh {
                 return Err(GhError::LoggedOut { host });
             }
             let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("unknown flag: --json") {
+                return Err(GhError::Outdated);
+            }
             let mut parts = vec![stderr.trim().to_string()];
             if let Ok(body) = serde_json::from_str::<serde_json::Value>(&stdout) {
                 collect_messages(&body, &mut parts);
@@ -131,6 +192,22 @@ impl GhRunner for SystemGh {
             Err(GhError::Failed {
                 message: parts.join(": "),
             })
+        })
+    }
+
+    fn ssh_hostname(&self, alias: &str) -> BoxFuture<'static, Option<String>> {
+        let alias = alias.to_string();
+        Box::pin(async move {
+            let output = new_command("ssh")
+                .args(["-G", &alias])
+                .output()
+                .await
+                .ok()?;
+            output
+                .status
+                .success()
+                .then(|| parse_ssh_hostname(&String::from_utf8_lossy(&output.stdout)))
+                .flatten()
         })
     }
 }
@@ -204,6 +281,7 @@ type Matcher = Box<dyn Fn(&GhRequest) -> bool + Send + Sync>;
 pub struct FakeGh {
     responses: parking_lot::Mutex<Vec<(Matcher, Result<String, GhError>)>>,
     requests: parking_lot::Mutex<Vec<GhRequest>>,
+    aliases: parking_lot::Mutex<std::collections::HashMap<String, String>>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -223,6 +301,10 @@ impl FakeGh {
     pub fn requests(&self) -> Vec<GhRequest> {
         self.requests.lock().clone()
     }
+
+    pub fn alias(&self, alias: &str, host: &str) {
+        self.aliases.lock().insert(alias.into(), host.into());
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -237,6 +319,10 @@ impl GhRunner for FakeGh {
         };
         self.requests.lock().push(request);
         Box::pin(std::future::ready(result))
+    }
+
+    fn ssh_hostname(&self, alias: &str) -> BoxFuture<'static, Option<String>> {
+        Box::pin(std::future::ready(self.aliases.lock().get(alias).cloned()))
     }
 }
 
@@ -393,5 +479,59 @@ mod tests {
             .map(|request| request.args[0].clone())
             .collect();
         assert_eq!(seen, ["b", "a", "a"]);
+    }
+
+    #[gpui::test]
+    async fn old_gh_without_json_flag_is_outdated(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gh = stub(&dir, "echo 'unknown flag: --json' >&2; exit 1");
+        assert_eq!(
+            gh.run(request(&["auth", "status", "--json", "hosts"], None))
+                .await,
+            Err(GhError::Outdated)
+        );
+    }
+
+    #[test]
+    fn errors_offer_a_fix_command() {
+        let fix = |error: GhError| error.fix().map(|fix| (fix.label, fix.args));
+        let args = |line: &str| line.split(' ').map(String::from).collect::<Vec<_>>();
+        assert_eq!(
+            fix(GhError::NotInstalled),
+            Some(("Install GitHub CLI".into(), args("brew install gh")))
+        );
+        assert_eq!(
+            fix(GhError::Outdated),
+            Some(("Update GitHub CLI".into(), args("brew upgrade gh")))
+        );
+        assert_eq!(
+            fix(GhError::LoggedOut {
+                host: Some("ghe.corp".into())
+            }),
+            Some((
+                "Log in to ghe.corp".into(),
+                args("gh auth login --hostname ghe.corp --web")
+            ))
+        );
+        assert_eq!(
+            fix(GhError::LoggedOut { host: None }),
+            Some(("Log in to GitHub".into(), args("gh auth login --web")))
+        );
+        assert_eq!(
+            fix(GhError::Failed {
+                message: "x".into()
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn ssh_config_hostname_is_read() {
+        assert_eq!(
+            parse_ssh_hostname("user git\nhostname ghe.corp\nport 22\n"),
+            Some("ghe.corp".into())
+        );
+        assert_eq!(parse_ssh_hostname("user git\n"), None);
     }
 }
