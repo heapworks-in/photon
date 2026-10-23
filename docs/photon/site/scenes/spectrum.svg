@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520" preserveAspectRatio="none">
+  <defs>
+    <filter id="g" x="-10%" y="-50%" width="120%" height="200%"><feGaussianBlur stdDeviation="3"/></filter>
+    <linearGradient id="fade" x1="0" x2="1"><stop offset="0" stop-color="#fff" stop-opacity="1"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+    <mask id="m"><rect width="1200" height="520" fill="url(#fade)"/></mask>
+  </defs>
+  <g mask="url(#m)" stroke-linecap="round" fill="none">
+    <g filter="url(#g)" stroke-width="7" opacity=".7">
+      <path d="M0 260 L1200 40" stroke="#ff8272"/><path d="M0 260 L1200 125" stroke="#fefdc2"/>
+      <path d="M0 260 L1200 210" stroke="#b4fa72"/><path d="M0 260 L1200 300" stroke="#a5d5fe"/>
+      <path d="M0 260 L1200 390" stroke="#d0d1fe"/><path d="M0 260 L1200 480" stroke="#ff8ffd"/>
+    </g>
+    <g stroke-width="2">
+      <path d="M0 260 L1200 40" stroke="#ff8272"/><path d="M0 260 L1200 125" stroke="#fefdc2"/>
+      <path d="M0 260 L1200 210" stroke="#b4fa72"/><path d="M0 260 L1200 300" stroke="#a5d5fe"/>
+      <path d="M0 260 L1200 390" stroke="#d0d1fe"/><path d="M0 260 L1200 480" stroke="#ff8ffd"/>
+    </g>
+  </g>
+</svg>

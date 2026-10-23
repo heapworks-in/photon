@@ -1,0 +1,107 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="kit.css">
+<style>
+  .stage { --beam-y: 236px; --beam-x: 140px; --spec-x: 1080px; --spec-w: 620px; --spec-h: 300px; --gx: 72%; --gy: 62%; }
+  .spectrum { transform: translateY(-50%) rotate(-24deg); transform-origin: left center; }
+  .window { left: 140px; top: 96px; width: 940px; height: 820px; }
+  .copy { left: 1140px; top: 500px; width: 400px; }
+  .copy .headline { font-size: 42px; }
+
+  .meta { display: flex; align-items: center; gap: 14px; padding: 9px 14px 0; font: 12.5px "Plex"; color: #8e8e8e; }
+  .meta .branch { color: var(--magenta); }
+  .block .cmd { font-weight: 700; }
+  .term { gap: 12px; position: relative; }
+  .term .block { opacity: .55; }
+
+  .ichips { display: flex; gap: 8px; margin-top: auto; }
+  .ichip { font: 12.5px "Plex"; color: #cfcfcf; padding: 4px 10px; border-radius: 6px; background: #141414; border: 1px solid #262626; }
+  .ichip .muted { margin-left: 8px; }
+  .input { margin-top: 0; line-height: 1.6; white-space: pre; border-color: color-mix(in srgb, var(--accent) 55%, #333); }
+  .input .sel { background: #19aad84d; border-radius: 2px; }
+  .input .caret { width: 2px; height: 18px; }
+
+  .modal { position: absolute; z-index: 4; left: 290px; top: 150px; width: 640px; font: 14px "Plex";
+    background: #121214; border: 1px solid #2e2e2e; border-radius: 12px; overflow: hidden;
+    box-shadow: 0 40px 90px -10px #000, 0 0 0 1px #ffffff08 inset, 0 0 60px -20px #19aad855; }
+  .modal .q { padding: 14px 16px; border-bottom: 1px solid #242424; font-size: 15px; color: var(--text); display: flex; align-items: center; }
+  .modal .q .caret { display: inline-block; width: 2px; height: 18px; background: var(--accent); margin-left: 1px; }
+  .modal .list { padding: 6px; }
+  .modal .item { padding: 8px 12px; border-radius: 7px; }
+  .modal .item.on { background: #222226; }
+  .modal .item .c1 { font: 14px "Lilex"; color: #ededed; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .modal .item .c2 { font-size: 12px; color: var(--dim); margin-top: 3px; }
+  .modal .item .c2.red { color: var(--red); }
+</style></head>
+<body><div class="stage">
+  <div class="beam"></div>
+  <img class="spectrum" src="spectrum.svg">
+
+  <div class="copy">
+    <div class="kicker">Terminal</div>
+    <div class="headline">Edit commands<br>like code.</div>
+    <div class="sub">The input is a real editor: select with the mouse, add lines with Shift-Enter, and press Ctrl-R to search everything you have run, in any project.</div>
+  </div>
+
+  <div class="window">
+    <div class="titlebar">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <div class="ptabs">
+        <div class="ptab">checkout-api</div>
+        <div class="ptab">web</div>
+        <div class="ptab on">infra</div>
+      </div>
+    </div>
+    <div class="body">
+      <div class="term">
+        <div class="block">
+          <div class="meta"><span>~/src/infra</span><span class="branch">main</span><span>(2.3s)</span></div>
+          <div class="cmd">kubectl config use-context staging</div>
+          <div class="out">Switched to context "staging".</div>
+        </div>
+        <div class="block">
+          <div class="meta"><span>~/src/infra</span><span class="branch">main</span><span>(1.1s)</span></div>
+          <div class="cmd">kubectl -n payments get deploy checkout-api</div>
+          <div class="out">NAME           READY   UP-TO-DATE   AVAILABLE   AGE
+checkout-api   3/3     3            3           41d</div>
+        </div>
+        <div class="block">
+          <div class="meta"><span>~/src/infra</span><span class="branch">main</span><span>(0.4s)</span></div>
+          <div class="cmd">git log --oneline -3 -- k8s/payments</div>
+          <div class="out"><span class="yellow">9f3c2e1</span> Bump checkout-api to 1.7.4
+<span class="yellow">51ab07d</span> Raise payments HPA max to 12
+<span class="yellow">c0d8a92</span> Add retry budget to payments mesh policy</div>
+        </div>
+        <div class="block">
+          <div class="meta"><span>~/src/infra</span><span class="branch">main</span><span>(0.9s)</span></div>
+          <div class="cmd">kubectl -n payments get pods -l app=checkout-api</div>
+          <div class="out">NAME                            READY   STATUS    RESTARTS   AGE
+checkout-api-7c9d6b8f4d-2xkqp   1/1     Running   0          3h12m
+checkout-api-7c9d6b8f4d-h8n4w   1/1     Running   0          3h12m
+checkout-api-7c9d6b8f4d-vp6rz   1/1     Running   1          3h11m</div>
+        </div>
+        <div class="ichips">
+          <span class="ichip">📁 ~/src/infra ▾</span>
+          <span class="ichip">⎇ main ▾<span class="muted">± 2 changed</span></span>
+        </div>
+        <div class="input">kubectl --context <span class="sel">staging -n payments \</span>
+<span class="sel">  set image</span> deployment/checkout-api \
+  checkout-api=ghcr.io/acme/checkout-api:1.8.0<span class="caret"></span></div>
+      </div>
+    </div>
+    <div class="statusbar"><span>~/src/infra</span><span>main</span><span style="margin-left:auto">zsh</span></div>
+  </div>
+
+  <div class="modal">
+    <div class="q">deploy<span class="caret"></span></div>
+    <div class="list">
+      <div class="item on"><div class="c1">kubectl --context staging -n payments rollout status deploy/checkout-api</div><div class="c2">~/src/infra</div></div>
+      <div class="item"><div class="c1">pnpm run deploy:preview --filter storefront</div><div class="c2">~/src/web</div></div>
+      <div class="item"><div class="c1">fly deploy --app checkout-api-staging</div><div class="c2 red">~/src/checkout-api  ✗</div></div>
+      <div class="item"><div class="c1">./scripts/deploy.sh --env staging --dry-run</div><div class="c2">~/src/checkout-api</div></div>
+      <div class="item"><div class="c1">terraform plan -target=module.payments_deploy</div><div class="c2">~/src/infra</div></div>
+    </div>
+  </div>
+
+  <div class="callout left" style="left:1092px; top:356px; --len:60px"><b>Ctrl-R searches every project</b><i></i></div>
+  <div class="callout left" style="left:1092px; top:836px; --len:60px"><b>Select across lines</b><i></i></div>
+</div></body></html>

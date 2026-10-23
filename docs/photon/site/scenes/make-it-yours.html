@@ -1,0 +1,110 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="kit.css">
+<style>
+  .stage { --beam-y: 810px; --beam-x: 600px; --spec-x: 1490px; --spec-w: 110px; --spec-h: 620px; --gx: 34%; --gy: 55%; }
+  .window { left: 600px; top: 110px; width: 890px; height: 780px; font-family: -apple-system, "SF Pro Text", sans-serif; }
+  .copy { left: 72px; top: 50px; width: 470px; }
+
+  .window .code, .window .term, .window .term .cmd, .window .input { font-family: Menlo, monospace; }
+  .titlebar .title { color: var(--text); font-weight: 600; }
+  .titlebar .branch { color: var(--magenta); }
+  .pane { display: flex; flex-direction: column; min-width: 0; }
+  .pane.left { width: 470px; flex: none; border-right: 1px solid var(--border-soft); }
+  .pane.rightp { flex: 1; }
+  .pane .tabs { flex: none; }
+  .pane .code { padding: 12px 0; font-size: 13.5px; overflow: hidden; line-height: 1.65; }
+  .pane .term { overflow: hidden; font-size: 13.5px; }
+  .chg { background: color-mix(in srgb, var(--accent) 12%, transparent); box-shadow: inset 2px 0 0 var(--accent); display: inline-block; width: 100%; }
+
+  .palette { left: 72px; top: 530px; width: 600px; padding: 0; overflow: hidden; font-family: -apple-system, "SF Pro Text", sans-serif; }
+  .palette .q { padding: 14px 16px; border-bottom: 1px solid #2a2a2a; font-size: 15px; color: var(--text); display: flex; align-items: center; }
+  .palette .q .caret { display: inline-block; width: 2px; height: 18px; background: var(--accent); margin-left: 1px; }
+  .palette .list { padding: 6px; }
+  .palette .it { padding: 9px 12px; border-radius: 7px; font-size: 14.5px; color: #d8d8d8; }
+  .palette .it b { color: var(--accent); font-weight: 600; }
+  .palette .it.sel { background: color-mix(in srgb, var(--accent) 20%, #121214); color: #fff; }
+
+  .keys { position: absolute; z-index: 3; left: 72px; top: 400px; display: grid; grid-template-columns: auto 1fr; gap: 14px 18px; align-items: center; }
+  .keys .combo { display: flex; gap: 5px; align-items: center; }
+  .keys .combo em { font-style: normal; color: var(--dim); margin: 0 4px; }
+  .kbd { min-width: 34px; height: 34px; padding: 0 9px; display: inline-grid; place-items: center; border-radius: 8px; font: 600 15px "Plex"; color: #eaeaea;
+    background: linear-gradient(#1d1d1f, #131315); border: 1px solid #333; border-bottom-width: 3px; box-shadow: 0 6px 14px #0008; }
+  .keys .what { font: 16px "Plex"; color: var(--muted); }
+</style></head>
+<body><div class="stage">
+  <div class="beam"></div>
+  <img class="spectrum" src="spectrum.svg">
+
+  <div class="copy">
+    <div class="kicker">Make it yours</div>
+    <div class="headline">One command,<br>every surface.</div>
+    <div class="sub">Pick a font style and the editor, menus and terminal change together. Photon Black is the default theme, and every extra has an off switch.</div>
+  </div>
+
+  <div class="keys">
+    <div class="combo"><span class="kbd">⌘</span><span class="kbd">⇧</span><span class="kbd">P</span></div><div class="what">Command palette</div>
+    <div class="combo"><span class="kbd">⌘</span><span class="kbd">K</span><em>then</em><span class="kbd">⌘</span><span class="kbd">T</span></div><div class="what">Switch theme</div>
+  </div>
+
+  <div class="window">
+    <div class="titlebar">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <span class="title">checkout-api</span><span class="branch">⎇ main</span>
+    </div>
+    <div class="body">
+      <div class="pane left">
+        <div class="tabs"><span class="on">settings.json</span><span>retry.rs</span></div>
+        <div class="code"><span class="ln">1</span>{
+<span class="ln">2</span>  <span class="s">"theme"</span>: {
+<span class="ln">3</span>    <span class="s">"mode"</span>: <span class="s">"dark"</span>,
+<span class="ln">4</span>    <span class="s">"dark"</span>: <span class="s">"Photon Black"</span>
+<span class="ln">5</span>  },
+<span class="chg"><span class="ln">6</span>  <span class="s">"buffer_font_family"</span>: <span class="s">"Menlo"</span>,</span>
+<span class="chg"><span class="ln">7</span>  <span class="s">"ui_font_family"</span>: <span class="s">".SystemUIFont"</span>,</span>
+<span class="ln">8</span>  <span class="s">"terminal"</span>: {
+<span class="ln">9</span>    <span class="c">// false restores the classic terminal</span>
+<span class="ln">10</span>    <span class="s">"blocks"</span>: <span class="k">true</span>,
+<span class="ln">11</span>    <span class="c">// keep blocks, drop the extra actions</span>
+<span class="ln">12</span>    <span class="s">"smart_blocks"</span>: <span class="k">false</span>
+<span class="ln">13</span>  }
+<span class="ln">14</span>}</div>
+      </div>
+      <div class="pane rightp">
+        <div class="tabs"><span class="on">Terminal</span></div>
+        <div class="term">
+          <div class="block ok">
+            <div class="bhead"><span>~/src/checkout-api</span><span class="branch">⎇ main</span><span class="right"><span>3.8s</span><span class="green">✓</span></span></div>
+            <div class="cmd">cargo test payments</div>
+            <div class="out">running 43 tests
+test result: <span class="green">ok</span>. 43 passed; 0 failed</div>
+          </div>
+          <div class="block ok">
+            <div class="bhead"><span>~/src/checkout-api</span><span class="branch">⎇ main</span><span class="right"><span>0.1s</span><span class="green">✓</span></span></div>
+            <div class="cmd">git status --short</div>
+            <div class="out"><span class="yellow"> M</span> src/payments/retry.rs
+<span class="green">??</span> tests/retry_backoff.rs</div>
+          </div>
+          <div class="block ok">
+            <div class="bhead"><span>~/src/checkout-api</span><span class="branch">⎇ main</span><span class="right"><span>0.1s</span><span class="green">✓</span></span></div>
+            <div class="cmd">git diff --stat</div>
+            <div class="out"> src/payments/retry.rs | 6 <span class="green">++++</span><span class="red">--</span></div>
+          </div>
+          <div class="input">git add -p <span class="caret"></span></div>
+        </div>
+      </div>
+    </div>
+    <div class="statusbar"></div>
+  </div>
+
+  <div class="float palette">
+    <div class="q">photon font style<span class="caret"></span></div>
+    <div class="list">
+      <div class="it"><b>photon</b>: use mono <b>font style</b></div>
+      <div class="it"><b>photon</b>: use hack <b>font style</b></div>
+      <div class="it sel"><b>photon</b>: use menlo <b>font style</b></div>
+      <div class="it"><b>photon</b>: use monaco <b>font style</b></div>
+    </div>
+  </div>
+
+  <div class="callout" style="left:72px; top:311px; --len:326px"><b>Written to settings.json</b><i style="background:linear-gradient(90deg,transparent,var(--accent))"></i></div>
+</div></body></html>

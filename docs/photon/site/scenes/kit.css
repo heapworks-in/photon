@@ -1,0 +1,103 @@
+/* Shared look for the docs illustrations. Colors are Photon Black (assets/themes/photon/photon.json). */
+@font-face { font-family: "Lilex"; src: url("../../../../assets/fonts/lilex/Lilex-Regular.ttf"); }
+@font-face { font-family: "Lilex"; font-weight: 700; src: url("../../../../assets/fonts/lilex/Lilex-Bold.ttf"); }
+@font-face { font-family: "Plex"; src: url("../../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf"); }
+@font-face { font-family: "Plex"; font-weight: 600; src: url("../../../../assets/fonts/ibm-plex-sans/IBMPlexSans-SemiBold.ttf"); }
+
+:root {
+  --bg: #050505; --surface: #161616; --hover: #1e1e1e; --border: #232323; --border-soft: #191919;
+  --text: #ffffff; --muted: #a0a0a0; --dim: #6e6e6e; --accent: #19aad8;
+  --green: #b4fa72; --red: #ff8272; --yellow: #fefdc2; --blue: #a5d5fe; --magenta: #ff8ffd; --cyan: #d0d1fe;
+  --glow-a: #19aad8; --glow-b: #ff8ffd;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 1600px; height: 1000px; overflow: hidden; background: #000; }
+body { font-family: "Plex", -apple-system, sans-serif; color: var(--text); -webkit-font-smoothing: antialiased; }
+
+/* The canvas: deep black with two soft colored glows and a faint grid. */
+.stage {
+  position: relative; width: 1600px; height: 1000px; overflow: hidden;
+  background:
+    radial-gradient(700px 500px at var(--gx, 30%) var(--gy, 50%), #19aad81f, transparent 70%),
+    #000;
+}
+/* The photon: a white beam that enters from the left, hits the window and splits into the
+   terminal's ANSI colors. Scenes place it with --beam-y (where it hits) and --beam-x. */
+.beam { position: absolute; z-index: 1; left: 0; top: var(--beam-y, 50%); width: var(--beam-x, 40%); height: 3px; transform: translateY(-50%);
+  background: linear-gradient(90deg, transparent, #ffffff 85%); box-shadow: 0 0 18px 3px #ffffffaa, 0 0 60px 10px #19aad855; border-radius: 3px; }
+.spectrum { position: absolute; z-index: 1; left: var(--spec-x, var(--beam-x, 40%)); top: var(--beam-y, 50%); width: var(--spec-w, 1200px); height: var(--spec-h, 520px); transform: translateY(-50%); }
+
+/* Scene copy. */
+.copy { position: absolute; z-index: 3; }
+.kicker { font: 600 17px "Plex"; color: var(--accent); }
+.headline { font: 700 46px/1.08 "Lilex"; letter-spacing: -.03em; margin-top: 12px; }
+.sub { font: 19px/1.5 "Plex"; color: var(--muted); margin-top: 16px; }
+
+/* A Photon window. */
+.window {
+  position: absolute; z-index: 2; background: var(--bg); border: 1px solid #2c2c2c; border-radius: 14px; overflow: hidden;
+  box-shadow: 0 50px 120px -20px #000, 0 0 0 1px #ffffff0a inset, 0 0 80px -10px color-mix(in srgb, var(--accent) 25%, transparent);
+  display: flex; flex-direction: column;
+}
+.titlebar { height: 40px; flex: none; display: flex; align-items: center; gap: 10px; padding: 0 14px; border-bottom: 1px solid var(--border-soft); font-size: 13px; color: var(--muted); }
+.lights { display: flex; gap: 8px; margin-right: 8px; }
+.lights i { width: 12px; height: 12px; border-radius: 50%; background: #3a3a3a; }
+.lights i:nth-child(1) { background: #ff5f57; } .lights i:nth-child(2) { background: #febc2e; } .lights i:nth-child(3) { background: #28c840; }
+.ptabs { display: flex; gap: 4px; }
+.ptab { padding: 4px 12px; border-radius: 6px; color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 7px; }
+.ptab.on { background: var(--surface); color: var(--text); }
+.ptab .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.body { flex: 1; display: flex; min-height: 0; }
+.statusbar { height: 28px; flex: none; border-top: 1px solid var(--border-soft); display: flex; align-items: center; gap: 16px; padding: 0 12px; font-size: 12px; color: var(--dim); }
+
+/* Editor-style tabs inside the center pane. */
+.tabs { height: 34px; display: flex; border-bottom: 1px solid var(--border-soft); font-size: 13px; }
+.tabs span { padding: 0 16px; display: flex; align-items: center; color: var(--dim); border-right: 1px solid var(--border-soft); }
+.tabs span.on { color: var(--text); background: var(--surface); }
+
+/* Terminal blocks. */
+.term { flex: 1; padding: 14px; display: flex; flex-direction: column; gap: 10px; font-family: "Lilex", monospace; font-size: 14px; }
+.block { border: 1px solid var(--border); border-radius: 10px; background: #0b0b0b; overflow: hidden; }
+.block.sel { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+.block.fail { border-left: 3px solid var(--red); }
+.block.ok { border-left: 3px solid var(--green); }
+.bhead { display: flex; align-items: center; gap: 12px; padding: 8px 12px 0; font: 12px "Plex"; color: var(--dim); }
+.bhead .branch { color: var(--magenta); }
+.bhead .right { margin-left: auto; display: flex; gap: 10px; align-items: center; }
+.cmd { padding: 6px 12px 4px; color: var(--text); }
+.cmd::before { content: "❯ "; color: var(--accent); }
+.out { padding: 4px 12px 12px; color: #cfcfcf; white-space: pre; line-height: 1.55; }
+.chips { display: flex; gap: 8px; padding: 0 12px 12px; font-family: "Plex"; }
+.chip { font: 600 12px "Plex"; padding: 5px 11px; border-radius: 999px; background: var(--surface); border: 1px solid #2e2e2e; color: var(--text); display: inline-flex; gap: 6px; align-items: center; }
+.chip.accent { background: color-mix(in srgb, var(--accent) 18%, #0b0b0b); border-color: color-mix(in srgb, var(--accent) 60%, transparent); color: #bfeeff; }
+.chip.red { color: var(--red); border-color: #ff827255; background: #ff827214; }
+.chip.green { color: var(--green); border-color: #b4fa7255; background: #b4fa7214; }
+.input { margin-top: auto; border: 1px solid #333; border-radius: 10px; padding: 12px; background: #0b0b0b; color: var(--text); }
+.input .caret { display: inline-block; width: 8px; height: 17px; background: var(--accent); vertical-align: -3px; }
+
+/* Code and diffs. */
+.code { font: 14px/1.6 "Lilex", monospace; white-space: pre; }
+.ln { color: var(--dim); display: inline-block; width: 36px; text-align: right; margin-right: 14px; }
+.add { background: #b4fa7212; } .add .ln { color: var(--green); }
+.del { background: #ff827212; } .del .ln { color: var(--red); }
+.k { color: var(--magenta); } .f { color: var(--blue); } .s { color: var(--green); } .t { color: var(--cyan); } .c { color: var(--dim); } .n { color: var(--yellow); }
+
+/* Panels and lists. */
+.panel { border-right: 1px solid var(--border-soft); padding: 12px; font-size: 13px; display: flex; flex-direction: column; gap: 6px; }
+.panel h4 { font: 600 11px "Plex"; letter-spacing: .12em; text-transform: uppercase; color: var(--dim); margin: 6px 0 4px; }
+.row { padding: 8px 10px; border-radius: 8px; }
+.row.on { background: var(--surface); }
+.muted { color: var(--muted); } .dim { color: var(--dim); } .accent { color: var(--accent); }
+.green { color: var(--green); } .red { color: var(--red); } .yellow { color: var(--yellow); } .magenta { color: var(--magenta); }
+.btn { font: 600 13px "Plex"; padding: 7px 14px; border-radius: 8px; background: var(--surface); border: 1px solid #2e2e2e; display: inline-block; }
+.btn.primary { background: var(--accent); color: #001018; border-color: transparent; }
+
+/* Floating annotation: a pill with a short line pointing at the UI. */
+.callout { position: absolute; z-index: 5; display: flex; align-items: center; gap: 10px; font: 600 15px "Plex"; color: var(--text); }
+.callout b { padding: 9px 15px; border-radius: 999px; background: #0d0d0fcc; border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); backdrop-filter: blur(8px); box-shadow: 0 10px 30px #000a, 0 0 24px color-mix(in srgb, var(--accent) 25%, transparent); white-space: nowrap; }
+.callout i { display: block; height: 2px; width: var(--len, 60px); background: linear-gradient(90deg, var(--accent), transparent); }
+.callout.left { flex-direction: row-reverse; } .callout.left i { background: linear-gradient(270deg, var(--accent), transparent); }
+.callout .num { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: #001018; font-size: 12px; margin-right: 8px; }
+
+/* Floating card, e.g. a notification or a popover. */
+.float { position: absolute; z-index: 4; background: #111113ee; border: 1px solid #2e2e2e; border-radius: 12px; padding: 14px 16px; box-shadow: 0 30px 80px -10px #000, 0 0 0 1px #ffffff08 inset; backdrop-filter: blur(10px); font-size: 14px; }

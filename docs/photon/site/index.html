@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Photon: the terminal, at the center</title>
+<meta name="description" content="Photon is a native macOS terminal and editor. Commands become blocks, pull requests read like code, and your own AI agents work beside you.">
+<meta property="og:title" content="Photon">
+<meta property="og:description" content="The terminal is where the work happens. Photon puts it at the center.">
+<meta property="og:image" content="img/hero.webp">
+<link rel="icon" href="icon.png">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+
+<div class="top"><div class="wrap">
+  <a class="brand" href="#"><img src="icon.png" alt="">Photon</a>
+  <nav aria-label="Sections">
+    <a href="#terminal">Terminal</a>
+    <a href="#review">Code review</a>
+    <a href="#workspace">Workspace</a>
+    <a href="#agents">Agents</a>
+    <a href="#lean">Lean</a>
+    <a class="gh" href="https://github.com/heapworks-in/photon">GitHub</a>
+  </nav>
+</div></div>
+
+<main>
+<section class="hero">
+  <div class="wrap">
+    <h1>The terminal is where the work happens.</h1>
+    <p class="lede">Photon puts it at the center, then builds the editor, code review and your AI agents around it.</p>
+    <div class="install"><code id="install-cmd">brew tap heapworks-in/photon &amp;&amp; brew install photon</code><button type="button" id="copy">Copy</button></div>
+    <p class="meta">macOS on Apple silicon. Alpha: fast and usable every day, with some rough edges.</p>
+  </div>
+  <div class="beamline" aria-hidden="true"></div>
+  <div class="wrap"><img class="shot" src="img/hero.webp" width="3200" height="2000" alt="A Photon window with three terminal blocks: git status, a failed cargo test run offering Re-run failed, and a running dev server offering Open localhost."></div>
+</section>
+
+<section class="chapter" id="terminal"><div class="wrap">
+  <header>
+    <span class="marker">Terminal</span>
+    <h2>A terminal that remembers what happened.</h2>
+    <p>Every command and its output become one block. You never scroll back through noise to find what you need.</p>
+  </header>
+
+  <article class="feature">
+    <figure><img class="shot" loading="lazy" src="img/blocks.webp" width="3200" height="2000" alt="Anatomy of a terminal block: directory, branch, duration and exit status, with actions for the selected block."></figure>
+    <div class="text">
+      <h3>Every command is a block</h3>
+      <p>A block shows where the command ran, on which branch, how long it took, and whether it worked. Right-click a block to copy its command or its output, or to run it again.</p>
+    </div>
+  </article>
+
+  <article class="feature">
+    <figure><img class="shot" loading="lazy" src="img/input.webp" width="3200" height="2000" alt="The command input with a multi-line command, a mouse selection and the history search popover."></figure>
+    <div class="text">
+      <h3>The input behaves like an editor</h3>
+      <p>Select text with the mouse, undo, and write commands over several lines. <kbd>↑</kbd> walks your history, and <kbd>ctrl</kbd> <kbd>R</kbd> searches it across every project. Tab completion comes from your own zsh setup.</p>
+    </div>
+  </article>
+
+  <article class="feature">
+    <figure><img class="shot" loading="lazy" src="img/tests.webp" width="3200" height="2000" alt="A test run summarised as 2 failed and 41 passed, with Re-run failed and the failing line open beside the terminal."></figure>
+    <div class="text">
+      <h3>Test runs you can act on</h3>
+      <p><code>cargo test</code>, <code>pytest</code>, <code>jest</code> and friends are summarised as passed and failed. Re-run only the failures, and press <kbd>F8</kbd> to jump to each error.</p>
+    </div>
+  </article>
+
+  <article class="feature">
+    <figure><img class="shot" loading="lazy" src="img/git.webp" width="3200" height="2000" alt="A git status block where each file can be staged, diffed or discarded in place."></figure>
+    <div class="text">
+      <h3>git status, in place</h3>
+      <p>Stage, diff or discard each file right where <code>git status</code> listed it. In <code>git log</code>, cmd-click a commit hash to open it.</p>
+    </div>
+  </article>
+
+  <article class="feature">
+    <figure><img class="shot" loading="lazy" src="img/tables.webp" width="3200" height="2000" alt="kubectl output opened as a sortable table, with Open as JSON and Copy as CSV."></figure>
+    <div class="text">
+      <h3>Output that becomes a table</h3>
+      <p>JSON, <code>kubectl get</code> and <code>docker ps</code> output can open as a table or as JSON, or be copied as CSV.</p>
+    </div>
+  </article>
+
+  <article class="feature">
+    <figure><img class="shot" loading="lazy" src="img/notify.webp" width="3200" height="2000" alt="A macOS notification for a finished build, and a file path in output opening at its line beside the terminal."></figure>
+    <div class="text">
+      <h3>It tells you when the build is done</h3>
+      <p>When a long build finishes while Photon is in the background, it sends a macOS notification. Click it to land back on that block. Cmd-click <code>src/main.rs:42</code> in any output to open that line beside the terminal.</p>
+    </div>
+  </article>
+</div></section>
+
+<section class="chapter" id="review"><div class="wrap">
+  <header>
+    <span class="marker">Code review</span>
+    <h2>Pull requests that read like code.</h2>
+    <p>Photon arranges a pull request in the order you'd want to read it, and shows you what each change touches.</p>
+  </header>
+
+  <article class="feature">
+    <figure><img class="shot" loading="lazy" src="img/pr-inbox.webp" width="3200" height="2000" alt="The Pull requests panel with Review requested, Yours and Mentioned sections."></figure>
+    <div class="text">
+      <h3>What needs your review</h3>
+      <p>The Pull requests panel lists what's waiting on you for the repositories in this window, with checks, unresolved threads and new commits since your review.</p>
+    </div>
+  </article>
+
+  <article class="feature">
+    <figure><img class="shot" loading="lazy" src="img/review-map.webp" width="3200" height="2000" alt="A review map that orders a pull request into steps."></figure>
+    <div class="text">
+      <h3>A review map in reading order</h3>
+      <p>The change is grouped into steps: functions that get called come before the code that calls them, and tests come last.</p>
+    </div>
+  </article>
+
+  <article class="feature">
+    <figure><img class="shot" loading="lazy" src="img/review-context.webp" width="3200" height="2000" alt="A change shown with the functions it calls and the code that calls it."></figure>
+    <div class="text">
+      <h3>Each change with its surroundings</h3>
+      <p>Every change shows the code it touches: the functions it calls and the code that calls it.</p>
+    </div>
+  </article>
+
+  <article class="feature">
+    <figure><img class="shot" loading="lazy" src="img/impact.webp" width="3200" height="2000" alt="The impact panel listing callers, with one caller flagged as not updated."></figure>
+    <div class="text">
+      <h3>Callers the PR forgot</h3>
+      <p>The impact panel lists every caller of the function under your cursor and flags the ones the pull request didn't update.</p>
+    </div>
+  </article>
+
+  <article class="feature">
+    <figure><img class="shot" loading="lazy" src="img/comments.webp" width="3200" height="2000" alt="A draft comment on an unchanged line."></figure>
+    <div class="text">
+      <h3>Comment on any line</h3>
+      <p>Not only the lines in the diff. Drafts save as you type and survive restarts.</p>
+    </div>
+  </article>
+
+  <article class="feature">
+    <figure><img class="shot" loading="lazy" src="img/since-review.webp" width="3200" height="2000" alt="Changes since your review, showing only what the author changed after it."></figure>
+    <div class="text">
+      <h3>Changes since your review</h3>
+      <p>See only what the author changed after your last review, even if they rebased.</p>
+    </div>
+  </article>
+
+  <article class="feature">
+    <figure><img class="shot" loading="lazy" src="img/run-locally.webp" width="3200" height="2000" alt="Run locally opening the pull request in a separate copy of the repository, with the Trust prompt."></figure>
+    <div class="text">
+      <h3>Run it locally, safely</h3>
+      <p>Run locally opens the pull request in a separate copy of the repository, so your own branch and stash are never touched. PR checkouts never run git hooks, and the PR stays in Restricted Mode, with no language servers, until you click Trust. Photon asks again when the author pushes. Your GitHub login stays with <code>gh</code>; Photon never reads or stores tokens.</p>
+    </div>
+  </article>
+</div></section>
+
+<section class="chapter" id="workspace"><div class="wrap">
+  <header>
+    <span class="marker">Workspace</span>
+    <h2>Every project, one window.</h2>
+    <p>Projects and pull request reviews open as tabs in the window you're already in.</p>
+  </header>
+  <article class="feature">
+    <figure><img class="shot" loading="lazy" src="img/tabs.webp" width="3200" height="2000" alt="Project and pull request tabs in one Photon window, with the tab menu open."></figure>
+    <div class="text">
+      <h3>Projects as tabs</h3>
+      <p>Each extra project uses about 67 MB less memory than a separate window. Drag tabs to reorder them, and right-click to close or move one to its own window. Tabs come back in order after a restart.</p>
+      <ul>
+        <li><kbd>ctrl</kbd> <kbd>shift</kbd> <kbd>]</kbd> and <kbd>ctrl</kbd> <kbd>shift</kbd> <kbd>[</kbd> switch tabs</li>
+        <li><kbd>ctrl</kbd> <kbd>shift</kbd> <kbd>T</kbd> opens a new tab, <kbd>ctrl</kbd> <kbd>shift</kbd> <kbd>W</kbd> closes one</li>
+        <li><kbd>cmd</kbd> <kbd>O</kbd> or <kbd>ctrl</kbd> <kbd>R</kbd> opens a project as a new tab</li>
+      </ul>
+    </div>
+  </article>
+</div></section>
+
+<section class="chapter" id="agents"><div class="wrap">
+  <header>
+    <span class="marker">Agents</span>
+    <h2>Your agents, on your plans.</h2>
+    <p>Photon doesn't sell you an AI subscription. It connects to the coding agents you already pay for.</p>
+  </header>
+  <article class="feature">
+    <figure><img class="shot" loading="lazy" src="img/agents.webp" width="3200" height="2000" alt="An agent thread working beside the terminal and editor."></figure>
+    <div class="text">
+      <h3>Bring Claude Code, Devin, or any ACP agent</h3>
+      <p>Any agent that supports the <a href="https://agentclientprotocol.com">Agent Client Protocol</a> works. The agent runs as you, and Photon has no server in between.</p>
+    </div>
+  </article>
+</div></section>
+
+<section class="chapter" id="lean"><div class="wrap">
+  <header>
+    <span class="marker">Lean on purpose</span>
+    <h2>Quick to open, quiet on the wire.</h2>
+    <p>Cold start under 300 ms, about 130 MB at idle, no network calls at startup, no account, and telemetry off for good.</p>
+  </header>
+  <article class="feature">
+    <figure><img class="shot" loading="lazy" src="img/lean.webp" width="3200" height="2000" alt="Photon starting in under 300 milliseconds with no network connections."></figure>
+  </article>
+</div></section>
+
+<section class="chapter" id="yours"><div class="wrap">
+  <header>
+    <span class="marker">Make it yours</span>
+    <h2>Change the look in one step.</h2>
+    <p>Font styles change the editor, menus and terminal together. Photon Black is the default theme.</p>
+  </header>
+  <article class="feature">
+    <figure><img class="shot" loading="lazy" src="img/make-it-yours.webp" width="3200" height="2000" alt="The command palette listing Photon font styles, and settings with the block switches."></figure>
+    <div class="text">
+      <p>Open the command palette with <kbd>cmd</kbd> <kbd>shift</kbd> <kbd>P</kbd> and choose <em>Photon: Use Mono / Hack / Menlo / Monaco font style</em>. Switch themes with <kbd>cmd</kbd> <kbd>K</kbd> <kbd>cmd</kbd> <kbd>T</kbd>. <code>"terminal": { "blocks": false }</code> restores the classic terminal, and <code>"smart_blocks": false</code> keeps blocks without the extra actions.</p>
+    </div>
+  </article>
+</div></section>
+</main>
+
+<footer><div class="wrap">
+  <p>Photon is built on the open-source code of <a href="https://github.com/zed-industries/zed">Zed</a> by Zed Industries. It is an independent project, not affiliated with or endorsed by Zed Industries; "Zed" is their trademark. Licensed under GPL-3.0-or-later, with components under Apache-2.0 where marked.</p>
+  <p><a href="https://github.com/heapworks-in/photon">Source on GitHub</a> · <a href="https://github.com/heapworks-in/photon/releases">Releases</a></p>
+</div></footer>
+
+<script>
+  document.getElementById("copy").addEventListener("click", async (event) => {
+    try {
+      await navigator.clipboard.writeText(document.getElementById("install-cmd").textContent);
+      event.target.textContent = "Copied";
+    } catch {
+      event.target.textContent = "Select and copy";
+    }
+  });
+</script>
+</body>
+</html>

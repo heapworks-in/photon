@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# photon: renders docs/photon/site/scenes/*.html to docs/photon/site/img/*.png at 2x with headless Chrome.
+# Needs Google Chrome and `brew install webp`.
+# Usage: script/photon-docs-images [scene-name ...]
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)/docs/photon/site"
+chrome="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+mkdir -p img
+scenes=("$@")
+[[ ${#scenes[@]} -gt 0 ]] || scenes=($(cd scenes && ls *.html | sed 's/\.html$//'))
+for scene in "${scenes[@]}"; do
+    "$chrome" --headless=new --disable-gpu --hide-scrollbars --allow-file-access-from-files \
+        --window-size=1600,1000 --force-device-scale-factor=2 --virtual-time-budget=1500 \
+        --screenshot="$PWD/img/$scene.png" "file://$PWD/scenes/$scene.html" 2>/dev/null
+    # The site serves WebP; the PNG stays local for previews (git-ignored).
+    cwebp -quiet -q 88 "img/$scene.png" -o "img/$scene.webp"
+    echo "img/$scene.webp"
+done

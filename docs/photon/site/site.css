@@ -1,0 +1,63 @@
+@font-face { font-family: "Lilex"; src: url("fonts/Lilex-Regular.ttf"); font-display: swap; }
+@font-face { font-family: "Lilex"; font-weight: 700; src: url("fonts/Lilex-Bold.ttf"); font-display: swap; }
+@font-face { font-family: "Plex"; src: url("fonts/IBMPlexSans-Regular.ttf"); font-display: swap; }
+@font-face { font-family: "Plex"; font-weight: 600; src: url("fonts/IBMPlexSans-SemiBold.ttf"); font-display: swap; }
+
+:root {
+  --bg: #000; --surface: #111; --border: #232323; --text: #fff; --muted: #a0a0a0; --dim: #6e6e6e; --accent: #19aad8;
+  --green: #b4fa72; --red: #ff8272; --yellow: #fefdc2; --blue: #a5d5fe; --magenta: #ff8ffd; --cyan: #d0d1fe;
+  --measure: 640px; --wide: 1240px;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 72px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body { margin: 0; background: var(--bg); color: var(--text); font: 18px/1.6 "Plex", -apple-system, sans-serif; -webkit-font-smoothing: antialiased; }
+a { color: var(--accent); text-underline-offset: 3px; }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+code, kbd, pre { font-family: "Lilex", monospace; }
+kbd { font-size: .8em; padding: 2px 7px; border: 1px solid #333; border-bottom-width: 2px; border-radius: 6px; background: var(--surface); white-space: nowrap; }
+code { font-size: .88em; color: var(--blue); }
+
+.wrap { max-width: var(--wide); margin: 0 auto; padding: 0 24px; }
+
+/* Top bar */
+.top { position: sticky; top: 0; z-index: 10; background: #000c; backdrop-filter: blur(12px); border-bottom: 1px solid #ffffff10; }
+.top .wrap { display: flex; align-items: center; gap: 28px; height: 60px; }
+.brand { display: flex; align-items: center; gap: 10px; color: var(--text); text-decoration: none; font: 700 19px "Lilex"; }
+.brand img { width: 28px; height: 28px; }
+.top nav { display: flex; gap: 22px; margin-left: auto; font-size: 15px; }
+.top nav a { color: var(--muted); text-decoration: none; }
+.top nav a:hover { color: var(--text); }
+@media (max-width: 760px) { .top nav a:not(.gh) { display: none; } }
+
+/* Hero: the beam runs across the page and into the product shot. */
+.hero { padding: 96px 0 0; position: relative; overflow: hidden; }
+.hero h1 { font: 700 clamp(40px, 6.4vw, 84px)/1.02 "Lilex"; letter-spacing: -.04em; margin: 0; max-width: 15ch; }
+.hero p.lede { font-size: 22px; color: var(--muted); max-width: 34ch; margin: 24px 0 36px; }
+.install { display: inline-flex; align-items: center; gap: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 14px 14px 20px; font: 16px "Lilex"; max-width: 100%; overflow-x: auto; }
+.install span { color: var(--dim); user-select: none; }
+.install button { font: 600 14px "Plex"; color: #001018; background: var(--accent); border: 0; border-radius: 8px; padding: 8px 14px; cursor: pointer; white-space: nowrap; }
+.meta { color: var(--dim); font-size: 15px; margin-top: 14px; }
+.beamline { height: 3px; margin: 72px 0 -2px; background: linear-gradient(90deg, transparent, #fff 40%, #fff 60%, transparent); box-shadow: 0 0 22px 4px #ffffff70, 0 0 70px 14px #19aad840; position: relative; z-index: 1; }
+.shot { display: block; width: 100%; height: auto; border-radius: 18px; border: 1px solid #ffffff14; background: #050505; }
+
+/* Chapters: each owns one spectrum color, used for its marker only. */
+.chapter { padding: 128px 0 24px; }
+.chapter > .wrap > header { max-width: var(--measure); margin-bottom: 56px; }
+.chapter h2 { font: 700 clamp(32px, 4.4vw, 54px)/1.05 "Lilex"; letter-spacing: -.035em; margin: 18px 0 18px; }
+.chapter header p { color: var(--muted); font-size: 20px; margin: 0; }
+.marker { display: inline-flex; align-items: center; gap: 10px; font: 600 16px "Plex"; color: var(--c); }
+.marker::before { content: ""; width: 34px; height: 3px; border-radius: 3px; background: var(--c); box-shadow: 0 0 14px var(--c); }
+#terminal { --c: var(--green); } #review { --c: var(--blue); } #workspace { --c: var(--yellow); }
+#agents { --c: var(--magenta); } #lean { --c: var(--cyan); } #yours { --c: var(--red); }
+
+.feature { margin: 0 0 104px; }
+.feature figure { margin: 0 0 32px; }
+.feature .text { max-width: var(--measure); }
+.feature h3 { font: 600 26px/1.25 "Plex"; letter-spacing: -.01em; margin: 0 0 10px; }
+.feature p { color: #d6d6d6; margin: 0 0 12px; }
+.feature ul { color: #d6d6d6; padding-left: 20px; margin: 0; }
+.feature li { margin: 6px 0; }
+
+footer { border-top: 1px solid var(--border); padding: 48px 0 64px; color: var(--dim); font-size: 15px; }
+footer p { max-width: 80ch; }

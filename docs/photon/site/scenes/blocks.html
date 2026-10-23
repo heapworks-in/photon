@@ -1,0 +1,95 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="kit.css">
+<style>
+  .stage { --beam-y: 582px; --beam-x: 470px; --spec-x: 1370px; --spec-w: 260px; --spec-h: 560px; --gx: 24%; --gy: 40%; }
+  .window { left: 470px; top: 118px; width: 900px; height: 764px; }
+  .copy .headline { font-size: 40px; }
+  .copy { left: 72px; top: 636px; width: 380px; }
+
+  .meta { display: flex; align-items: center; gap: 14px; padding: 9px 14px 0; font: 12.5px "Plex"; color: #8e8e8e; }
+  .meta .branch { color: var(--magenta); }
+  .meta .tools { margin-left: auto; display: flex; gap: 6px; }
+  .block .cmd { font-weight: 700; }
+  .term { gap: 12px; }
+
+  .menu { position: absolute; z-index: 4; left: 716px; top: 510px; width: 300px; padding: 6px; font: 13.5px "Plex";
+    background: #141416; border: 1px solid #2e2e2e; border-radius: 10px; box-shadow: 0 30px 70px -10px #000, 0 0 0 1px #ffffff08 inset; }
+  .menu div { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; border-radius: 6px; color: #e6e6e6; }
+  .menu div kbd { font: 12.5px "Plex"; color: var(--dim); letter-spacing: .06em; }
+  .menu div.hover { background: #232326; color: #fff; }
+  .menu hr { border: 0; border-top: 1px solid #262626; margin: 5px 4px; }
+  .menu .faded { color: #8a8a8a; }
+  .click { position: absolute; z-index: 5; left: 706px; top: 500px; width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid #ffffffcc; box-shadow: 0 0 14px #19aad8; }
+</style></head>
+<body><div class="stage">
+  <div class="beam"></div>
+  <img class="spectrum" src="spectrum.svg">
+
+  <div class="copy">
+    <div class="kicker">Terminal</div>
+    <div class="headline">Every command,<br>its own block.</div>
+    <div class="sub">Each block remembers where it ran, on which branch, and how long it took. Select one with ⌘↑ to copy it or run it again.</div>
+  </div>
+
+  <div class="window">
+    <div class="titlebar">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <div class="ptabs">
+        <div class="ptab on">checkout-api</div>
+        <div class="ptab">web</div>
+        <div class="ptab">infra</div>
+      </div>
+    </div>
+    <div class="body">
+      <div class="term">
+        <div class="block">
+          <div class="meta"><span>~/src/checkout-api</span><span class="branch">main</span><span>(0.1s)</span></div>
+          <div class="cmd">git switch -c retry-backoff</div>
+          <div class="out">Switched to a new branch 'retry-backoff'</div>
+        </div>
+        <div class="block">
+          <div class="meta"><span>~/src/checkout-api</span><span class="branch">retry-backoff</span><span>(48.3s)</span></div>
+          <div class="cmd">cargo build</div>
+          <div class="out">   <span class="green">Compiling</span> payments v0.4.2 (~/src/checkout-api/crates/payments)
+   <span class="green">Compiling</span> checkout-api v1.8.0 (~/src/checkout-api)
+    <span class="green">Finished</span> `dev` profile [unoptimized + debuginfo] target(s) in 48.21s</div>
+        </div>
+        <div class="block sel fail">
+          <div class="meta"><span>~/src/checkout-api</span><span class="branch">retry-backoff</span><span>(0.1s)</span></div>
+          <div class="cmd">curl -sf http://localhost:8080/healthz</div>
+          <div class="out">curl: (7) Failed to connect to localhost port 8080 after 2 ms: Couldn't connect to server</div>
+        </div>
+        <div class="block">
+          <div class="meta"><span>~/src/checkout-api</span><span class="branch">retry-backoff</span><span>(1m 12s)</span></div>
+          <div class="cmd">docker compose up -d postgres redis</div>
+          <div class="out"> <span class="green">✔</span> Container checkout-api-postgres-1  <span class="green">Started</span>
+ <span class="green">✔</span> Container checkout-api-redis-1     <span class="green">Started</span></div>
+        </div>
+        <div class="block">
+          <div class="meta"><span>~/src/checkout-api</span><span class="branch">retry-backoff</span><span>(0.4s)</span></div>
+          <div class="cmd">sqlx migrate run</div>
+          <div class="out">Applied 20261020093112/migrate add retry attempts (14.2ms)</div>
+        </div>
+        <div class="input">cargo run --bin checkout-api <span class="caret"></span></div>
+      </div>
+    </div>
+    <div class="statusbar"><span>~/src/checkout-api</span><span>retry-backoff</span><span style="margin-left:auto">zsh</span></div>
+  </div>
+
+  <div class="click"></div>
+  <div class="menu">
+    <div class="faded">Copy <kbd>⌘C</kbd></div>
+    <div class="faded">Paste <kbd>⌘V</kbd></div>
+    <div class="faded">Select All <kbd>⌘A</kbd></div>
+    <div class="faded">Clear <kbd>⌘K</kbd></div>
+    <hr>
+    <div>Copy Command <kbd>⇧⌘C</kbd></div>
+    <div>Copy Output <kbd>⌥⌘C</kbd></div>
+    <div>Copy Command and Output <kbd>⌥⇧⌘C</kbd></div>
+    <div class="hover">Re-run Command <kbd>⇧⌘R</kbd></div>
+  </div>
+
+  <div class="callout" style="right:1130px; top:277px; --len:56px"><b>Directory, branch and time</b><i></i></div>
+  <div class="callout" style="right:1130px; top:455px; --len:56px"><b>A red edge means it failed</b><i></i></div>
+</div></body></html>

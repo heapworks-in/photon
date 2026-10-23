@@ -1,0 +1,106 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="kit.css">
+<style>
+  .stage { --beam-y: 600px; --beam-x: 480px; --spec-x: 1330px; --spec-w: 270px; --spec-h: 620px; --gx: 28%; --gy: 58%; }
+  .window { left: 480px; top: 250px; width: 850px; height: 480px; }
+  .copy { left: 72px; top: 236px; width: 370px; }
+
+  .titlebar .title { color: var(--text); font-weight: 600; }
+  .titlebar .branch { color: var(--magenta); }
+  .pane { display: flex; flex-direction: column; min-width: 0; }
+  .pane.settings { width: 420px; flex: none; border-right: 1px solid var(--border-soft); }
+  .pane.right { flex: 1; }
+  .pane .tabs { flex: none; }
+  .pane .code { padding: 12px 0; font-size: 13px; overflow: hidden; }
+  .pane .term { overflow: hidden; font-size: 13.5px; }
+  .hl { background: color-mix(in srgb, var(--accent) 10%, transparent); box-shadow: inset 2px 0 0 var(--accent); display: inline-block; width: 100%; }
+  .empty { padding: 2px 12px 12px; font: 13px "Plex"; color: var(--dim); }
+
+  .launch { left: 560px; top: 698px; width: 690px; padding: 18px 22px 22px; }
+  .launch .hd { display: flex; justify-content: space-between; font: 600 14px "Plex"; }
+  .launch .hd span { font-weight: 400; color: var(--dim); }
+  .track { position: relative; height: 72px; margin-top: 18px; }
+  .track .axis { position: absolute; left: 0; right: 0; top: 30px; height: 2px; background: #262626; }
+  .track .fill { position: absolute; left: 0; width: 82%; top: 27px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, #ffffff, var(--accent)); box-shadow: 0 0 18px #19aad888; }
+  .track .budget { position: absolute; right: 0; top: 6px; bottom: 30px; width: 2px; background: repeating-linear-gradient(180deg, var(--muted) 0 4px, transparent 4px 8px); }
+  .track .tick { white-space: nowrap; position: absolute; top: 48px; font: 12px "Plex"; color: var(--dim); transform: translateX(-50%); }
+  .track .ev { position: absolute; top: 0; font: 600 12.5px "Plex"; color: var(--text); white-space: nowrap; }
+  .track .dotm { position: absolute; top: 24px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 0 12px #fff; transform: translateX(-50%); }
+
+  .proc { left: 72px; top: 684px; width: 380px; padding: 14px 0 8px; }
+  .proc .hd { padding: 0 14px 10px; font: 600 14px "Plex"; display: flex; justify-content: space-between; }
+  .proc .hd span { font-weight: 400; color: var(--dim); }
+  .proc table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .proc th { text-align: left; font: 12px "Plex"; color: var(--dim); padding: 6px 12px; border-bottom: 1px solid var(--border); font-weight: 400; }
+  .proc td { padding: 9px 12px; border-bottom: 1px solid var(--border-soft); color: var(--muted); }
+  .proc tr.me td { color: var(--text); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .proc td.z { color: var(--green); font-weight: 600; }
+  .proc tr:last-child td { border-bottom: 0; }
+</style></head>
+<body><div class="stage">
+  <div class="beam"></div>
+  <img class="spectrum" src="spectrum.svg">
+
+  <div class="copy">
+    <div class="kicker">Lean on purpose</div>
+    <div class="headline">Opens fast,<br>stays quiet.</div>
+    <div class="sub">Photon draws its first window in under 300&nbsp;ms and idles at about 130&nbsp;MB. It makes no network calls at startup, needs no account, and keeps telemetry off.</div>
+  </div>
+
+  <div class="float proc">
+    <div class="hd">Network, since launch <span>idle</span></div>
+    <table>
+      <tr><th>Process</th><th>Memory</th><th>Sent</th><th>Received</th></tr>
+      <tr class="me"><td>Photon</td><td>about 130 MB</td><td class="z">0 bytes</td><td class="z">0 bytes</td></tr>
+    </table>
+  </div>
+
+  <div class="window">
+    <div class="titlebar">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <span class="title">checkout-api</span><span class="branch">⎇ main</span>
+    </div>
+    <div class="body">
+      <div class="pane settings">
+        <div class="tabs"><span class="on">Default Settings</span></div>
+        <div class="code"><span class="ln">1720</span><span class="c">// Control what info is collected.</span>
+<span class="ln">1721</span><span class="s">"telemetry"</span>: {
+<span class="hl"><span class="ln">1723</span>  <span class="s">"diagnostics"</span>: <span class="k">false</span>,</span>
+<span class="ln"></span>  <span class="c">// photon: offline by default</span>
+<span class="hl"><span class="ln">1725</span>  <span class="s">"metrics"</span>: <span class="k">false</span>,</span>
+<span class="ln"></span>  <span class="c">// photon: offline by default</span>
+<span class="ln">1729</span>},
+<span class="ln">1730</span>
+<span class="hl"><span class="ln">1738</span><span class="s">"auto_update"</span>: <span class="k">false</span>,</span>
+<span class="ln"></span><span class="c">// photon: update by pulling</span>
+<span class="ln"></span><span class="c">// and rebuilding</span></div>
+      </div>
+      <div class="pane right">
+        <div class="tabs"><span class="on">Terminal</span></div>
+        <div class="term">
+          <div class="block ok">
+            <div class="bhead"><span>~/src/checkout-api</span><span class="branch">⎇ main</span><span class="right"><span>0.2s</span><span class="dim">exit 1</span></span></div>
+            <div class="cmd">lsof -i -a -p $(pgrep -n -f Photon.app)</div>
+            <div class="empty">No output: no open network connections.</div>
+          </div>
+          <div class="input">photon . <span class="caret"></span></div>
+        </div>
+      </div>
+    </div>
+    <div class="statusbar"></div>
+  </div>
+
+  <div class="float launch">
+    <div class="hd">Cold start <span>launch to first window</span></div>
+    <div class="track">
+      <div class="axis"></div><div class="fill"></div><div class="budget"></div>
+      <div class="dotm" style="left:0"></div><div class="dotm" style="left:82%"></div>
+      <div class="ev" style="left:0">Launch</div>
+      <div class="ev" style="left:82%; transform:translateX(-50%)">Window drawn</div>
+      <div class="tick" style="left:0; transform:none">0 ms</div>
+      <div class="tick" style="left:100%; transform:translateX(-100%)">300 ms</div>
+    </div>
+  </div>
+
+  <div class="callout" style="left:1006px; top:172px; flex-direction:column; gap:6px; --len:46px"><b>No account, nothing to sign in to</b><i style="width:2px;height:var(--len);background:linear-gradient(180deg,transparent,var(--accent))"></i></div>
+</div></body></html>
