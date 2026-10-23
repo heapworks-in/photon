@@ -3909,6 +3909,42 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn photon_new_window_opens_a_window_not_a_tab(cx: &mut TestAppContext) {
+        let app_state = init_test(cx);
+        cx.executor().allow_parking();
+        let fs = app_state.fs.as_fake();
+        fs.insert_tree(path!("/a"), json!({ "a.txt": "" })).await;
+        cx.update(|cx| {
+            workspace::open_paths(
+                &[PathBuf::from(path!("/a"))],
+                app_state.clone(),
+                workspace::OpenOptions::default(),
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+        cx.run_until_parked();
+        let window = cx
+            .update(|cx| cx.windows().first().unwrap().downcast::<MultiWorkspace>())
+            .unwrap();
+
+        window
+            .update(cx, |_, window, cx| {
+                window.dispatch_action(NewWindow.boxed_clone(), cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(cx.update(|cx| cx.windows().len()), 2);
+        window
+            .read_with(cx, |multi_workspace, _| {
+                assert_eq!(multi_workspace.workspaces().count(), 1)
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     async fn photon_tabs_restore_in_order(cx: &mut TestAppContext) {
         use session::Session;
 
