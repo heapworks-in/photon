@@ -1,4 +1,5 @@
 mod anchoring;
+mod author;
 mod checklist;
 mod checkout;
 mod context;
@@ -15,6 +16,7 @@ mod store;
 mod suggestions;
 
 pub use anchoring::*;
+pub use author::*;
 pub use checklist::*;
 pub use checkout::*;
 pub use context::*;

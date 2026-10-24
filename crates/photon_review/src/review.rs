@@ -7,10 +7,11 @@ use anyhow::{Result, anyhow};
 use buffer_diff::BufferDiff;
 use editor::{
     Anchor, Editor, EditorEvent, ExcerptRange, MultiBuffer, MultiBufferSnapshot, PathKey,
-    RowHighlightOptions,
+    RowHighlightOptions, SelectionEffects,
     display_map::{
         BlockContext, BlockPlacement, BlockProperties, BlockStyle, CustomBlockId, RenderBlock,
     },
+    scroll::Autoscroll,
 };
 use futures::future::{FutureExt as _, Shared, join_all, try_join_all};
 use gpui::{
@@ -59,6 +60,7 @@ use crate::{
     apply_suggestion, commit_file_request, file_at_commit_request, parse_file_contents,
     parse_suggestion, suggestion_block,
 };
+use crate::{open_feedback, push_command};
 
 actions!(
     photon_review,
@@ -271,6 +273,9 @@ pub struct ReviewItem {
     resolving: HashSet<String>,
     /// Threads whose suggestion is being committed, and what came of the last commit.
     committing_suggestions: HashSet<String>,
+    /// Threads the author is marking done (reply "Done", then resolve).
+    finishing_threads: HashSet<String>,
+    workspace: Option<WeakEntity<Workspace>>,
     suggestion_notes: HashMap<String, SharedString>,
     marking_viewed: HashSet<String>,
     last_review: Option<String>,
@@ -1242,6 +1247,8 @@ impl ReviewItem {
             submit_note: None,
             resolving: HashSet::new(),
             committing_suggestions: HashSet::new(),
+            finishing_threads: HashSet::new(),
+            workspace: None,
             suggestion_notes: HashMap::new(),
             marking_viewed: HashSet::new(),
             last_review,
@@ -1864,6 +1871,169 @@ impl ReviewItem {
 
     /// Flips the thread at once, as GitHub does, and flips it back if `gh` fails. A click while
     /// the thread's last request is pending sends nothing.
+    /// The viewer wrote this pull request: the tab works through its feedback instead of
+    /// reviewing it, since GitHub rejects approving or requesting changes on your own PR.
+    pub fn is_own_pr(&self) -> bool {
+        self.login.eq_ignore_ascii_case(&self.detail.summary.author)
+    }
+
+    /// Selects the review-map step holding the thread's file and scrolls to its line.
+    pub fn show_thread(&mut self, thread_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(thread) = self
+            .detail
+            .threads
+            .iter()
+            .find(|thread| thread.id == thread_id)
+            .cloned()
+        else {
+            return;
+        };
+        if let Some(index) = self
+            .steps
+            .iter()
+            .position(|step| step.files.contains(&thread.path))
+        {
+            self.select_step(index, window, cx);
+        }
+        let Some(line) = thread.line else {
+            return;
+        };
+        let snapshot = self.multibuffer.read(cx).snapshot(cx);
+        let Some(anchor) = self.line_anchor(&thread.path, thread.side, line, &snapshot, cx) else {
+            return;
+        };
+        self.editor.update(cx, |editor, cx| {
+            editor.change_selections(
+                SelectionEffects::scroll(Autoscroll::center()),
+                window,
+                cx,
+                |selections| selections.select_anchor_ranges([anchor..anchor]),
+            );
+        });
+        window.focus(&self.editor.focus_handle(cx), cx);
+    }
+
+    /// Opens the thread's file from the review checkout in an editor, at the thread's line, so the
+    /// author can make the change.
+    pub fn edit_thread_file(
+        &mut self,
+        thread_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(thread) = self
+            .detail
+            .threads
+            .iter()
+            .find(|thread| thread.id == thread_id)
+        else {
+            return;
+        };
+        let Some(workspace) = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.upgrade())
+        else {
+            return;
+        };
+        let path = self.checkout.worktree.join(&thread.path);
+        let row = thread.line.unwrap_or(1).saturating_sub(1);
+        let opening = workspace.update(cx, |workspace, cx| {
+            workspace.open_abs_path(path, OpenOptions::default(), window, cx)
+        });
+        cx.spawn_in(window, async move |_, cx| {
+            let item = opening.await?;
+            if let Some(editor) = item.downcast::<Editor>() {
+                editor.update_in(cx, |editor, window, cx| {
+                    editor.go_to_singleton_buffer_point(Point::new(row, 0), window, cx)
+                })?;
+            }
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// Replies "Done" to the thread and resolves it.
+    pub fn mark_thread_done(
+        &mut self,
+        thread_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        if !self.finishing_threads.insert(thread_id.to_string()) {
+            return Task::ready(Ok(()));
+        }
+        cx.notify();
+        let reply = self.reply(thread_id, "Done".to_string(), cx);
+        let thread_id = thread_id.to_string();
+        cx.spawn(async move |this, cx| {
+            let result = async {
+                reply.await?;
+                this.update(cx, |this, cx| {
+                    this.set_thread_resolved(&thread_id, true, cx)
+                })?
+                .await
+            }
+            .await;
+            this.update(cx, |this, cx| {
+                this.finishing_threads.remove(&thread_id);
+                if let Err(error) = &result {
+                    this.thread_errors
+                        .insert(thread_id.clone(), format!("{error:#}").into());
+                    this.show_comments(cx);
+                }
+                cx.notify();
+            })?;
+            result
+        })
+    }
+
+    pub fn push_command(&self) -> Option<String> {
+        let head_repository = self.detail.head_repository.as_ref()?;
+        (!self.detail.head_ref.is_empty()).then(|| {
+            push_command(
+                &self.detail.summary.key.host,
+                head_repository,
+                &self.detail.head_ref,
+            )
+        })
+    }
+
+    /// Opens a terminal in the review checkout with the commit-and-push command typed in, not run.
+    pub fn open_push_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(command), Some(workspace)) = (
+            self.push_command(),
+            self.workspace
+                .as_ref()
+                .and_then(|workspace| workspace.upgrade()),
+        ) else {
+            return;
+        };
+        let cwd = self.checkout.worktree.clone();
+        let creating = workspace.update(cx, |workspace, cx| {
+            terminal_view::terminal_panel::TerminalPanel::add_center_terminal(
+                workspace,
+                window,
+                cx,
+                move |project, cx| project.create_terminal_shell(Some(cwd), cx),
+            )
+        });
+        cx.spawn_in(window, async move |_, cx| {
+            let terminal = creating.await?;
+            workspace.update_in(cx, |workspace, window, cx| {
+                let view = workspace
+                    .items_of_type::<terminal_view::TerminalView>(cx)
+                    .find(|view| view.read(cx).terminal().downgrade() == terminal);
+                if let Some(view) = view {
+                    view.update(cx, |view, cx| {
+                        view.prefill_block_input(&command, window, cx)
+                    });
+                }
+            })?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
     /// Adds a suggestion block holding the draft's lines, ready to edit into the change.
     pub fn suggest_change(&mut self, local_id: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = self.draft_index(local_id) else {
@@ -3483,6 +3653,7 @@ impl ReviewItem {
                     .size(LabelSize::Small)
                     .color(Color::Muted),
             );
+        map = map.children(self.render_feedback(cx));
         map = map.children(self.render_outdated_drafts(cx));
         for (index, step) in self.steps.iter().enumerate() {
             let selected = index == self.selected;
@@ -3769,6 +3940,86 @@ impl ReviewItem {
             .child(div().flex_1().min_h_0().child(self.editor.clone()))
     }
 
+    fn render_feedback(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if !self.is_own_pr() {
+            return None;
+        }
+        let open = open_feedback(&self.detail.threads);
+        if open.is_empty() {
+            return None;
+        }
+        let mut section = v_flex().id("photon-review-feedback").pb_2().gap_1().child(
+            Label::new(format!("Feedback · {} open", open.len()))
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+        );
+        for thread in open {
+            let first = thread.comments.first();
+            let summary = first
+                .map(|comment| {
+                    let line = comment.body.lines().next().unwrap_or_default();
+                    format!("{}: {line}", comment.author)
+                })
+                .unwrap_or_default();
+            let place = match thread.line {
+                Some(line) => format!("{}:{line}", thread.path),
+                None => format!("{} · outdated", thread.path),
+            };
+            let (show_id, edit_id, done_id) =
+                (thread.id.clone(), thread.id.clone(), thread.id.clone());
+            let finishing = self.finishing_threads.contains(&thread.id);
+            let button_id =
+                |name: &str| SharedString::from(format!("photon-feedback-{name}-{}", thread.id));
+            section = section.child(
+                v_flex()
+                    .py_0p5()
+                    .child(Label::new(summary).size(LabelSize::Small).truncate())
+                    .child(
+                        Label::new(place)
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted)
+                            .truncate(),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new(button_id("show"), "Show")
+                                    .size(ButtonSize::Compact)
+                                    .style(ButtonStyle::Outlined)
+                                    .label_size(LabelSize::XSmall)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.show_thread(&show_id, window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new(button_id("edit"), "Edit")
+                                    .size(ButtonSize::Compact)
+                                    .style(ButtonStyle::Outlined)
+                                    .label_size(LabelSize::XSmall)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.edit_thread_file(&edit_id, window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new(button_id("done"), "Done")
+                                    .size(ButtonSize::Compact)
+                                    .style(ButtonStyle::Outlined)
+                                    .label_size(LabelSize::XSmall)
+                                    .disabled(finishing)
+                                    .tooltip(Tooltip::text(
+                                        "Replies \"Done\" and resolves the thread",
+                                    ))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.mark_thread_done(&done_id, cx).detach_and_log_err(cx)
+                                    })),
+                            ),
+                    ),
+            );
+        }
+        Some(section.into_any_element())
+    }
+
     fn render_impact(&self, cx: &Context<Self>) -> impl IntoElement {
         let title = match &self.impact_function {
             Some(name) => format!("Impact of {name}()"),
@@ -3785,6 +4036,7 @@ impl ReviewItem {
                 )
             })
         };
+        let own_pr = self.is_own_pr();
         let submit = |event: ReviewEvent| {
             cx.listener(move |this: &mut Self, _: &ClickEvent, window, cx| {
                 this.submit(event, window, cx).detach_and_log_err(cx)
@@ -3858,18 +4110,35 @@ impl ReviewItem {
                                     .disabled(self.submitting || !self.can_comment(cx))
                                     .on_click(submit(ReviewEvent::Comment)),
                             )
-                            .child(
-                                crate::button("photon-review-approve", "Approve")
-                                    .style(ButtonStyle::Tinted(TintColor::Success))
-                                    .disabled(self.submitting)
-                                    .on_click(submit(ReviewEvent::Approve)),
-                            )
-                            .child(
-                                crate::button("photon-review-request-changes", "Request changes")
+                            .when(!own_pr, |this| {
+                                this.child(
+                                    crate::button("photon-review-approve", "Approve")
+                                        .style(ButtonStyle::Tinted(TintColor::Success))
+                                        .disabled(self.submitting)
+                                        .on_click(submit(ReviewEvent::Approve)),
+                                )
+                                .child(
+                                    crate::button(
+                                        "photon-review-request-changes",
+                                        "Request changes",
+                                    )
                                     .style(ButtonStyle::Tinted(TintColor::Error))
                                     .disabled(self.submitting)
                                     .on_click(submit(ReviewEvent::RequestChanges)),
-                            ),
+                                )
+                            })
+                            .when(own_pr && self.push_command().is_some(), |this| {
+                                this.child(
+                                    crate::button("photon-review-push", "Push changes…")
+                                        .style(ButtonStyle::Tinted(TintColor::Accent))
+                                        .tooltip(Tooltip::text(
+                                            "Opens a terminal with the commit and push typed in",
+                                        ))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.open_push_terminal(window, cx)
+                                        })),
+                                )
+                            }),
                     )
                     .children(left_out.map(|note| {
                         Label::new(note)
@@ -3936,14 +4205,23 @@ impl Item for ReviewItem {
     fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
         Some(Icon::new(IconName::PullRequest))
     }
+
+    fn added_to_workspace(
+        &mut self,
+        workspace: &mut Workspace,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        self.workspace = Some(workspace.weak_handle());
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "synchronous fixture setup")]
 mod tests {
     use super::*;
-    use base64::Engine as _;
     use crate::{FakeGh, FileStatus, PrKey, ReviewDb, build_loaded_file, parse_detail};
+    use base64::Engine as _;
     use editor::MultiBufferOffset;
     use fs::FakeFs;
     use gpui::{TestAppContext, VisualTestContext};
@@ -6234,6 +6512,114 @@ fn verify_password(user: &str, password: &str) -> bool {
                 .read_with(&cx, |editor, cx| editor.text(cx))
                 .is_empty()
         );
+    }
+
+    #[gpui::test]
+    async fn done_replies_then_resolves(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        let fake = install_fake(&mut cx);
+        fake.respond(
+            |request| {
+                request
+                    .args
+                    .iter()
+                    .any(|argument| argument.ends_with("/replies"))
+            },
+            Ok(r#"{"id":2002,"user":{"login":"maya"},"body":"Done","created_at":"t"}"#.into()),
+        );
+        fake.respond(
+            |request| {
+                request
+                    .stdin
+                    .as_deref()
+                    .is_some_and(|stdin| stdin.contains("resolveReviewThread("))
+            },
+            Ok(r#"{"data":{"x":{}}}"#.to_string()),
+        );
+        let task = item.update(&mut cx, |item, cx| item.mark_thread_done("PRRT_1", cx));
+        cx.run_until_parked();
+        task.now_or_never().expect("finished").expect("done");
+        let requests = fake.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(request_json(&requests[0]), json!({"body": "Done"}));
+        assert!(
+            requests[1]
+                .stdin
+                .as_deref()
+                .is_some_and(|stdin| stdin.contains("resolveReviewThread("))
+        );
+        item.read_with(&cx, |item, _| {
+            let thread = &item.detail.threads[0];
+            assert!(thread.is_resolved);
+            assert_eq!(
+                thread.comments.last().map(|comment| comment.body.as_str()),
+                Some("Done")
+            );
+            assert!(item.finishing_threads.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    async fn failed_done_keeps_the_thread_open(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        let fake = install_fake(&mut cx);
+        fake.respond(
+            |request| {
+                request
+                    .args
+                    .iter()
+                    .any(|argument| argument.ends_with("/replies"))
+            },
+            Err(crate::GhError::Failed {
+                message: "gh: Forbidden (HTTP 403)".into(),
+            }),
+        );
+        let task = item.update(&mut cx, |item, cx| item.mark_thread_done("PRRT_1", cx));
+        cx.run_until_parked();
+        assert!(task.now_or_never().expect("finished").is_err());
+        assert_eq!(fake.requests().len(), 1);
+        item.read_with(&cx, |item, _| {
+            assert!(!item.detail.threads[0].is_resolved);
+            assert!(item.thread_errors["PRRT_1"].contains("403"));
+            assert!(item.finishing_threads.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    async fn own_pr_is_recognised_and_shows_threads(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        item.update(&mut cx, |item, _| {
+            item.login = "someone-else".into();
+            assert!(!item.is_own_pr());
+            item.login = item.detail.summary.author.to_uppercase();
+            assert!(item.is_own_pr());
+            assert_eq!(
+                item.push_command().as_deref(),
+                Some(
+                    "git commit -am 'Address review feedback' && git push 'https://github.com/maya/web.git' HEAD:'refs/heads/retry-uploads'"
+                )
+            );
+        });
+        item.update(&mut cx, |item, _| {
+            item.detail.threads.push(suggestion_thread(false))
+        });
+        item.update_in(&mut cx, |item, window, cx| {
+            item.show_thread("T_suggest", window, cx)
+        });
+        cx.run_until_parked();
+        item.read_with(&cx, |item, cx| {
+            assert!(
+                item.steps()[item.selected_step()]
+                    .files
+                    .contains(&"src/login.rs".to_string())
+            );
+            let snapshot = item.multibuffer.read(cx).snapshot(cx);
+            let cursor = item.editor.read(cx).selections.newest_anchor().head();
+            let (_, point) = snapshot
+                .point_to_buffer_point(cursor.to_point(&snapshot))
+                .expect("cursor in a buffer");
+            assert_eq!(point.row, 2, "cursor on line 3");
+        });
     }
 
     #[gpui::test]
