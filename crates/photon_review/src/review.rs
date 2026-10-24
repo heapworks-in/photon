@@ -1122,7 +1122,19 @@ impl ReviewItem {
             multibuffer
         });
         let editor = cx.new(|cx| {
-            Editor::for_multibuffer(multibuffer.clone(), Some(project.clone()), window, cx)
+            let mut editor =
+                Editor::for_multibuffer(multibuffer.clone(), Some(project.clone()), window, cx);
+            // Commenting with the mouse: select lines, then right-click.
+            editor.set_custom_context_menu(|editor, _, window, cx| {
+                let focus = editor.focus_handle(cx);
+                Some(ui::ContextMenu::build(window, cx, move |menu, _, _| {
+                    menu.context(focus)
+                        .action("Add comment", AddComment.boxed_clone())
+                        .separator()
+                        .action("Copy", editor::actions::Copy.boxed_clone())
+                }))
+            });
+            editor
         });
         let (lsp_handles, changed_rows) = index_files(&project, &files, cx);
         let mut subscriptions = vec![cx.subscribe(&editor, |this, _, event: &EditorEvent, cx| {
