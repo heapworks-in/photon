@@ -98,6 +98,18 @@ pub struct PrReviewSettingsContent {
     ///
     /// Default: null
     pub test_command: Option<String>,
+    /// Lists in the Pull Requests panel, in order. Each `query` is GitHub search syntax added to
+    /// `is:pr is:open archived:false` and the project's repositories; an empty query lists every
+    /// open pull request. A pull request is shown only in the first list it matches.
+    pub sections: Option<Vec<PrReviewSectionContent>>,
+}
+
+// photon: one list in the PR panel
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PrReviewSectionContent {
+    pub name: String,
+    #[serde(default)]
+    pub query: String,
 }
 
 crate::fallible_options::flattened_deserialize!(ProjectSettingsContent {

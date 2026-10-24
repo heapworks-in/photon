@@ -12,7 +12,7 @@ use util::ResultExt as _;
 use workspace::{AppState, Toast, Workspace, notifications::NotificationId};
 
 use crate::{
-    Checkout, FetchedCheckout, PrKey, PrSummary, ReviewDb, Tracked, candidate_repos,
+    Checkout, FetchedCheckout, InboxSection, PrKey, PrSummary, ReviewDb, Tracked, candidate_repos,
     fetch_checkout, fetch_url, find_clone, finish_checkout, forget_stale_trust, git, repo_id,
     review_root, worktree_path,
 };
@@ -20,17 +20,25 @@ use crate::{
 #[derive(Clone, Debug, Default, PartialEq, Eq, RegisterSetting)]
 pub struct PrReviewSettings {
     pub test_command: Option<String>,
+    pub sections: Vec<InboxSection>,
 }
 
 impl Settings for PrReviewSettings {
     fn from_settings(content: &settings::SettingsContent) -> Self {
+        let pr_review = content.project.pr_review.as_ref();
         Self {
-            test_command: content
-                .project
-                .pr_review
-                .as_ref()
+            test_command: pr_review
                 .and_then(|settings| settings.test_command.clone())
                 .and_then(non_empty),
+            sections: pr_review
+                .and_then(|settings| settings.sections.as_ref())
+                .into_iter()
+                .flatten()
+                .map(|section| InboxSection {
+                    name: section.name.clone(),
+                    query: section.query.clone(),
+                })
+                .collect(),
         }
     }
 }

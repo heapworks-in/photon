@@ -10,8 +10,9 @@ use anyhow::Result;
 use futures::future::join_all;
 use gpui::{
     Action, AnyElement, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, Pixels, Render, SharedString, Task, WeakEntity, Window, actions, px,
+    Focusable, Pixels, Render, SharedString, Subscription, Task, WeakEntity, Window, actions, px,
 };
+use settings::{Settings as _, SettingsStore};
 use task::{SpawnInTerminal, TaskId};
 use ui::{Tab, TintColor, Tooltip, prelude::*};
 use util::ResultExt as _;
@@ -21,8 +22,8 @@ use workspace::{
 };
 
 use crate::{
-    ChecksState, GhError, GhFix, GhRunner, HostAuth, Inbox, InboxGroup, PrKey, PrSummary, RepoId,
-    ReviewDb, SinceReview, Tracked, auth_status_request,
+    ChecksState, GhError, GhFix, GhRunner, HostAuth, Inbox, InboxSection, PrKey, PrReviewSettings, PrSummary,
+    RepoId, ReviewDb, SinceReview, Tracked, auth_status_request,
     checkout::{
         ensure_safe_segment, force_remove_worktree, parse_remote_url, review_root, worktree_path,
     },
@@ -146,12 +147,7 @@ pub fn row_meta(summary: &PrSummary, has_drafts: bool) -> RowMeta {
     }
 }
 
-fn section_label(group: InboxGroup, count: usize) -> String {
-    let name = match group {
-        InboxGroup::ReviewRequested => "Review requested",
-        InboxGroup::Yours => "Yours",
-        InboxGroup::Mentioned => "Mentioned",
-    };
+fn section_label(name: &str, count: usize) -> String {
     format!("{name} · {count}")
 }
 
@@ -188,6 +184,7 @@ pub struct InboxPanel {
     with_drafts: HashSet<PrKey>,
     detected: Vec<RepoId>,
     load_task: Task<()>,
+    _settings_subscription: Subscription,
 }
 
 impl InboxPanel {
@@ -197,16 +194,30 @@ impl InboxPanel {
     ) -> Task<Result<Entity<Self>>> {
         cx.spawn(async move |cx| {
             cx.update(|_, cx| {
-                cx.new(|cx| Self {
-                    workspace,
-                    focus_handle: cx.focus_handle(),
-                    state: InboxState::Idle,
-                    refreshing: false,
-                    in_flight_cleanups: Arc::default(),
-                    user_activated: false,
-                    with_drafts: HashSet::default(),
-                    detected: Vec::new(),
-                    load_task: Task::ready(()),
+                cx.new(|cx| {
+                    let mut sections = PrReviewSettings::get_global(cx).sections.clone();
+                    let settings_subscription =
+                        cx.observe_global::<SettingsStore>(move |this: &mut Self, cx| {
+                            let current = &PrReviewSettings::get_global(cx).sections;
+                            if *current != sections {
+                                sections = current.clone();
+                                if this.user_activated {
+                                    this.refresh(cx);
+                                }
+                            }
+                        });
+                    Self {
+                        workspace,
+                        focus_handle: cx.focus_handle(),
+                        state: InboxState::Idle,
+                        refreshing: false,
+                        in_flight_cleanups: Arc::default(),
+                        user_activated: false,
+                        with_drafts: HashSet::default(),
+                        detected: Vec::new(),
+                        load_task: Task::ready(()),
+                        _settings_subscription: settings_subscription,
+                    }
                 })
             })
         })
@@ -227,7 +238,10 @@ impl InboxPanel {
         }
         self.load_task = cx.spawn(async move |this, cx| {
             // Read here, not before spawning: refresh usually runs inside the workspace's own update.
-            let Ok(repos) = this.update(cx, |this, cx| window_repos(&this.workspace, cx)) else {
+            let Ok((repos, sections)) = this.update(cx, |this, cx| {
+                let sections = PrReviewSettings::get_global(cx).sections.clone();
+                (window_repos(&this.workspace, cx), sections)
+            }) else {
                 return;
             };
             let (state, closed, with_drafts, repos) = cx
@@ -236,7 +250,7 @@ impl InboxPanel {
                     async move {
                         let repos = resolve_ssh_aliases(&runner, repos).await;
                         let (state, closed) =
-                            load_inbox(runner, database.clone(), repos.clone()).await;
+                            load_inbox(runner, database.clone(), repos.clone(), sections).await;
                         let with_drafts = prs_with_drafts(&state, &database);
                         (state, closed, with_drafts, repos)
                     }
@@ -397,6 +411,7 @@ async fn load_inbox(
     runner: Arc<dyn GhRunner>,
     database: ReviewDb,
     repos: Vec<RepoId>,
+    sections: Vec<InboxSection>,
 ) -> (InboxState, Vec<Tracked>) {
     if repos.is_empty() {
         return (InboxState::NoRepository, Vec::new());
@@ -445,6 +460,7 @@ async fn load_inbox(
     let tracked = database.tracked().log_err().unwrap_or_default();
     let results = join_all(hosts.into_iter().map(|auth| {
         let runner = runner.clone();
+        let sections = sections.clone();
         let host_repos: Vec<String> = repos
             .iter()
             .filter(|repo| repo.host == auth.host.to_lowercase())
@@ -461,10 +477,18 @@ async fn load_inbox(
                     host: Some(auth.host.clone()),
                 }),
                 Some(login) => match runner
-                    .run(inbox_request(&auth.host, &login, &host_repos, &node_ids))
+                    .run(inbox_request(
+                        &auth.host,
+                        &login,
+                        &host_repos,
+                        &sections,
+                        &node_ids,
+                    ))
                     .await
                 {
-                    Ok(output) => parse_inbox(&auth.host, &output, &node_ids).map_err(failed),
+                    Ok(output) => {
+                        parse_inbox(&auth.host, &output, &sections, &node_ids).map_err(failed)
+                    }
                     Err(error) => Err(error),
                 },
             };
@@ -827,7 +851,7 @@ impl Render for InboxPanel {
                                 }
                                 any_rows = true;
                                 body = body.child(Self::render_section_label(section_label(
-                                    *group,
+                                    group,
                                     rows.len(),
                                 )));
                                 for summary in rows {
@@ -1068,6 +1092,50 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn sections_setting_changes_the_lists(cx: &mut TestAppContext) {
+        let fake = FakeGh::new();
+        init_test(cx, &fake);
+        respond_auth(&fake, AUTH_ONE_HOST);
+        respond_inbox(&fake, "github.com");
+        let (_workspace, panel, mut cx) = add_panel(cx, &[ORIGIN]).await;
+        set_active(&panel, true, &mut cx);
+        respond_auth(&fake, AUTH_ONE_HOST);
+        respond_inbox(&fake, "github.com");
+        cx.update(|_, cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.project.pr_review.get_or_insert_default().sections =
+                        Some(vec![settings::PrReviewSectionContent {
+                            name: "Everything".into(),
+                            query: "".into(),
+                        }]);
+                });
+            });
+        });
+        cx.run_until_parked();
+        let requests = fake.requests();
+        let last = requests
+            .into_iter()
+            .rfind(|request| request.args.iter().any(|arg| arg == "graphql"))
+            .expect("an inbox request");
+        let body: serde_json::Value =
+            serde_json::from_str(last.stdin.as_deref().expect("stdin")).expect("json");
+        assert_eq!(
+            body["variables"]["s0"],
+            "is:pr is:open archived:false repo:acme/web"
+        );
+        assert!(body["variables"].get("s1").is_none());
+        panel.read_with(&cx, |panel, _| {
+            let InboxState::Loaded(hosts) = panel.state() else {
+                panic!("expected Loaded, got {:?}", panel.state());
+            };
+            let inbox = hosts[0].result.as_ref().expect("inbox");
+            let names: Vec<_> = inbox.sections.iter().map(|(name, _)| name.as_str()).collect();
+            assert_eq!(names, ["Everything"]);
+        });
+    }
+
+    #[gpui::test]
     async fn opening_panel_loads_groups(cx: &mut TestAppContext) {
         let fake = FakeGh::new();
         init_test(cx, &fake);
@@ -1082,7 +1150,7 @@ mod tests {
             };
             assert_eq!(hosts.len(), 1);
             let inbox = hosts[0].result.as_ref().expect("inbox");
-            assert_eq!(inbox.sections.len(), 3);
+            assert_eq!(inbox.sections.len(), 4);
             assert_eq!(host_line(hosts), "github.com");
             window.refresh();
         });
@@ -1364,7 +1432,7 @@ mod tests {
         init_test(cx, &fake);
         respond_auth(&fake, AUTH_ONE_HOST);
         let mut partial: serde_json::Value = serde_json::from_str(INBOX).expect("fixture");
-        partial["data"]["yours"] = serde_json::Value::Null;
+        partial["data"]["s1"] = serde_json::Value::Null;
         partial["data"]["nodes"] = serde_json::json!([null]);
         partial["errors"] = serde_json::json!([
             { "message": "Could not resolve to a node with the global id of 'PR_gone'" },
@@ -1418,10 +1486,10 @@ mod tests {
             let counts: Vec<_> = inbox
                 .sections
                 .iter()
-                .map(|(group, rows)| (*group, rows.len()))
+                .map(|(name, rows)| (name.as_str(), rows.len()))
                 .collect();
             assert!(counts[0].1 > 0, "{counts:?}");
-            assert_eq!(counts[1], (InboxGroup::Yours, 0));
+            assert_eq!(counts[1], ("Yours", 0));
         });
         render(&panel, &mut cx);
         assert_eq!(database.tracked().expect("tracked"), vec![]);
@@ -1702,12 +1770,7 @@ mod tests {
 
     #[test]
     fn section_labels_and_copy() {
-        assert_eq!(
-            section_label(InboxGroup::ReviewRequested, 3),
-            "Review requested · 3"
-        );
-        assert_eq!(section_label(InboxGroup::Yours, 2), "Yours · 2");
-        assert_eq!(section_label(InboxGroup::Mentioned, 0), "Mentioned · 0");
+        assert_eq!(section_label("Review requested", 3), "Review requested · 3");
         assert_eq!(EMPTY_INBOX_TEXT, "No open pull requests");
     }
 
