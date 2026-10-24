@@ -37,7 +37,10 @@ use workspace::{
 
 use settings::{PrReviewChecklistContent, Settings as _, SettingsStore};
 
-use crate::{AgentComment, PromptInput, parse_agent_comments, review_agent, review_prompt};
+use crate::{
+    AgentComment, PromptInput, agent_config_paths, parse_agent_comments, review_agent,
+    review_prompt,
+};
 use crate::{
     Answer, AutoCheck, AutoInputs, AutoResult, ChecklistItem, ChecklistSource, LocalRun,
     LocalRunsVersion, PrReviewSettings, Progress, applicable_items, checklist_note_slot, evaluate,
@@ -1877,8 +1880,6 @@ impl ReviewItem {
         })
     }
 
-    /// Flips the thread at once, as GitHub does, and flips it back if `gh` fails. A click while
-    /// the thread's last request is pending sends nothing.
     /// The viewer wrote this pull request: the tab works through its feedback instead of
     /// reviewing it, since GitHub rejects approving or requesting changes on your own PR.
     pub fn is_own_pr(&self) -> bool {
@@ -1944,6 +1945,13 @@ impl ReviewItem {
         else {
             return;
         };
+        // GitHub paths are repository-relative; anything else isn't opened.
+        if Path::new(&thread.path)
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return;
+        }
         let path = self.checkout.worktree.join(&thread.path);
         let row = thread.line.unwrap_or(1).saturating_sub(1);
         let opening = workspace.update(cx, |workspace, cx| {
@@ -1967,11 +1975,28 @@ impl ReviewItem {
         thread_id: &str,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
+        if self.resolving.contains(thread_id) {
+            return Task::ready(Err(anyhow!("This thread is already being resolved.")));
+        }
         if !self.finishing_threads.insert(thread_id.to_string()) {
             return Task::ready(Ok(()));
         }
         cx.notify();
-        let reply = self.reply(thread_id, "Done".to_string(), cx);
+        // A retry after a failed resolve doesn't post a second "Done".
+        let already_replied = self
+            .detail
+            .threads
+            .iter()
+            .find(|thread| thread.id == thread_id)
+            .and_then(|thread| thread.comments.last())
+            .is_some_and(|comment| {
+                comment.body.trim() == "Done" && comment.author.eq_ignore_ascii_case(&self.login)
+            });
+        let reply = if already_replied {
+            Task::ready(Ok(()))
+        } else {
+            self.reply(thread_id, "Done".to_string(), cx)
+        };
         let thread_id = thread_id.to_string();
         cx.spawn(async move |this, cx| {
             let result = async {
@@ -2044,10 +2069,60 @@ impl ReviewItem {
 
     /// Asks the user's agent to review the pull request; its findings become draft comments the
     /// reviewer reads, edits or deletes before anything is posted.
+    ///
+    /// The agent works in the PR's checkout, which the PR's author controls, so it needs the
+    /// checkout trusted first, and a PR that changes agent instruction or settings files asks
+    /// again. Clicking while it runs cancels it.
     pub fn start_agent_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.agent_reviewing {
+            self.agent_reviewing = false;
+            self._agent_review_task = Task::ready(());
+            self.agent_review_note = Some(("Agent pre-review cancelled.".into(), Color::Muted));
+            cx.notify();
             return;
         }
+        if review_agent(cx).is_none() || self.workspace.is_none() {
+            return;
+        }
+        if self.worktree_restricted(cx) {
+            self.agent_review_note = Some((
+                "The agent works in this PR's checkout: trust it first, and only if you trust the author."
+                    .into(),
+                Color::Warning,
+            ));
+            window.dispatch_action(ToggleWorktreeSecurity.boxed_clone(), cx);
+            cx.notify();
+            return;
+        }
+        let config_files: Vec<String> =
+            agent_config_paths(self.all_files().iter().map(|file| file.diff.path.as_str()))
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+        if config_files.is_empty() {
+            self.run_agent_review(window, cx);
+            return;
+        }
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "This PR changes files that steer coding agents",
+            Some(&format!(
+                "Your agent reads these from the checkout and may follow them:\n\n{}\n\nRead them before letting the agent work here.",
+                config_files.join("\n")
+            )),
+            &["Start anyway", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await == Ok(0) {
+                this.update_in(cx, |this, window, cx| this.run_agent_review(window, cx))?;
+            }
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn run_agent_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(agent), Some(workspace)) = (review_agent(cx), self.workspace.clone()) else {
             return;
         };
@@ -2113,7 +2188,11 @@ impl ReviewItem {
     /// A draft on the comment's line of the head, or a general draft naming the place when the
     /// line isn't in the review.
     fn agent_draft(&self, comment: AgentComment, cx: &App) -> Draft {
-        let line_text = comment.line.and_then(|line| {
+        let deleted = self
+            .all_files()
+            .iter()
+            .any(|file| file.diff.path == comment.path && file.diff.status == FileStatus::Deleted);
+        let line_text = comment.line.filter(|_| !deleted).and_then(|line| {
             let buffer = self.buffer_for_path(&comment.path, cx)?.read(cx).snapshot();
             let row = line.checked_sub(1)?;
             (row <= buffer.max_point().row).then(|| {
@@ -2269,8 +2348,17 @@ impl ReviewItem {
                         );
                     }
                     Err(error) => {
-                        this.thread_errors
-                            .insert(thread_id.clone(), format!("{error:#}").into());
+                        let message = format!("{error:#}");
+                        // GitHub's 409: the branch's file isn't the one this review read.
+                        let message =
+                            if message.contains("409") || message.contains("does not match") {
+                                "The file changed on the branch since this review opened. \
+                                 Reopen the review and try again."
+                                    .to_string()
+                            } else {
+                                message
+                            };
+                        this.thread_errors.insert(thread_id.clone(), message.into());
                     }
                 }
                 this.show_comments(cx);
@@ -2280,6 +2368,8 @@ impl ReviewItem {
         })
     }
 
+    /// Flips the thread at once, as GitHub does, and flips it back if `gh` fails. A click while
+    /// the thread's last request is pending sends nothing.
     pub fn set_thread_resolved(
         &mut self,
         thread_id: &str,
@@ -3563,13 +3653,12 @@ impl ReviewItem {
                     crate::button(
                         "agent-review",
                         if self.agent_reviewing {
-                            "Agent reviewing…"
+                            "Agent reviewing… (click to cancel)"
                         } else {
                             "Pre-review with agent"
                         },
                     )
                     .style(ButtonStyle::Outlined)
-                    .disabled(self.agent_reviewing)
                     .tooltip(Tooltip::text(
                         "Your agent reads the PR and leaves draft comments; nothing is posted",
                     ))
@@ -4276,7 +4365,7 @@ impl ReviewItem {
                                     crate::button("photon-review-push", "Push changes…")
                                         .style(ButtonStyle::Tinted(TintColor::Accent))
                                         .tooltip(Tooltip::text(
-                                            "Opens a terminal with the commit and push typed in",
+                                            "Opens a terminal with git add, commit and push typed in, for you to run",
                                         ))
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.open_push_terminal(window, cx)
@@ -6795,6 +6884,35 @@ fn verify_password(user: &str, password: &str) -> bool {
     }
 
     #[gpui::test]
+    async fn done_retry_does_not_reply_twice(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        item.update(&mut cx, |item, _| {
+            let login = item.login.clone();
+            item.detail.threads[0].comments.push(crate::ThreadComment {
+                database_id: 77,
+                author: login,
+                body: "Done".into(),
+                created_at: "t".into(),
+            });
+        });
+        let fake = install_fake(&mut cx);
+        fake.respond(
+            |request| {
+                request
+                    .stdin
+                    .as_deref()
+                    .is_some_and(|stdin| stdin.contains("resolveReviewThread("))
+            },
+            Ok(r#"{"data":{"x":{}}}"#.to_string()),
+        );
+        let task = item.update(&mut cx, |item, cx| item.mark_thread_done("PRRT_1", cx));
+        cx.run_until_parked();
+        task.now_or_never().expect("finished").expect("resolved");
+        let requests = fake.requests();
+        assert_eq!(requests.len(), 1, "only the resolve");
+    }
+
+    #[gpui::test]
     async fn failed_done_keeps_the_thread_open(cx: &mut TestAppContext) {
         let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
         let fake = install_fake(&mut cx);
@@ -6831,7 +6949,7 @@ fn verify_password(user: &str, password: &str) -> bool {
             assert_eq!(
                 item.push_command().as_deref(),
                 Some(
-                    "git commit -am 'Address review feedback' && git push 'https://github.com/maya/web.git' HEAD:'refs/heads/retry-uploads'"
+                    "git add -A && git commit -m 'Address review feedback' && git push 'https://github.com/maya/web.git' HEAD:'refs/heads/retry-uploads'"
                 )
             );
         });

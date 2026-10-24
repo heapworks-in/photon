@@ -8,9 +8,9 @@ pub fn suggestion_block(lines: &str) -> String {
     format!("```suggestion\n{lines}\n```")
 }
 
-/// The replacement text of the single suggestion in a comment. A comment with no suggestion, or
-/// with several, has nothing one click can commit.
-pub fn parse_suggestion(body: &str) -> Option<String> {
+/// The replacement lines of the single suggestion in a comment; none means delete the lines. A
+/// comment with no suggestion, or with several, has nothing one click can commit.
+pub fn parse_suggestion(body: &str) -> Option<Vec<String>> {
     let mut found = None;
     let mut lines = body.lines();
     while let Some(line) = lines.next() {
@@ -24,22 +24,26 @@ pub fn parse_suggestion(body: &str) -> Option<String> {
                 closed = true;
                 break;
             }
-            replacement.push(line);
+            replacement.push(line.to_string());
         }
         if !closed || found.is_some() {
             return None;
         }
-        found = Some(replacement.join("\n"));
+        found = Some(replacement);
     }
     found
 }
 
-/// Replaces 1-based lines `start..=end` of `text` with `replacement`, which may be empty to
-/// delete them. The file keeps its line endings and its trailing newline (or lack of one).
-pub fn apply_suggestion(text: &str, start: u32, end: u32, replacement: &str) -> Result<String> {
-    let line_ending = if text.contains("\r\n") { "\r\n" } else { "\n" };
-    let trailing_newline = text.ends_with('\n');
-    let mut lines: Vec<&str> = text.lines().collect();
+/// Replaces 1-based lines `start..=end` of `text` with `replacement` (no lines deletes them).
+/// Every other line keeps its own ending; the new lines take the replaced lines' ending, and the
+/// last one keeps the last replaced line's, so a file without a final newline stays that way.
+pub fn apply_suggestion(
+    text: &str,
+    start: u32,
+    end: u32,
+    replacement: &[String],
+) -> Result<String> {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
     let (start, end) = (start as usize, end as usize);
     if start == 0 || start > end || end > lines.len() {
         bail!(
@@ -47,11 +51,30 @@ pub fn apply_suggestion(text: &str, start: u32, end: u32, replacement: &str) -> 
             lines.len()
         );
     }
-    lines.splice(start - 1..end, replacement.lines());
-    let mut result = lines.join(line_ending);
-    if trailing_newline && !result.is_empty() {
-        result.push_str(line_ending);
+    let ending = |line: &str| {
+        if line.ends_with("\r\n") {
+            "\r\n"
+        } else if line.ends_with('\n') {
+            "\n"
+        } else {
+            ""
+        }
+    };
+    let inner_ending = match ending(lines[start - 1]) {
+        "" => "\n",
+        ending => ending,
+    };
+    let last_ending = ending(lines[end - 1]);
+    let mut result: String = lines[..start - 1].concat();
+    for (index, line) in replacement.iter().enumerate() {
+        result.push_str(line);
+        result.push_str(if index + 1 == replacement.len() {
+            last_ending
+        } else {
+            inner_ending
+        });
     }
+    result.push_str(&lines[end..].concat());
     Ok(result)
 }
 
@@ -139,12 +162,16 @@ mod tests {
         let body =
             "Simpler:\n```suggestion\n    let x = 1;\n    let y = 2;\n```\nWhat do you think?";
         assert_eq!(
-            parse_suggestion(body).as_deref(),
-            Some("    let x = 1;\n    let y = 2;")
+            parse_suggestion(body),
+            Some(vec!["    let x = 1;".to_string(), "    let y = 2;".into()])
         );
         assert_eq!(
-            parse_suggestion("Delete it.\n```suggestion\n```").as_deref(),
-            Some("")
+            parse_suggestion("Delete it.\n```suggestion\n```"),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            parse_suggestion("Blank it.\n```suggestion\n\n```"),
+            Some(vec![String::new()])
         );
         assert_eq!(parse_suggestion("```rust\nlet x = 1;\n```"), None);
         assert_eq!(parse_suggestion("```suggestion\nunclosed"), None);
@@ -153,23 +180,36 @@ mod tests {
             None
         );
         assert_eq!(
-            parse_suggestion(&suggestion_block("let z = 3;")).as_deref(),
-            Some("let z = 3;")
+            parse_suggestion(&suggestion_block("let z = 3;")),
+            Some(vec!["let z = 3;".to_string()])
         );
     }
 
     #[test]
     fn suggestions_replace_the_commented_lines() {
+        let lines = |text: &str| -> Vec<String> { text.split('\n').map(str::to_string).collect() };
         let text = "a\nb\nc\nd\n";
         assert_eq!(
-            apply_suggestion(text, 2, 3, "B\nC2\nC3").unwrap(),
+            apply_suggestion(text, 2, 3, &lines("B\nC2\nC3")).unwrap(),
             "a\nB\nC2\nC3\nd\n"
         );
-        assert_eq!(apply_suggestion(text, 4, 4, "").unwrap(), "a\nb\nc\n");
-        assert_eq!(apply_suggestion("a\r\nb", 1, 1, "A").unwrap(), "A\r\nb");
-        assert_eq!(apply_suggestion("a\nb", 2, 2, "B").unwrap(), "a\nB");
-        assert!(apply_suggestion(text, 4, 5, "x").is_err());
-        assert!(apply_suggestion(text, 0, 1, "x").is_err());
+        assert_eq!(apply_suggestion(text, 4, 4, &[]).unwrap(), "a\nb\nc\n");
+        assert_eq!(
+            apply_suggestion(text, 2, 2, &[String::new()]).unwrap(),
+            "a\n\nc\nd\n"
+        );
+        assert_eq!(
+            apply_suggestion(text, 2, 2, &lines("B\n")).unwrap(),
+            "a\nB\n\nc\nd\n"
+        );
+        // Mixed endings: only the replaced lines change.
+        assert_eq!(
+            apply_suggestion("a\r\nb\nc\r\n", 2, 2, &lines("B")).unwrap(),
+            "a\r\nB\nc\r\n"
+        );
+        assert_eq!(apply_suggestion("a\nb", 2, 2, &lines("B")).unwrap(), "a\nB");
+        assert!(apply_suggestion(text, 4, 5, &lines("x")).is_err());
+        assert!(apply_suggestion(text, 0, 1, &lines("x")).is_err());
     }
 
     #[test]

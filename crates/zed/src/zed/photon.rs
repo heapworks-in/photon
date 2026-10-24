@@ -63,6 +63,13 @@ impl photon_review::ReviewAgent for PanelReviewAgent {
     }
 }
 
+enum AgentProgress {
+    Connecting,
+    Working,
+    StoppedWithoutReply,
+    Replied(String),
+}
+
 /// Waits until the thread's agent has answered the prompt and stopped, then returns its last
 /// message. The thread stays in the panel, so the user can follow and continue it.
 async fn wait_for_agent_reply(
@@ -72,34 +79,35 @@ async fn wait_for_agent_reply(
 ) -> anyhow::Result<String> {
     use acp_thread::{AgentThreadEntry, ThreadStatus};
     use anyhow::Context as _;
+    use std::time::{Duration, Instant};
 
-    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
-    let started = std::time::Instant::now();
+    const CONNECT_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+    const TIMEOUT: Duration = Duration::from_secs(30 * 60);
+    // Idle polls in a row, after the prompt, with no reply: the turn ended in an error or was
+    // cancelled. More than one, since the thread is briefly idle between appending the prompt
+    // and starting to generate.
+    const IDLE_POLLS: usize = 3;
+    let started = Instant::now();
+    let mut idle_polls = 0;
     loop {
-        cx.background_executor()
-            .timer(std::time::Duration::from_secs(1))
-            .await;
-        if started.elapsed() > TIMEOUT {
-            anyhow::bail!("The agent didn't finish within 30 minutes.");
-        }
-        let reply = panel.update(cx, |panel, cx| -> anyhow::Result<Option<String>> {
+        cx.background_executor().timer(Duration::from_secs(1)).await;
+        let progress = panel.update(cx, |panel, cx| -> anyhow::Result<AgentProgress> {
             let view = panel
                 .conversation_view_for_id(&thread_id, cx)
                 .context("The agent thread was closed.")?;
             let Some(thread) = view.read(cx).root_thread(cx) else {
-                // Still connecting to the agent.
-                return Ok(None);
+                return Ok(AgentProgress::Connecting);
             };
             let thread = thread.read(cx);
             if thread.status() != ThreadStatus::Idle {
-                return Ok(None);
+                return Ok(AgentProgress::Working);
             }
             let entries = thread.entries();
             let Some(prompt) = entries
                 .iter()
                 .rposition(|entry| matches!(entry, AgentThreadEntry::UserMessage(_)))
             else {
-                return Ok(None);
+                return Ok(AgentProgress::Working);
             };
             Ok(entries
                 .get(prompt + 1..)
@@ -107,12 +115,30 @@ async fn wait_for_agent_reply(
                 .iter()
                 .rev()
                 .find_map(|entry| match entry {
-                    AgentThreadEntry::AssistantMessage(message) => Some(message.to_markdown(cx)),
+                    AgentThreadEntry::AssistantMessage(message) => {
+                        Some(AgentProgress::Replied(message.to_markdown(cx)))
+                    }
                     _ => None,
-                }))
+                })
+                .unwrap_or(AgentProgress::StoppedWithoutReply))
         })??;
-        if let Some(reply) = reply {
-            return Ok(reply);
+        match progress {
+            AgentProgress::Replied(reply) => return Ok(reply),
+            AgentProgress::Connecting if started.elapsed() > CONNECT_TIMEOUT => {
+                anyhow::bail!("The agent didn't start. See the agent panel for why.");
+            }
+            AgentProgress::StoppedWithoutReply => {
+                idle_polls += 1;
+                if idle_polls >= IDLE_POLLS {
+                    anyhow::bail!(
+                        "The agent stopped without answering. See the agent panel for why."
+                    );
+                }
+            }
+            AgentProgress::Connecting | AgentProgress::Working => idle_polls = 0,
+        }
+        if started.elapsed() > TIMEOUT {
+            anyhow::bail!("The agent didn't finish within 30 minutes.");
         }
     }
 }

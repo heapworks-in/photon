@@ -13,11 +13,11 @@ pub fn open_feedback(threads: &[ReviewThread]) -> Vec<&ReviewThread> {
     open
 }
 
-/// Commits everything changed in the review checkout and pushes it to the pull request's
+/// Commits everything changed or added in the review checkout and pushes it to the pull request's
 /// branch. Typed into a terminal for the author to read and run, never run by Photon.
 pub fn push_command(host: &str, head_repository: &str, branch: &str) -> String {
     format!(
-        "git commit -am {} && git push {} HEAD:{}",
+        "git add -A && git commit -m {} && git push {} HEAD:{}",
         shell_quote("Address review feedback"),
         shell_quote(&format!("https://{host}/{head_repository}.git")),
         shell_quote(&format!("refs/heads/{branch}")),
@@ -66,7 +66,7 @@ mod tests {
     fn push_command_targets_the_branch() {
         assert_eq!(
             push_command("ghe.corp", "maya/web", "fix-it's"),
-            r"git commit -am 'Address review feedback' && git push 'https://ghe.corp/maya/web.git' HEAD:'refs/heads/fix-it'\''s'"
+            r"git add -A && git commit -m 'Address review feedback' && git push 'https://ghe.corp/maya/web.git' HEAD:'refs/heads/fix-it'\''s'"
         );
     }
 }
