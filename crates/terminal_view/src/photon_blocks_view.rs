@@ -56,6 +56,13 @@ pub(crate) fn active_blocks(terminal: &Terminal) -> Option<&BlockList> {
     (!degraded && !alt_screen).then_some(blocks)
 }
 
+/// Whether a click on screen `row` selects the block covering `rows`. A running block is selected
+/// only from its command line and the rows above it: its output belongs to the program, and
+/// clicking into an agent or other interactive CLI to type must not tint the whole session.
+fn selects_block(running: bool, row: i32, rows: &Range<i32>, command_row: i32) -> bool {
+    rows.contains(&row) && (!running || row <= command_row.max(rows.start))
+}
+
 /// Screen rows a block covers, clipped to the screen. `end_line` is exclusive; a running
 /// block reaches the bottom row.
 fn block_rows(visible: &VisibleBlock, block: &Block, screen_rows: i32) -> Range<i32> {
@@ -476,14 +483,17 @@ impl TerminalView {
         let bounds = terminal.last_content.terminal_bounds;
         let row = ((position.y - bounds.bounds.origin.y) / bounds.line_height()).floor() as i32;
         let screen_rows = i32::try_from(bounds.num_lines()).unwrap_or(i32::MAX);
-        let clicked = visible_blocks(blocks, terminal.top_absolute_line(), screen_rows)
+        let top_absolute_line = terminal.top_absolute_line();
+        let clicked = visible_blocks(blocks, top_absolute_line, screen_rows)
             .iter()
-            .find(|visible| {
-                blocks
-                    .block(visible.id)
-                    .is_some_and(|block| block_rows(visible, block, screen_rows).contains(&row))
-            })
-            .map(|visible| visible.id);
+            .find_map(|visible| {
+                let block = blocks.block(visible.id)?;
+                let rows = block_rows(visible, block, screen_rows);
+                let command_row =
+                    i32::try_from(block.command_line - top_absolute_line).unwrap_or(i32::MIN);
+                selects_block(block.end_line.is_none(), row, &rows, command_row)
+                    .then_some(visible.id)
+            });
         if clicked != self.selected_block {
             self.selected_block = clicked;
             cx.emit(SearchEvent::MatchesInvalidated);
@@ -665,5 +675,23 @@ impl TerminalView {
         input.update(cx, |input, cx| input.insert(text, window, cx));
         cx.stop_propagation();
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn running_blocks_are_selected_only_from_their_command_line() {
+        let rows = 2..20;
+        assert!(selects_block(false, 10, &rows, 3));
+        assert!(selects_block(true, 3, &rows, 3));
+        assert!(selects_block(true, 2, &rows, 3));
+        assert!(!selects_block(true, 10, &rows, 3));
+        // Command scrolled off the top: only the sticky header row selects.
+        assert!(selects_block(true, 2, &rows, -40));
+        assert!(!selects_block(true, 3, &rows, -40));
+        assert!(!selects_block(false, 25, &rows, 3));
     }
 }

@@ -23,9 +23,12 @@ pub struct GitInfo {
     pub branch: String,
     pub changed: usize,
     pub branches: Vec<String>,
+    /// Remote branches with no local branch of the same name, newest commit first, such as
+    /// `origin/feature-x` after a `git fetch`.
+    pub remote_branches: Vec<String>,
 }
 
-/// Reads branch, dirty-file count and local branches without taking git's index lock or
+/// Reads branch, dirty-file count, local branches and fetched remote branches without taking git's index lock or
 /// touching the network. None outside a repository (or when git is missing).
 pub fn git_info(cwd: &Path, cx: &App) -> Task<Option<GitInfo>> {
     let cwd = cwd.to_path_buf();
@@ -38,14 +41,39 @@ pub fn git_info(cwd: &Path, cx: &App) -> Task<Option<GitInfo>> {
         let changed = git_output(&cwd, &["status", "--porcelain"])
             .await
             .map_or(0, |status| status.lines().count());
-        let branches = git_output(&cwd, &["branch", "--format=%(refname:short)"])
+        let branches: Vec<String> = git_output(&cwd, &["branch", "--format=%(refname:short)"])
             .await
             .map(|branches| branches.lines().map(str::to_string).collect())
             .unwrap_or_default();
+        let remote_branches = git_output(
+            &cwd,
+            &[
+                "for-each-ref",
+                "--sort=-committerdate",
+                "--format=%(refname:short)",
+                "refs/remotes",
+            ],
+        )
+        .await
+        .map(|remotes| {
+            remotes
+                .lines()
+                .filter(|remote| {
+                    // `origin/HEAD` (or just `origin`) points at another remote branch.
+                    let Some((_, name)) = remote.split_once('/') else {
+                        return false;
+                    };
+                    name != "HEAD" && !branches.iter().any(|branch| branch == name)
+                })
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
         Some(GitInfo {
             branch,
             changed,
             branches,
+            remote_branches,
         })
     })
 }
@@ -94,6 +122,11 @@ pub fn switch_command(branch: &str, create: bool) -> String {
     } else {
         format!("git switch -- {}", shell_quote(branch))
     }
+}
+
+/// Creates a local branch tracking `remote_branch` (`origin/feature-x`) and switches to it.
+pub fn track_command(remote_branch: &str) -> String {
+    format!("git switch --track {}", shell_quote(remote_branch))
 }
 
 pub fn folder_chip_text(cwd: &Path) -> String {
@@ -258,6 +291,18 @@ impl ChipPickerDelegate {
                         action: ChipAction::Run(switch_command(branch, false)),
                     })
                     .collect();
+                let room = PICKER_LIMIT.saturating_sub(items.len());
+                items.extend(
+                    info.remote_branches
+                        .iter()
+                        .filter(|branch| matches(branch))
+                        .take(room)
+                        .map(|branch| ChipItem {
+                            label: branch.clone().into(),
+                            highlighted: false,
+                            action: ChipAction::Run(track_command(branch)),
+                        }),
+                );
                 let name = query.trim();
                 if name.is_empty() {
                     items.push(ChipItem {
@@ -265,7 +310,13 @@ impl ChipPickerDelegate {
                         highlighted: false,
                         action: ChipAction::Run(String::new()),
                     });
-                } else if !info.branches.iter().any(|branch| branch == name) {
+                } else if !info.branches.iter().any(|branch| branch == name)
+                    // A fetched branch of that name is listed above; a new one would hide it.
+                    && !info
+                        .remote_branches
+                        .iter()
+                        .any(|remote| remote.split_once('/').is_some_and(|(_, rest)| rest == name))
+                {
                     items.push(ChipItem {
                         label: format!("New branch “{name}”").into(),
                         highlighted: false,
@@ -398,6 +449,10 @@ mod tests {
         assert_eq!(switch_command("main", false), "git switch -- 'main'");
         assert_eq!(switch_command("feat/x", true), "git switch -c 'feat/x'");
         assert_eq!(switch_command("-x; rm", false), "git switch -- '-x; rm'");
+        assert_eq!(
+            track_command("origin/feat x"),
+            "git switch --track 'origin/feat x'"
+        );
     }
 
     #[test]
@@ -406,6 +461,7 @@ mod tests {
             branch: "main".into(),
             changed: 2,
             branches: Vec::new(),
+            remote_branches: Vec::new(),
         };
         assert_eq!(branch_chip_text(&info), "⎇ main ▾  ± 2 changed");
         let clean = GitInfo { changed: 0, ..info };
@@ -496,6 +552,35 @@ mod tests {
         run_in_shell(path, &switch_command("main", false)).await;
         let info = cx.update(|cx| git_info(path, cx)).await.expect("repo");
         assert_eq!(info.branch, "main");
+    }
+
+    #[gpui::test]
+    async fn fetched_branches_are_listed_and_switchable(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let directory = tempfile::tempdir().expect("tempdir");
+        let origin = directory.path().join("origin");
+        let clone = directory.path().join("clone");
+        std::fs::create_dir(&origin).expect("mkdir");
+        git(&origin, &["init", "-b", "main"]).await;
+        git(&origin, &["config", "user.name", "Test"]).await;
+        git(&origin, &["config", "user.email", "test@example.com"]).await;
+        git(&origin, &["commit", "--allow-empty", "-m", "init"]).await;
+        git(
+            directory.path(),
+            &["clone", "-q", &origin.to_string_lossy(), "clone"],
+        )
+        .await;
+        git(&origin, &["branch", "feature-x"]).await;
+        git(&clone, &["fetch", "-q"]).await;
+
+        let info = cx.update(|cx| git_info(&clone, cx)).await.expect("repo");
+        assert_eq!(info.branches, ["main"]);
+        assert_eq!(info.remote_branches, ["origin/feature-x"]);
+
+        run_in_shell(&clone, &track_command("origin/feature-x")).await;
+        let info = cx.update(|cx| git_info(&clone, cx)).await.expect("repo");
+        assert_eq!(info.branch, "feature-x");
+        assert!(info.remote_branches.is_empty(), "{info:?}");
     }
 
     #[gpui::test]
