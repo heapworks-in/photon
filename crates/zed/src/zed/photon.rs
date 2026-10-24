@@ -8,6 +8,115 @@ use workspace::{
     HideStatusItem, ItemHandle, NewCenterTerminal, NewTerminal, StatusItemView, Workspace,
 };
 
+/// Runs the PR review's agent pre-review as a visible thread in the agent panel, with the user's
+/// selected agent, and returns the agent's final reply.
+pub struct PanelReviewAgent;
+
+pub fn register_review_agent(cx: &mut App) {
+    photon_review::set_review_agent(std::rc::Rc::new(PanelReviewAgent), cx);
+}
+
+impl photon_review::ReviewAgent for PanelReviewAgent {
+    fn review(
+        &self,
+        workspace: gpui::WeakEntity<Workspace>,
+        prompt: String,
+        work_dir: std::path::PathBuf,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> gpui::Task<anyhow::Result<String>> {
+        use agent_client_protocol::schema::v2 as acp_v2;
+        use agent_ui::{AgentInitialContent, AgentPanel, AgentThreadSource, CreateThreadOptions};
+
+        let Some(workspace) = workspace.upgrade() else {
+            return gpui::Task::ready(Err(anyhow::anyhow!("The review's window is closed.")));
+        };
+        let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx) else {
+            return gpui::Task::ready(Err(anyhow::anyhow!(
+                "This window has no agent panel. Open it once, then try again."
+            )));
+        };
+        let blocks = vec![acp_v2::ContentBlock::Text(acp_v2::TextContent::new(prompt))];
+        let thread_id = panel.update(cx, |panel, cx| {
+            let thread_id = panel.create_thread_with_options(
+                CreateThreadOptions {
+                    title: Some("PR pre-review".into()),
+                    initial_content: Some(AgentInitialContent::ContentBlock {
+                        blocks,
+                        auto_submit: true,
+                    }),
+                    work_dirs: Some(util::path_list::PathList::new(&[work_dir])),
+                    ..CreateThreadOptions::default()
+                },
+                AgentThreadSource::AgentPanel,
+                window,
+                cx,
+            );
+            panel.activate_retained_thread(thread_id, false, window, cx);
+            thread_id
+        });
+        workspace.update(cx, |workspace, cx| {
+            workspace.focus_panel::<AgentPanel>(window, cx);
+        });
+        let panel = panel.downgrade();
+        cx.spawn(async move |cx| wait_for_agent_reply(panel, thread_id, cx).await)
+    }
+}
+
+/// Waits until the thread's agent has answered the prompt and stopped, then returns its last
+/// message. The thread stays in the panel, so the user can follow and continue it.
+async fn wait_for_agent_reply(
+    panel: gpui::WeakEntity<agent_ui::AgentPanel>,
+    thread_id: agent_ui::ThreadId,
+    cx: &mut gpui::AsyncApp,
+) -> anyhow::Result<String> {
+    use acp_thread::{AgentThreadEntry, ThreadStatus};
+    use anyhow::Context as _;
+
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+    let started = std::time::Instant::now();
+    loop {
+        cx.background_executor()
+            .timer(std::time::Duration::from_secs(1))
+            .await;
+        if started.elapsed() > TIMEOUT {
+            anyhow::bail!("The agent didn't finish within 30 minutes.");
+        }
+        let reply = panel.update(cx, |panel, cx| -> anyhow::Result<Option<String>> {
+            let view = panel
+                .conversation_view_for_id(&thread_id, cx)
+                .context("The agent thread was closed.")?;
+            let Some(thread) = view.read(cx).root_thread(cx) else {
+                // Still connecting to the agent.
+                return Ok(None);
+            };
+            let thread = thread.read(cx);
+            if thread.status() != ThreadStatus::Idle {
+                return Ok(None);
+            }
+            let entries = thread.entries();
+            let Some(prompt) = entries
+                .iter()
+                .rposition(|entry| matches!(entry, AgentThreadEntry::UserMessage(_)))
+            else {
+                return Ok(None);
+            };
+            Ok(entries
+                .get(prompt + 1..)
+                .unwrap_or_default()
+                .iter()
+                .rev()
+                .find_map(|entry| match entry {
+                    AgentThreadEntry::AssistantMessage(message) => Some(message.to_markdown(cx)),
+                    _ => None,
+                }))
+        })??;
+        if let Some(reply) = reply {
+            return Ok(reply);
+        }
+    }
+}
+
 pub const REPO_URL: &str = "https://github.com/heapworks-in/photon";
 pub const DOCS_URL: &str = "https://heapworks-in.github.io/photon/";
 

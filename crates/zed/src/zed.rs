@@ -432,6 +432,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
     // photon: hide palette actions for services Photon keeps off.
     photon::hide_offline_actions(cx);
     photon::register_font_styles(cx); // photon: switchable font styles
+    photon::register_review_agent(cx); // photon: PR agent pre-review through the agent panel
     let mut _on_close_subscription = bind_on_window_closed(cx);
     cx.observe_global::<SettingsStore>(move |cx| {
         // A 1.92 regression causes unused-assignment to trigger on this variable.

@@ -1,3 +1,4 @@
+mod agent_review;
 mod anchoring;
 mod author;
 mod checklist;
@@ -15,6 +16,7 @@ mod since_review;
 mod store;
 mod suggestions;
 
+pub use agent_review::*;
 pub use anchoring::*;
 pub use author::*;
 pub use checklist::*;

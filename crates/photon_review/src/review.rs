@@ -37,6 +37,7 @@ use workspace::{
 
 use settings::{PrReviewChecklistContent, Settings as _, SettingsStore};
 
+use crate::{AgentComment, PromptInput, parse_agent_comments, review_agent, review_prompt};
 use crate::{
     Answer, AutoCheck, AutoInputs, AutoResult, ChecklistItem, ChecklistSource, LocalRun,
     LocalRunsVersion, PrReviewSettings, Progress, applicable_items, checklist_note_slot, evaluate,
@@ -275,6 +276,10 @@ pub struct ReviewItem {
     committing_suggestions: HashSet<String>,
     /// Threads the author is marking done (reply "Done", then resolve).
     finishing_threads: HashSet<String>,
+    /// The agent pre-review: running, and what came of the last one.
+    agent_reviewing: bool,
+    agent_review_note: Option<(SharedString, Color)>,
+    _agent_review_task: Task<()>,
     workspace: Option<WeakEntity<Workspace>>,
     suggestion_notes: HashMap<String, SharedString>,
     marking_viewed: HashSet<String>,
@@ -1248,6 +1253,9 @@ impl ReviewItem {
             resolving: HashSet::new(),
             committing_suggestions: HashSet::new(),
             finishing_threads: HashSet::new(),
+            agent_reviewing: false,
+            agent_review_note: None,
+            _agent_review_task: Task::ready(()),
             workspace: None,
             suggestion_notes: HashMap::new(),
             marking_viewed: HashSet::new(),
@@ -2032,6 +2040,117 @@ impl ReviewItem {
             anyhow::Ok(())
         })
         .detach_and_log_err(cx);
+    }
+
+    /// Asks the user's agent to review the pull request; its findings become draft comments the
+    /// reviewer reads, edits or deletes before anything is posted.
+    pub fn start_agent_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.agent_reviewing {
+            return;
+        }
+        let (Some(agent), Some(workspace)) = (review_agent(cx), self.workspace.clone()) else {
+            return;
+        };
+        let prompt = review_prompt(&PromptInput {
+            number: self.detail.summary.key.number,
+            title: &self.detail.summary.title,
+            description: &self.detail.body,
+            steps: &self.steps,
+            files: self.all_files().iter().map(|file| &file.diff).collect(),
+        });
+        let reply = agent.review(
+            workspace,
+            prompt,
+            self.checkout.worktree.clone(),
+            window,
+            cx,
+        );
+        self.agent_reviewing = true;
+        self.agent_review_note = Some((
+            "The agent is reviewing; follow it in the agent panel.".into(),
+            Color::Muted,
+        ));
+        cx.notify();
+        self._agent_review_task = cx.spawn(async move |this, cx| {
+            let comments = reply
+                .await
+                .and_then(|reply| parse_agent_comments(&reply));
+            this.update(cx, |this, cx| {
+                this.agent_reviewing = false;
+                this.agent_review_note = Some(match comments {
+                    Ok(comments) if comments.is_empty() => {
+                        ("The agent found nothing to comment on.".into(), Color::Muted)
+                    }
+                    Ok(comments) => {
+                        let count = comments.len();
+                        for comment in comments {
+                            let draft = this.agent_draft(comment, cx);
+                            let local_id = this.push_draft(draft);
+                            this.queue_save(local_id, cx);
+                        }
+                        this.show_comments(cx);
+                        (
+                            format!(
+                                "The agent added {count} draft comment{}. Read each one before you submit.",
+                                if count == 1 { "" } else { "s" }
+                            )
+                            .into(),
+                            Color::Accent,
+                        )
+                    }
+                    Err(error) => (format!("{error:#}").into(), Color::Error),
+                });
+                cx.notify();
+            })
+            .log_err();
+        });
+    }
+
+    pub fn agent_review_note(&self) -> Option<&(SharedString, Color)> {
+        self.agent_review_note.as_ref()
+    }
+
+    /// A draft on the comment's line of the head, or a general draft naming the place when the
+    /// line isn't in the review.
+    fn agent_draft(&self, comment: AgentComment, cx: &App) -> Draft {
+        let line_text = comment.line.and_then(|line| {
+            let buffer = self.buffer_for_path(&comment.path, cx)?.read(cx).snapshot();
+            let row = line.checked_sub(1)?;
+            (row <= buffer.max_point().row).then(|| {
+                buffer
+                    .text_for_range(Point::new(row, 0)..Point::new(row, buffer.line_len(row)))
+                    .collect::<String>()
+            })
+        });
+        let (line, anchor_text, general, body) = match (comment.line, line_text) {
+            (Some(line), Some(text)) => (line, text, false, comment.body),
+            (line, _) => {
+                let place = match line {
+                    Some(line) => format!("{}:{line}", comment.path),
+                    None => comment.path.clone(),
+                };
+                (
+                    1,
+                    String::new(),
+                    true,
+                    format!("`{place}`: {}", comment.body),
+                )
+            }
+        };
+        Draft {
+            id: None,
+            key: self.detail.summary.key.clone(),
+            path: comment.path,
+            side: Side::Right,
+            start_line: line,
+            end_line: line,
+            commit: self.checkout.head_sha.clone(),
+            anchor_text,
+            body,
+            outdated: false,
+            general,
+            post_state: PostState::Unposted,
+        }
     }
 
     /// Adds a suggestion block holding the draft's lines, ready to edit into the change.
@@ -3439,6 +3558,31 @@ impl ReviewItem {
                     .size(LabelSize::Small)
                     .color(Color::Warning)
             }))
+            .when(review_agent(cx).is_some() && !self.is_own_pr(), |header| {
+                header.child(
+                    crate::button(
+                        "agent-review",
+                        if self.agent_reviewing {
+                            "Agent reviewing…"
+                        } else {
+                            "Pre-review with agent"
+                        },
+                    )
+                    .style(ButtonStyle::Outlined)
+                    .disabled(self.agent_reviewing)
+                    .tooltip(Tooltip::text(
+                        "Your agent reads the PR and leaves draft comments; nothing is posted",
+                    ))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.start_agent_review(window, cx)),
+                    ),
+                )
+            })
+            .children(
+                self.agent_review_note
+                    .clone()
+                    .map(|(note, color)| Label::new(note).size(LabelSize::Small).color(color)),
+            )
             .child(
                 div().ml_auto().child(
                     Label::new(self.progress_text())
@@ -6512,6 +6656,97 @@ fn verify_password(user: &str, password: &str) -> bool {
                 .read_with(&cx, |editor, cx| editor.text(cx))
                 .is_empty()
         );
+    }
+
+    struct FakeAgent {
+        reply: std::cell::RefCell<Option<Result<String>>>,
+        prompts: std::cell::RefCell<Vec<(String, PathBuf)>>,
+    }
+
+    impl crate::ReviewAgent for FakeAgent {
+        fn review(
+            &self,
+            _workspace: WeakEntity<Workspace>,
+            prompt: String,
+            work_dir: PathBuf,
+            _window: &mut Window,
+            _cx: &mut App,
+        ) -> Task<Result<String>> {
+            self.prompts.borrow_mut().push((prompt, work_dir));
+            Task::ready(
+                self.reply
+                    .borrow_mut()
+                    .take()
+                    .unwrap_or_else(|| Err(anyhow!("no reply"))),
+            )
+        }
+    }
+
+    fn install_agent(reply: Result<String>, cx: &mut VisualTestContext) -> std::rc::Rc<FakeAgent> {
+        let agent = std::rc::Rc::new(FakeAgent {
+            reply: std::cell::RefCell::new(Some(reply)),
+            prompts: Default::default(),
+        });
+        cx.update(|_, cx| crate::set_review_agent(agent.clone(), cx));
+        agent
+    }
+
+    #[gpui::test]
+    async fn agent_findings_become_drafts(cx: &mut TestAppContext) {
+        let (item, mut cx, database) = open_with_drafts(cx, Vec::new()).await;
+        let agent = install_agent(
+            Ok("Here you go:\n```json\n[\n {\"path\": \"src/login.rs\", \"line\": 3, \"body\": \"Audit before the check?\"},\n {\"path\": \"src/other.rs\", \"line\": 7, \"body\": \"Not in this PR.\"}\n]\n```".into()),
+            &mut cx,
+        );
+        item.update_in(&mut cx, |item, window, cx| {
+            item.workspace = Some(WeakEntity::new_invalid());
+            item.start_agent_review(window, cx);
+        });
+        cx.run_until_parked();
+
+        let prompts = agent.prompts.borrow();
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].0.contains("--- a/src/login.rs"));
+        assert_eq!(prompts[0].1, PathBuf::from(path!("/repo")));
+        item.read_with(&cx, |item, _| {
+            let drafts = item.drafts();
+            assert_eq!(drafts.len(), 2);
+            assert_eq!(
+                (
+                    drafts[0].path.as_str(),
+                    drafts[0].end_line,
+                    drafts[0].general
+                ),
+                ("src/login.rs", 3, false)
+            );
+            assert_eq!(drafts[0].anchor_text, "    audit(user);");
+            assert_eq!(drafts[0].body, "Audit before the check?");
+            assert!(drafts[1].general);
+            assert_eq!(drafts[1].body, "`src/other.rs:7`: Not in this PR.");
+            assert!(!item.agent_reviewing);
+            assert!(
+                item.agent_review_note()
+                    .is_some_and(|(note, _)| note.contains("added 2 draft comments"))
+            );
+        });
+        assert_eq!(bodies(&database).len(), 2);
+    }
+
+    #[gpui::test]
+    async fn agent_failure_is_shown_and_adds_nothing(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        install_agent(Ok("Looks fine to me.".into()), &mut cx);
+        item.update_in(&mut cx, |item, window, cx| {
+            item.workspace = Some(WeakEntity::new_invalid());
+            item.start_agent_review(window, cx);
+        });
+        cx.run_until_parked();
+        item.read_with(&cx, |item, _| {
+            assert!(item.drafts().is_empty());
+            let (note, color) = item.agent_review_note().expect("note");
+            assert!(note.contains("no ```json block"), "{note}");
+            assert_eq!(*color, Color::Error);
+        });
     }
 
     #[gpui::test]
