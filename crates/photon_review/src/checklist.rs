@@ -131,11 +131,27 @@ pub struct AuthorBox {
     pub checked: bool,
 }
 
-/// `- [ ]` and `- [x]` lines (or `*`) in the pull request description.
+/// `- [ ]` and `- [x]` lines (or `*`) in the pull request description, outside code blocks.
 pub fn parse_author_boxes(body: &str) -> Vec<AuthorBox> {
+    let mut fence: Option<&str> = None;
     body.lines()
         .filter_map(|line| {
             let rest = line.trim_start();
+            let marker = ["```", "~~~"]
+                .into_iter()
+                .find(|marker| rest.starts_with(marker));
+            match (fence, marker) {
+                (None, Some(marker)) => {
+                    fence = Some(marker);
+                    return None;
+                }
+                (Some(open), Some(marker)) if open == marker => {
+                    fence = None;
+                    return None;
+                }
+                (Some(_), _) => return None,
+                (None, None) => {}
+            }
             let rest = rest
                 .strip_prefix("- ")
                 .or_else(|| rest.strip_prefix("* "))?;
@@ -149,6 +165,10 @@ pub fn parse_author_boxes(body: &str) -> Vec<AuthorBox> {
             } else {
                 return None;
             };
+            // GitHub only draws a checkbox when a space follows the brackets.
+            if !text.starts_with(char::is_whitespace) {
+                return None;
+            }
             let text = text.trim();
             (!text.is_empty()).then(|| AuthorBox {
                 text: text.to_string(),
@@ -634,6 +654,18 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn author_boxes_skip_code_blocks_and_need_a_space() {
+        let boxes = parse_author_boxes(
+            "- [x] Real\n```md\n- [ ] Example in a fence\n```\n~~~\n- [x] Tilde fence\n~~~\n- [x]Glued\n- [ ] After\n",
+        );
+        let texts: Vec<_> = boxes
+            .iter()
+            .map(|author_box| author_box.text.as_str())
+            .collect();
+        assert_eq!(texts, ["Real", "After"]);
     }
 
     #[test]

@@ -41,14 +41,15 @@ Not in scope: progress in the inbox (option F), a separate checklist tab (option
    Read with `git show <merge-base>:.photon/review.json` from the review checkout, so it comes from
    the base branch and the PR can't edit it. A missing file is silent; a malformed one shows one
    error line in the checklist section.
-3. **The author's checkboxes:** `- [ ]` / `- [x]` lines (also `*`) in the PR description, shown
-   read-only under "The author says". They aren't counted in progress.
+3. **The author's checkboxes:** `- [ ]` / `- [x]` lines (also `*`) in the PR description, outside
+   code blocks, shown read-only under "The author says". They aren't counted in progress.
 
 Each item has a stable key, `"{source}:{checklist name}:{item text}"`, so answers survive reloads.
 
 ## Auto checks (D)
 
-`pr_review.auto_checks` lists which ones run; the default is all five:
+`pr_review.auto_checks` lists which ones run; the default is all five. An unknown name is shown
+as an error line in the checklist section:
 
 | Name | Passes when | Fails when | Unknown when |
 |---|---|---|---|
@@ -65,8 +66,8 @@ Each item has a stable key, `"{source}:{checklist name}:{item text}"`, so answer
   be marked N/A: evidence of a failure overrides an earlier Yes (say, given while CI was pending).
 - **Ran locally record:** when Run locally opens a terminal, Photon watches that terminal's command
   blocks. A finished command counts when it starts with `pr_review.test_command` (if set), or
-  one of its words is `test`, starts with `test:`, or is a known test runner (`pytest`, `jest`, …). The latest such command and its exit code are
-  stored per PR and head commit.
+  one of its words is `test`, starts with `test:`, or is a known test runner (`pytest`, `jest`, …). The latest such command, its exit code and the
+  commit checked out when it finished are stored per PR.
 
 ## Answering (B)
 

@@ -26,11 +26,17 @@ pub struct PrReviewSettings {
     pub sections: Vec<InboxSection>,
     pub checklists: Vec<settings::PrReviewChecklistContent>,
     pub auto_checks: Vec<AutoCheck>,
+    /// Names in `auto_checks` that aren't checks, so a typo is shown instead of ignored.
+    pub unknown_auto_checks: Vec<String>,
 }
 
 impl Settings for PrReviewSettings {
     fn from_settings(content: &settings::SettingsContent) -> Self {
         let pr_review = content.project.pr_review.as_ref();
+        let auto_check_names = pr_review
+            .and_then(|settings| settings.auto_checks.as_ref())
+            .into_iter()
+            .flatten();
         Self {
             test_command: pr_review
                 .and_then(|settings| settings.test_command.clone())
@@ -47,11 +53,13 @@ impl Settings for PrReviewSettings {
             checklists: pr_review
                 .and_then(|settings| settings.checklists.clone())
                 .unwrap_or_default(),
-            auto_checks: pr_review
-                .and_then(|settings| settings.auto_checks.as_ref())
-                .into_iter()
-                .flatten()
+            auto_checks: auto_check_names
+                .clone()
                 .filter_map(|name| AutoCheck::from_name(name))
+                .collect(),
+            unknown_auto_checks: auto_check_names
+                .filter(|name| AutoCheck::from_name(name).is_none())
+                .cloned()
                 .collect(),
         }
     }
@@ -294,7 +302,7 @@ async fn open_terminal(
             record_test_runs(
                 &terminal,
                 key,
-                checkout.head_sha.clone(),
+                checkout.worktree.clone(),
                 test_command,
                 database,
                 cx,
@@ -331,7 +339,7 @@ impl Global for LocalRunsVersion {}
 fn record_test_runs(
     terminal: &Entity<Terminal>,
     key: PrKey,
-    head_sha: String,
+    worktree: PathBuf,
     test_command: Option<String>,
     database: ReviewDb,
     cx: &mut App,
@@ -340,25 +348,36 @@ fn record_test_runs(
         let TerminalEvent::BlocksChanged(Some(BlockEvent::Finished(id))) = event else {
             return;
         };
-        let Some((command, exit_code)) = terminal
+        let Some((command, exit_code, cwd)) = terminal
             .read(cx)
             .blocks()
             .and_then(|blocks| blocks.block(*id))
-            .and_then(|block| Some((block.command.trim().to_string(), block.exit_code?)))
+            .and_then(|block| {
+                let cwd = block.cwd.clone().unwrap_or_else(|| worktree.clone());
+                Some((block.command.trim().to_string(), block.exit_code?, cwd))
+            })
         else {
             return;
         };
         if !counts_as_test_run(&command, test_command.as_deref()) {
             return;
         }
-        let run = LocalRun {
-            head_sha: head_sha.clone(),
-            command,
-            exit_code,
-        };
         let database = database.clone();
         let key = key.clone();
         cx.spawn(async move |cx| {
+            // Read now, not when the terminal opened: the reviewer may have switched branches
+            // in it, and a run on another commit says nothing about this PR's head.
+            let Some(head_sha) = crate::checkout::git(&cwd, &["rev-parse", "HEAD"])
+                .await
+                .log_err()
+            else {
+                return;
+            };
+            let run = LocalRun {
+                head_sha,
+                command,
+                exit_code,
+            };
             database.set_local_run(key, run).await.log_err();
             cx.update(|cx| cx.default_global::<LocalRunsVersion>().0 += 1);
         })

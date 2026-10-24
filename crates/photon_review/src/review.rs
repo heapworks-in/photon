@@ -2836,6 +2836,10 @@ impl ReviewItem {
         &self.checklist_items
     }
 
+    pub fn checklist_errors(&self) -> &[String] {
+        &self.checklist_errors
+    }
+
     pub fn checklist_answer(&self, item_key: &str) -> Option<Answer> {
         self.checklist_answers.get(item_key).copied()
     }
@@ -2857,10 +2861,16 @@ impl ReviewItem {
             .iter()
             .map(|file| file.diff.path.clone())
             .collect();
-        let (items, errors) = applicable_items(
+        let (items, mut errors) = applicable_items(
             &checklists,
             &format!("{}/{}", key.owner, key.repo),
             &changed,
+        );
+        errors.extend(
+            PrReviewSettings::get_global(cx)
+                .unknown_auto_checks
+                .iter()
+                .map(|name| format!("Unknown check \"{name}\" in pr_review.auto_checks")),
         );
         self.checklist_items = items;
         self.checklist_errors = errors;
@@ -5537,6 +5547,19 @@ fn verify_password(user: &str, password: &str) -> bool {
             request_json(&post)["body"],
             "### Checklist (1/2)\n- [ ] Rate limited: **No**, no limit on retries\n- N/A Audited\n"
         );
+    }
+
+    #[gpui::test]
+    async fn unknown_auto_check_names_are_reported(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        set_checklists(&mut cx, json!([]), &["checks_pass", "checks_pas"]);
+        item.read_with(&cx, |item, _| {
+            assert_eq!(item.auto_results().len(), 1);
+            assert_eq!(
+                item.checklist_errors(),
+                ["Unknown check \"checks_pas\" in pr_review.auto_checks"]
+            );
+        });
     }
 
     #[gpui::test]
