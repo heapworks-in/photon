@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 
 use anyhow::{Context as _, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -52,6 +53,22 @@ struct TeamFile {
 pub fn parse_team_file(json: &str) -> Result<Vec<PrReviewChecklistContent>> {
     let file: TeamFile = serde_json::from_str(json).context(format!("reading {TEAM_FILE}"))?;
     Ok(file.checklists)
+}
+
+/// The repository's own checklists at `base`, so a pull request can't change the checks it is
+/// reviewed against. A missing file is the usual case and gives no error.
+pub async fn read_team_checklists(
+    worktree: &Path,
+    base: &str,
+) -> (Vec<PrReviewChecklistContent>, Option<String>) {
+    let spec = format!("{base}:{TEAM_FILE}");
+    match crate::checkout::git_raw(worktree, &["show", &spec]).await {
+        Err(_) => (Vec::new(), None),
+        Ok(text) => match parse_team_file(&text) {
+            Ok(checklists) => (checklists, None),
+            Err(error) => (Vec::new(), Some(format!("{error:#}"))),
+        },
+    }
 }
 
 /// The items of every checklist whose `when` rules match this pull request, and a message for
@@ -214,7 +231,7 @@ pub struct LocalRun {
 pub struct AutoInputs<'a> {
     pub checks: ChecksState,
     pub threads: &'a [ReviewThread],
-    pub files: &'a [FileDiff],
+    pub files: Vec<&'a FileDiff>,
     pub head_sha: &'a str,
     pub local_run: Option<&'a LocalRun>,
 }
@@ -474,7 +491,7 @@ mod tests {
         AutoInputs {
             checks: ChecksState::Passing,
             threads,
-            files,
+            files: files.iter().collect(),
             head_sha: "h1",
             local_run: None,
         }

@@ -613,7 +613,7 @@ pub fn parse_detail(key: &PrKey, json: &str) -> Result<PrDetail> {
         deletions: pull_request.deletions,
         files,
         threads,
-        body: pull_request.body.clone().unwrap_or_default(),
+        body: pull_request.body.unwrap_or_default(),
     })
 }
 

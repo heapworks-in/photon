@@ -12,7 +12,7 @@ use editor::{
         BlockContext, BlockPlacement, BlockProperties, BlockStyle, CustomBlockId, RenderBlock,
     },
 };
-use futures::future::{join_all, try_join_all};
+use futures::future::{FutureExt as _, Shared, join_all, try_join_all};
 use gpui::{
     Action as _, AnyWindowHandle, App, AsyncApp, AsyncWindowContext, BackgroundExecutor,
     ClickEvent, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Global,
@@ -34,6 +34,13 @@ use workspace::{
     notifications::NotificationId, open_paths,
 };
 
+use settings::{PrReviewChecklistContent, Settings as _, SettingsStore};
+
+use crate::{
+    Answer, AutoCheck, AutoInputs, AutoResult, ChecklistItem, ChecklistSource, LocalRun,
+    LocalRunsVersion, PrReviewSettings, Progress, applicable_items, checklist_note_slot, evaluate,
+    parse_author_boxes, read_team_checklists, review_block,
+};
 use crate::{
     CallerMark, ChangedFunction, Checkout, ChecksState, ContextCache, ContextError, ContextExcerpt,
     Draft, FetchedCheckout, FileAnalysis, FileDiff, FileKind, FileStatus, FunctionContext, GhError,
@@ -261,6 +268,14 @@ pub struct ReviewItem {
     full_files: Option<Vec<LoadedFile>>,
     since_review_note: Option<SharedString>,
     loading_since_review: bool,
+    checklist_items: Vec<ChecklistItem>,
+    checklist_errors: Vec<String>,
+    team_checklists: Vec<PrReviewChecklistContent>,
+    team_error: Option<String>,
+    checklist_answers: HashMap<String, Answer>,
+    local_run: Option<LocalRun>,
+    note_editors: HashMap<String, Entity<Editor>>,
+    checklist_write: Shared<Task<()>>,
     _since_review_lsp_handles: Vec<OpenLspBufferHandle>,
     _since_review_task: Task<()>,
     _reanchor_task: Task<()>,
@@ -274,6 +289,7 @@ pub(crate) struct PreparedReview {
     pub checkout: Checkout,
     pub detail: PrDetail,
     pub files: Vec<(FileDiff, Option<String>)>,
+    pub team_checklists: (Vec<PrReviewChecklistContent>, Option<String>),
 }
 
 #[derive(Default)]
@@ -475,6 +491,7 @@ async fn place_review(
         checkout,
         detail,
         files,
+        team_checklists: (team_checklists, team_error),
     } = prepared;
     let project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
     let loads = cx.update(|cx| {
@@ -494,9 +511,11 @@ async fn place_review(
                 .items_of_type::<ReviewItem>(cx)
                 .find(|item| item.read(cx).detail.summary.key == key);
             let item = cx.new(|cx| {
-                ReviewItem::new(
+                let mut item = ReviewItem::new(
                     project, detail, login, checkout, files, database, window, cx,
-                )
+                );
+                item.set_team_checklists(team_checklists, team_error, cx);
+                item
             });
             let pane = existing.as_ref().and_then(|existing| {
                 workspace
@@ -590,11 +609,13 @@ pub(crate) async fn finish_review(
         let base = base_text(&checkout.worktree, &checkout.merge_base, &diff).await?;
         files.push((diff, base));
     }
+    let team_checklists = read_team_checklists(&checkout.worktree, &checkout.merge_base).await;
     Ok(PreparedReview {
         login,
         checkout,
         detail,
         files,
+        team_checklists,
     })
 }
 
@@ -1093,6 +1114,22 @@ impl ReviewItem {
             .viewed_steps(&detail.summary.key)
             .log_err()
             .unwrap_or_default();
+        subscriptions.push(cx.observe_global::<SettingsStore>(|this, cx| {
+            this.rebuild_checklist(cx);
+        }));
+        subscriptions.push(cx.observe_global::<LocalRunsVersion>(|this, cx| {
+            this.local_run = this
+                .database
+                .local_run(&this.detail.summary.key)
+                .log_err()
+                .flatten();
+            cx.notify();
+        }));
+        let checklist_answers = database
+            .checklist_answers(&detail.summary.key)
+            .log_err()
+            .unwrap_or_default();
+        let local_run = database.local_run(&detail.summary.key).log_err().flatten();
         // GitHub's record wins: it includes reviews submitted on github.com.
         let last_review = detail.summary.last_review_commit.clone().or_else(|| {
             database
@@ -1143,6 +1180,14 @@ impl ReviewItem {
             full_files: None,
             since_review_note: None,
             loading_since_review: false,
+            checklist_items: Vec::new(),
+            checklist_errors: Vec::new(),
+            team_checklists: Vec::new(),
+            team_error: None,
+            checklist_answers,
+            local_run,
+            note_editors: HashMap::new(),
+            checklist_write: Task::ready(()).shared(),
             _since_review_lsp_handles: Vec::new(),
             _since_review_task: Task::ready(()),
             _reanchor_task: Task::ready(()),
@@ -1154,6 +1199,16 @@ impl ReviewItem {
             this.push_draft(draft);
         }
         this.add_reply_editors(&composer_texts, window, cx);
+        let unanswered: Vec<String> = this
+            .checklist_answers
+            .iter()
+            .filter(|(_, answer)| **answer == Answer::No)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in unanswered {
+            this.ensure_note_editor(&key, window, cx);
+        }
+        this.rebuild_checklist(cx);
         this.rebuild_map(&[], cx);
         this._context_task = this.load_context(cx);
         this._reanchor_task = this.reanchor_drafts(cx);
@@ -1432,6 +1487,18 @@ impl ReviewItem {
         let key = self.detail.summary.key.clone();
         let head_sha = self.checkout.head_sha.clone();
         let summary = self.summary_editor.read(cx).text(cx);
+        let mut body = summary.trim().to_string();
+        if let Some(block) = review_block(
+            &self.auto_results(cx),
+            &self.checklist_items,
+            &self.checklist_answers,
+            &self.checklist_notes(cx),
+        ) {
+            if !body.is_empty() {
+                body.push_str("\n\n");
+            }
+            body.push_str(&block);
+        }
         let summary_sync = self.text_sync(SUMMARY_SLOT);
         let commentable = self.commentable.clone();
         let languages = self.draft_languages(cx);
@@ -1493,7 +1560,7 @@ impl ReviewItem {
                 &key,
                 &head_sha,
                 event,
-                summary.trim(),
+                &body,
                 &drafts,
                 &commentable,
                 &|path| languages.get(path).cloned(),
@@ -2749,13 +2816,166 @@ impl ReviewItem {
         cx.notify();
     }
 
-    fn progress_text(&self) -> String {
+    fn progress_text(&self, cx: &App) -> String {
         let viewed = self
             .steps
             .iter()
             .filter(|step| self.viewed_steps.contains(&step.key))
             .count();
-        format!("{viewed} of {} steps viewed", self.steps.len())
+        let mut text = format!("{viewed} of {} steps viewed", self.steps.len());
+        let checklist = self.checklist_progress(cx);
+        if checklist.total > 0 {
+            text.push_str(&format!(" · checklist {}", checklist.text()));
+        }
+        text
+    }
+
+    fn all_files(&self) -> &[LoadedFile] {
+        self.full_files.as_deref().unwrap_or(&self.files)
+    }
+
+    pub fn checklist_items(&self) -> &[ChecklistItem] {
+        &self.checklist_items
+    }
+
+    pub fn checklist_answer(&self, item_key: &str) -> Option<Answer> {
+        self.checklist_answers.get(item_key).copied()
+    }
+
+    fn rebuild_checklist(&mut self, cx: &mut Context<Self>) {
+        let checklists: Vec<_> = PrReviewSettings::get_global(cx)
+            .checklists
+            .iter()
+            .map(|checklist| (ChecklistSource::Settings, checklist.clone()))
+            .chain(
+                self.team_checklists
+                    .iter()
+                    .map(|checklist| (ChecklistSource::Team, checklist.clone())),
+            )
+            .collect();
+        let key = &self.detail.summary.key;
+        let changed: Vec<String> = self
+            .all_files()
+            .iter()
+            .map(|file| file.diff.path.clone())
+            .collect();
+        let (items, errors) = applicable_items(
+            &checklists,
+            &format!("{}/{}", key.owner, key.repo),
+            &changed,
+        );
+        self.checklist_items = items;
+        self.checklist_errors = errors;
+        cx.notify();
+    }
+
+    pub fn set_team_checklists(
+        &mut self,
+        checklists: Vec<PrReviewChecklistContent>,
+        error: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.team_checklists = checklists;
+        self.team_error = error;
+        self.rebuild_checklist(cx);
+    }
+
+    pub fn auto_results(&self, cx: &App) -> Vec<(AutoCheck, AutoResult)> {
+        let inputs = AutoInputs {
+            checks: self.detail.summary.checks,
+            threads: &self.detail.threads,
+            files: self.all_files().iter().map(|file| &file.diff).collect(),
+            head_sha: &self.checkout.head_sha,
+            local_run: self.local_run.as_ref(),
+        };
+        PrReviewSettings::get_global(cx)
+            .auto_checks
+            .iter()
+            .map(|check| (*check, evaluate(*check, &inputs)))
+            .collect()
+    }
+
+    fn checklist_progress(&self, cx: &App) -> Progress {
+        crate::progress(
+            &self.auto_results(cx),
+            &self.checklist_items,
+            &self.checklist_answers,
+        )
+    }
+
+    fn checklist_notes(&self, cx: &App) -> HashMap<String, String> {
+        self.note_editors
+            .iter()
+            .map(|(key, editor)| (key.clone(), editor.read(cx).text(cx)))
+            .collect()
+    }
+
+    /// Clicking the answer already given clears it.
+    pub fn answer_checklist_item(
+        &mut self,
+        item_key: &str,
+        answer: Answer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let answer = (self.checklist_answers.get(item_key) != Some(&answer)).then_some(answer);
+        match answer {
+            Some(answer) => {
+                self.checklist_answers.insert(item_key.to_string(), answer);
+            }
+            None => {
+                self.checklist_answers.remove(item_key);
+            }
+        }
+        if answer == Some(Answer::No) {
+            self.ensure_note_editor(item_key, window, cx);
+        }
+        let database = self.database.clone();
+        let key = self.detail.summary.key.clone();
+        let item_key = item_key.to_string();
+        // Chained, so quick clicks are stored in the order they were made, and detached, so
+        // closing the review doesn't drop the last one.
+        let previous = self.checklist_write.clone();
+        let write = cx
+            .background_spawn(async move {
+                previous.await;
+                database
+                    .set_checklist_answer(key, item_key, answer)
+                    .await
+                    .log_err();
+            })
+            .shared();
+        cx.background_spawn(write.clone()).detach();
+        self.checklist_write = write;
+        cx.notify();
+    }
+
+    fn ensure_note_editor(&mut self, item_key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.note_editors.contains_key(item_key) {
+            return;
+        }
+        let slot = checklist_note_slot(item_key);
+        let text = self
+            .text_syncs
+            .get(&slot)
+            .map(|sync| sync.lock().latest.clone())
+            .unwrap_or_default();
+        let editor = cx.new(|cx| {
+            let mut editor = Editor::auto_height(1, 4, window, cx);
+            editor.set_placeholder_text("Why not? (goes in your review)", window, cx);
+            editor.set_text(text, window, cx);
+            editor
+        });
+        self._subscriptions.push(cx.subscribe(
+            &editor,
+            move |this, editor, event: &EditorEvent, cx| {
+                if matches!(event, EditorEvent::BufferEdited) {
+                    let text = editor.read(cx).text(cx);
+                    this.queue_text(&slot, text, cx);
+                }
+            },
+        ));
+        self.note_editors.insert(item_key.to_string(), editor);
     }
 
     fn render_header(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -2819,11 +3039,166 @@ impl ReviewItem {
             }))
             .child(
                 div().ml_auto().child(
-                    Label::new(self.progress_text())
+                    Label::new(self.progress_text(cx))
                         .size(LabelSize::Small)
                         .color(Color::Muted),
                 ),
             )
+    }
+
+    /// A manual item, or an auto check that didn't pass: answered Yes, No or N/A.
+    fn render_check_row(
+        &self,
+        place: &'static str,
+        item_key: &str,
+        text: &str,
+        evidence: Option<(&str, Color)>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let answer = self.checklist_answers.get(item_key).copied();
+        let choice = |label: &'static str, value: Answer| {
+            let item_key = item_key.to_string();
+            Button::new(
+                SharedString::from(format!("photon-check-{place}-{label}-{item_key}")),
+                label,
+            )
+            .size(ButtonSize::Compact)
+            .style(ButtonStyle::Outlined)
+            .label_size(LabelSize::XSmall)
+            .toggle_state(answer == Some(value))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.answer_checklist_item(&item_key, value, window, cx)
+            }))
+        };
+        let text_color = match answer {
+            Some(Answer::Yes | Answer::NotApplicable) => Color::Muted,
+            Some(Answer::No) => Color::Error,
+            None => Color::Default,
+        };
+        v_flex()
+            .py_0p5()
+            .gap_0p5()
+            .child(
+                Label::new(text.to_string())
+                    .size(LabelSize::Small)
+                    .color(text_color),
+            )
+            .children(evidence.map(|(evidence, color)| {
+                Label::new(evidence.to_string())
+                    .size(LabelSize::XSmall)
+                    .color(color)
+            }))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(choice("Yes", Answer::Yes))
+                    .child(choice("No", Answer::No))
+                    .child(choice("N/A", Answer::NotApplicable)),
+            )
+            .when(answer == Some(Answer::No), |row| {
+                row.children(self.note_editors.get(item_key).cloned())
+            })
+            .into_any_element()
+    }
+
+    fn render_checklist(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let auto = self.auto_results(cx);
+        let boxes = parse_author_boxes(&self.detail.body);
+        let errors: Vec<&String> = self
+            .checklist_errors
+            .iter()
+            .chain(self.team_error.as_ref())
+            .collect();
+        if auto.is_empty()
+            && self.checklist_items.is_empty()
+            && boxes.is_empty()
+            && errors.is_empty()
+        {
+            return None;
+        }
+        let progress = crate::progress(&auto, &self.checklist_items, &self.checklist_answers);
+        let group = |title: &'static str| {
+            Label::new(title)
+                .size(LabelSize::XSmall)
+                .color(Color::Muted)
+        };
+        let mut section = v_flex()
+            .id("photon-review-checklist")
+            .pt_4()
+            .gap_1()
+            .child(
+                Label::new(format!("Checklist · {}", progress.text()))
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .children(errors.into_iter().map(|error| {
+                Label::new(error.clone())
+                    .size(LabelSize::XSmall)
+                    .color(Color::Error)
+            }));
+        let (passed, open): (Vec<_>, Vec<_>) = auto.iter().partition(|(_, result)| result.passed());
+        if !passed.is_empty() {
+            section = section.child(group("Photon checked"));
+            for (check, result) in passed {
+                section = section.child(
+                    v_flex()
+                        .child(
+                            Label::new(format!("✓ {}", check.title()))
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .child(
+                            Label::new(result.evidence().to_string())
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        ),
+                );
+            }
+        }
+        if !open.is_empty() || !self.checklist_items.is_empty() {
+            section = section.child(group("For you"));
+            for (check, result) in open {
+                let color = match result {
+                    AutoResult::Failed(_) => Color::Warning,
+                    _ => Color::Muted,
+                };
+                section = section.child(self.render_check_row(
+                    "list",
+                    &check.key(),
+                    check.title(),
+                    Some((result.evidence(), color)),
+                    cx,
+                ));
+            }
+            for item in &self.checklist_items {
+                section = section.child(self.render_check_row(
+                    "list",
+                    &item.key,
+                    &item.text,
+                    Some((&item.checklist, Color::Muted)),
+                    cx,
+                ));
+            }
+        }
+        if !boxes.is_empty() {
+            section = section.child(group("The author says"));
+            for author_box in boxes {
+                section = section.child(
+                    Label::new(format!(
+                        "{} {}",
+                        if author_box.checked { "☑" } else { "☐" },
+                        author_box.text
+                    ))
+                    .size(LabelSize::Small)
+                    .color(if author_box.checked {
+                        Color::Default
+                    } else {
+                        Color::Muted
+                    }),
+                );
+            }
+        }
+        Some(section.into_any_element())
     }
 
     fn render_map(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -2963,8 +3338,20 @@ impl ReviewItem {
                 for name in neighbours {
                     map = map.child(function_row(name, Color::Disabled));
                 }
+                for item in self
+                    .checklist_items
+                    .iter()
+                    .filter(|item| item.matches_any(&step.files))
+                {
+                    map = map.child(
+                        div()
+                            .pl_6()
+                            .child(self.render_check_row("step", &item.key, &item.text, None, cx)),
+                    );
+                }
             }
         }
+        map = map.children(self.render_checklist(cx));
         let legend_row = |text: &'static str, color: Color| {
             h_flex()
                 .gap_1p5()
@@ -3191,7 +3578,7 @@ impl ReviewItem {
                             "{} draft comment{} · {}",
                             self.drafts.len(),
                             if self.drafts.len() == 1 { "" } else { "s" },
-                            self.progress_text()
+                            self.progress_text(cx)
                         ))
                         .size(LabelSize::Small)
                         .color(Color::Muted),
@@ -3294,7 +3681,6 @@ mod tests {
     use crate::{FakeGh, FileStatus, PrKey, ReviewDb, build_loaded_file, parse_detail};
     use editor::MultiBufferOffset;
     use fs::FakeFs;
-    use futures::FutureExt as _;
     use gpui::{TestAppContext, VisualTestContext};
     use language::FakeLspAdapter;
     use project::Project;
@@ -5022,6 +5408,134 @@ fn verify_password(user: &str, password: &str) -> bool {
         let task = item.update_in(cx, |item, window, cx| item.submit(event, window, cx));
         cx.run_until_parked();
         task.now_or_never().expect("submit finished")
+    }
+
+    fn set_checklists(cx: &mut VisualTestContext, checklists: serde_json::Value, auto: &[&str]) {
+        cx.update(|_, cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    let pr_review = settings.project.pr_review.get_or_insert_default();
+                    pr_review.checklists =
+                        Some(serde_json::from_value(checklists).expect("checklists"));
+                    pr_review.auto_checks =
+                        Some(auto.iter().map(|name| name.to_string()).collect());
+                });
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    fn checklist_keys(item: &Entity<ReviewItem>, cx: &mut VisualTestContext) -> Vec<String> {
+        item.read_with(cx, |item, _| {
+            item.checklist_items()
+                .iter()
+                .map(|item| item.key.clone())
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    async fn checklist_answers_and_notes_go_into_the_review(cx: &mut TestAppContext) {
+        let (item, mut cx, database) = open_with_drafts(cx, Vec::new()).await;
+        set_checklists(
+            &mut cx,
+            json!([
+                {"name": "Login", "when": {"paths": ["src/login.rs"]}, "items": ["Rate limited", "Audited"]},
+                {"name": "Docs", "when": {"paths": ["docs/**"]}, "items": ["Spelling"]}
+            ]),
+            &[],
+        );
+        let keys = checklist_keys(&item, &mut cx);
+        assert_eq!(
+            keys,
+            ["settings:Login:Rate limited", "settings:Login:Audited"]
+        );
+        item.update_in(&mut cx, |item, window, cx| {
+            item.answer_checklist_item(&keys[0], Answer::No, window, cx);
+            item.answer_checklist_item(&keys[1], Answer::Yes, window, cx);
+            // Clicking the given answer again clears it.
+            item.answer_checklist_item(&keys[1], Answer::Yes, window, cx);
+            assert_eq!(item.checklist_answer(&keys[1]), None);
+            item.answer_checklist_item(&keys[1], Answer::NotApplicable, window, cx);
+        });
+        let note = item.read_with(&cx, |item, _| item.note_editors[&keys[0]].clone());
+        note.update_in(&mut cx, |editor, window, cx| {
+            editor.set_text("no limit on retries", window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            database.checklist_answers(&key()).expect("answers"),
+            HashMap::from_iter([
+                (keys[0].clone(), Answer::No),
+                (keys[1].clone(), Answer::NotApplicable)
+            ])
+        );
+        assert_eq!(
+            database
+                .composer_texts(&key())
+                .expect("texts")
+                .get(&checklist_note_slot(&keys[0]))
+                .map(String::as_str),
+            Some("no limit on retries")
+        );
+
+        let fake = install_fake(&mut cx);
+        fake.respond(is_review_post, Ok("{}".into()));
+        fake.respond(is_detail, Ok(DETAIL.into()));
+        submit(&item, crate::ReviewEvent::Approve, &mut cx).expect("submitted");
+        let post = fake
+            .requests()
+            .into_iter()
+            .find(is_review_post)
+            .expect("review posted");
+        assert_eq!(
+            request_json(&post)["body"],
+            "### Checklist (1/2)\n- [ ] Rate limited: **No**, no limit on retries\n- N/A Audited\n"
+        );
+    }
+
+    #[gpui::test]
+    async fn team_checklists_and_local_runs_feed_the_checklist(cx: &mut TestAppContext) {
+        let (item, mut cx, database) = open_with_drafts(cx, Vec::new()).await;
+        set_checklists(&mut cx, json!([]), &["ran_locally"]);
+        item.update(&mut cx, |item, cx| {
+            item.set_team_checklists(
+                vec![
+                    serde_json::from_value(json!({"name": "Team", "items": ["Owner approved"]}))
+                        .expect("team"),
+                ],
+                None,
+                cx,
+            )
+        });
+        assert_eq!(checklist_keys(&item, &mut cx), ["team:Team:Owner approved"]);
+        let ran_locally =
+            |cx: &mut VisualTestContext| item.read_with(cx, |item, cx| item.auto_results(cx));
+        assert!(matches!(
+            ran_locally(&mut cx)[..],
+            [(AutoCheck::RanLocally, AutoResult::Unknown(_))]
+        ));
+
+        database
+            .set_local_run(
+                key(),
+                LocalRun {
+                    head_sha: "head".into(),
+                    command: "cargo test".into(),
+                    exit_code: 0,
+                },
+            )
+            .await
+            .expect("record");
+        cx.update(|_, cx| cx.default_global::<LocalRunsVersion>().0 += 1);
+        cx.run_until_parked();
+        assert_eq!(
+            ran_locally(&mut cx),
+            [(
+                AutoCheck::RanLocally,
+                AutoResult::Passed("\"cargo test\" exited 0".into())
+            )]
+        );
     }
 
     #[gpui::test]
