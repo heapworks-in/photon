@@ -55,6 +55,10 @@ use crate::{
     refuse_head_change_under_open_window, reply_request, reply_slot, resolve_request,
     review_request, review_root, since_review_files, viewed_request,
 };
+use crate::{
+    apply_suggestion, commit_file_request, file_at_commit_request, parse_file_contents,
+    parse_suggestion, suggestion_block,
+};
 
 actions!(
     photon_review,
@@ -265,6 +269,9 @@ pub struct ReviewItem {
     file_errors: HashMap<String, SharedString>,
     submit_note: Option<SharedString>,
     resolving: HashSet<String>,
+    /// Threads whose suggestion is being committed, and what came of the last commit.
+    committing_suggestions: HashSet<String>,
+    suggestion_notes: HashMap<String, SharedString>,
     marking_viewed: HashSet<String>,
     last_review: Option<String>,
     full_files: Option<Vec<LoadedFile>>,
@@ -723,9 +730,11 @@ fn draft_renderer(
     posted_note: Option<&'static str>,
     composer: Option<Entity<Editor>>,
     sync: Arc<Mutex<DraftSync>>,
+    can_suggest: bool,
 ) -> RenderBlock {
     Arc::new(move |block: &mut BlockContext| {
         let error = sync.lock().error.clone();
+        let suggest_item = item.clone();
         let include_item = item.clone();
         let add_item = item.clone();
         let cancel_item = item.clone();
@@ -804,6 +813,22 @@ fn draft_renderer(
                                         .log_err();
                                 }),
                         )
+                        .when(can_suggest, |this| {
+                            this.child(
+                                crate::button("suggest", "Suggest change")
+                                    .style(ButtonStyle::Outlined)
+                                    .tooltip(Tooltip::text(
+                                        "Adds the lines as a suggestion the author can commit",
+                                    ))
+                                    .on_click(move |_, window, cx| {
+                                        suggest_item
+                                            .update(cx, |item, cx| {
+                                                item.suggest_change(local_id, window, cx)
+                                            })
+                                            .log_err();
+                                    }),
+                            )
+                        })
                         .child(
                             crate::button("cancel", "Cancel")
                                 .style(ButtonStyle::Outlined)
@@ -849,12 +874,20 @@ fn draft_renderer(
     })
 }
 
+#[derive(Clone)]
+struct SuggestionState {
+    committable: bool,
+    committing: bool,
+    note: Option<SharedString>,
+}
+
 fn thread_renderer(
     item: WeakEntity<ReviewItem>,
     thread: ReviewThread,
     reply: Option<Entity<Editor>>,
     error: Option<SharedString>,
     resolve_pending: bool,
+    suggestion: SuggestionState,
 ) -> RenderBlock {
     Arc::new(move |block: &mut BlockContext| {
         let id = SharedString::from(format!("photon-review-thread-{}", thread.id));
@@ -864,10 +897,39 @@ fn thread_renderer(
         let resolve_thread = thread.id.clone();
         let resolved = thread.is_resolved;
         comment_card(id.into(), block)
-            .children(thread.comments.iter().map(|comment| {
+            .children(thread.comments.iter().enumerate().map(|(index, comment)| {
+                let commit_item = item.clone();
+                let commit_thread = thread.id.clone();
+                let has_suggestion =
+                    suggestion.committable && parse_suggestion(&comment.body).is_some();
                 v_flex()
                     .child(Label::new(comment.author.clone()).size(LabelSize::Small))
                     .child(Label::new(comment.body.clone()).size(LabelSize::Small))
+                    .when(has_suggestion, |this| {
+                        this.child(
+                            h_flex().pt_1().child(
+                                crate::button(("commit-suggestion", index), "Commit suggestion")
+                                    .style(ButtonStyle::Tinted(TintColor::Accent))
+                                    .disabled(suggestion.committing)
+                                    .tooltip(Tooltip::text(
+                                        "Commits this change to the pull request's branch on GitHub",
+                                    ))
+                                    .on_click(move |_, _, cx| {
+                                        commit_item
+                                            .update(cx, |item, cx| {
+                                                item.commit_suggestion(&commit_thread, index, cx)
+                                                    .detach_and_log_err(cx)
+                                            })
+                                            .log_err();
+                                    }),
+                            ),
+                        )
+                    })
+            }))
+            .children(suggestion.note.clone().map(|note| {
+                Label::new(note)
+                    .size(LabelSize::XSmall)
+                    .color(Color::Success)
             }))
             .children(error.clone().map(|error| {
                 Label::new(error)
@@ -1179,6 +1241,8 @@ impl ReviewItem {
             file_errors: HashMap::new(),
             submit_note: None,
             resolving: HashSet::new(),
+            committing_suggestions: HashSet::new(),
+            suggestion_notes: HashMap::new(),
             marking_viewed: HashSet::new(),
             last_review,
             full_files: None,
@@ -1800,6 +1864,133 @@ impl ReviewItem {
 
     /// Flips the thread at once, as GitHub does, and flips it back if `gh` fails. A click while
     /// the thread's last request is pending sends nothing.
+    /// Adds a suggestion block holding the draft's lines, ready to edit into the change.
+    pub fn suggest_change(&mut self, local_id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.draft_index(local_id) else {
+            return;
+        };
+        let draft = &self.drafts[index];
+        if draft.side != Side::Right || draft.general {
+            return;
+        }
+        let block = suggestion_block(&draft.anchor_text);
+        let Some(composer) = self.draft_views[index].composer.clone() else {
+            return;
+        };
+        composer.update(cx, |editor, cx| {
+            let body = editor.text(cx);
+            let text = if body.trim().is_empty() {
+                block
+            } else {
+                format!("{}\n\n{block}", body.trim_end())
+            };
+            editor.set_text(text, window, cx);
+            editor.move_to_end(&Default::default(), window, cx);
+        });
+    }
+
+    /// Whether a comment's suggestion can be committed from here: the thread sits on the head's
+    /// lines and Photon knows the branch to commit to.
+    fn suggestion_committable(&self, thread: &ReviewThread) -> bool {
+        !thread.is_outdated
+            && thread.side == Side::Right
+            && thread.line.is_some()
+            && self.detail.head_repository.is_some()
+            && !self.detail.head_ref.is_empty()
+    }
+
+    /// Commits the suggestion in a thread's comment to the pull request's branch, as
+    /// github.com's "Commit suggestion" does. Nothing in the local checkout changes.
+    pub fn commit_suggestion(
+        &mut self,
+        thread_id: &str,
+        comment_index: usize,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        if self.committing_suggestions.contains(thread_id) {
+            return Task::ready(Ok(()));
+        }
+        let Some(thread) = self
+            .detail
+            .threads
+            .iter()
+            .find(|thread| thread.id == thread_id)
+        else {
+            return Task::ready(Err(anyhow!("Unknown review thread {thread_id}.")));
+        };
+        let (Some(comment), Some(end), Some(head_repository)) = (
+            thread.comments.get(comment_index),
+            thread.line,
+            self.detail.head_repository.clone(),
+        ) else {
+            return Task::ready(Err(anyhow!("This suggestion can't be committed.")));
+        };
+        let Some(replacement) = parse_suggestion(&comment.body) else {
+            return Task::ready(Err(anyhow!("This comment has no single suggestion.")));
+        };
+        if !self.suggestion_committable(thread) {
+            return Task::ready(Err(anyhow!("This suggestion can't be committed.")));
+        }
+        let start = thread.start_line.unwrap_or(end);
+        let path = thread.path.clone();
+        let branch = self.detail.head_ref.clone();
+        let commit = self.checkout.head_sha.clone();
+        let message = format!("Apply suggestion from @{} in code review", comment.author);
+        let key = self.detail.summary.key.clone();
+        let runner = gh_runner(cx);
+        let thread_id = thread_id.to_string();
+        self.committing_suggestions.insert(thread_id.clone());
+        self.suggestion_notes.remove(&thread_id);
+        self.thread_errors.remove(&thread_id);
+        self.show_comments(cx);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = async {
+                let contents = runner
+                    .run(file_at_commit_request(
+                        &key,
+                        &head_repository,
+                        &path,
+                        &commit,
+                    ))
+                    .await?;
+                let (text, blob_sha) = parse_file_contents(&contents)?;
+                let updated = apply_suggestion(&text, start, end, &replacement)?;
+                runner
+                    .run(commit_file_request(
+                        &key,
+                        &head_repository,
+                        &branch,
+                        &path,
+                        &updated,
+                        &blob_sha,
+                        &message,
+                    ))
+                    .await?;
+                anyhow::Ok(())
+            }
+            .await;
+            this.update(cx, |this, cx| {
+                this.committing_suggestions.remove(&thread_id);
+                match &result {
+                    Ok(()) => {
+                        this.suggestion_notes.insert(
+                            thread_id.clone(),
+                            format!("Committed to {branch}. Reopen the review to see it.").into(),
+                        );
+                    }
+                    Err(error) => {
+                        this.thread_errors
+                            .insert(thread_id.clone(), format!("{error:#}").into());
+                    }
+                }
+                this.show_comments(cx);
+                cx.notify();
+            })?;
+            result
+        })
+    }
+
     pub fn set_thread_resolved(
         &mut self,
         thread_id: &str,
@@ -2357,6 +2548,7 @@ impl ReviewItem {
                     posted_note,
                     view.composer.clone(),
                     view.sync.clone(),
+                    draft.side == Side::Right && !draft.general,
                 ),
                 priority: 0,
             });
@@ -2376,9 +2568,25 @@ impl ReviewItem {
                 .sum();
             let error = self.thread_errors.get(&thread.id).cloned();
             let pending = self.resolving.contains(&thread.id);
+            let suggestion = SuggestionState {
+                committable: self.suggestion_committable(thread),
+                committing: self.committing_suggestions.contains(&thread.id),
+                note: self.suggestion_notes.get(&thread.id).cloned(),
+            };
+            let suggestion_rows = if suggestion.committable {
+                thread
+                    .comments
+                    .iter()
+                    .filter(|comment| parse_suggestion(&comment.body).is_some())
+                    .count()
+                    * 2
+            } else {
+                0
+            };
+            let extra_rows = suggestion_rows as u32 + u32::from(suggestion.note.is_some());
             blocks.push(BlockProperties {
                 placement: BlockPlacement::Below(anchor),
-                height: Some(body_rows as u32 + 3 + u32::from(error.is_some())),
+                height: Some(body_rows as u32 + 3 + u32::from(error.is_some()) + extra_rows),
                 style: BlockStyle::Sticky,
                 render: thread_renderer(
                     item.clone(),
@@ -2386,6 +2594,7 @@ impl ReviewItem {
                     self.reply_editors.get(&thread.id).cloned(),
                     error,
                     pending,
+                    suggestion,
                 ),
                 priority: 0,
             });
@@ -3733,6 +3942,7 @@ impl Item for ReviewItem {
 #[allow(clippy::disallowed_methods, reason = "synchronous fixture setup")]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use crate::{FakeGh, FileStatus, PrKey, ReviewDb, build_loaded_file, parse_detail};
     use editor::MultiBufferOffset;
     use fs::FakeFs;
@@ -5264,6 +5474,141 @@ fn verify_password(user: &str, password: &str) -> bool {
         item.read_with(&cx, |item, _| {
             assert!(item.draft_views[0].composer.is_none());
             assert_eq!(item.drafts()[0].body, "about     audit(user); Really?");
+        });
+    }
+
+    #[gpui::test]
+    async fn suggest_change_adds_the_lines_as_a_suggestion(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(
+            cx,
+            vec![current_draft("src/login.rs", 3, "    audit(user);")],
+        )
+        .await;
+        item.update_in(&mut cx, |item, window, cx| {
+            item.edit_draft(0, window, cx);
+            item.suggest_change(0, window, cx);
+        });
+        cx.run_until_parked();
+        let composer = composer(&item, &mut cx);
+        assert_eq!(
+            composer.read_with(&cx, |editor, cx| editor.text(cx)),
+            "about     audit(user);\n\n```suggestion\n    audit(user);\n```"
+        );
+    }
+
+    fn suggestion_thread(outdated: bool) -> ReviewThread {
+        ReviewThread {
+            id: "T_suggest".into(),
+            path: "src/login.rs".into(),
+            line: Some(3),
+            start_line: Some(2),
+            side: Side::Right,
+            is_resolved: false,
+            is_outdated: outdated,
+            comments: vec![crate::ThreadComment {
+                database_id: 9,
+                author: "priya".into(),
+                body: "Tighter:\n```suggestion\n    audit(&user);\n```".into(),
+                created_at: "2026-10-24T00:00:00Z".into(),
+            }],
+        }
+    }
+
+    #[gpui::test]
+    async fn commit_suggestion_commits_the_change_on_the_branch(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        item.update(&mut cx, |item, cx| {
+            item.detail.threads.push(suggestion_thread(false));
+            item.show_comments(cx);
+        });
+        let fake = install_fake(&mut cx);
+        let file = "fn login(user: User) {\n    check(user);\n    audit(user);\n}\n";
+        fake.respond(
+            |request| request.args.iter().any(|arg| arg.ends_with("?ref=head")),
+            Ok(json!({
+                "sha": "blob1",
+                "encoding": "base64",
+                "content": base64::engine::general_purpose::STANDARD.encode(file),
+            })
+            .to_string()),
+        );
+        fake.respond(
+            |request| request.args.iter().any(|arg| arg == "PUT"),
+            Ok("{}".into()),
+        );
+        let task = item.update(&mut cx, |item, cx| {
+            item.commit_suggestion("T_suggest", 0, cx)
+        });
+        cx.run_until_parked();
+        task.now_or_never().expect("finished").expect("committed");
+
+        let put = fake
+            .requests()
+            .into_iter()
+            .find(|request| request.args.iter().any(|arg| arg == "PUT"))
+            .expect("commit sent");
+        assert!(
+            put.args
+                .contains(&"repos/maya/web/contents/src/login.rs".to_string())
+        );
+        let body = request_json(&put);
+        assert_eq!(body["branch"], "retry-uploads");
+        assert_eq!(body["sha"], "blob1");
+        assert_eq!(
+            body["message"],
+            "Apply suggestion from @priya in code review"
+        );
+        let content = base64::engine::general_purpose::STANDARD
+            .decode(body["content"].as_str().expect("content"))
+            .expect("base64");
+        assert_eq!(
+            String::from_utf8(content).expect("utf8"),
+            "fn login(user: User) {\n    audit(&user);\n}\n"
+        );
+        item.read_with(&cx, |item, _| {
+            assert_eq!(
+                item.suggestion_notes
+                    .get("T_suggest")
+                    .map(|note| note.as_ref()),
+                Some("Committed to retry-uploads. Reopen the review to see it.")
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn outdated_or_failed_suggestions_are_not_committed(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        item.update(&mut cx, |item, _| {
+            item.detail.threads.push(suggestion_thread(true))
+        });
+        let fake = install_fake(&mut cx);
+        let outdated = item.update(&mut cx, |item, cx| {
+            item.commit_suggestion("T_suggest", 0, cx)
+        });
+        assert!(outdated.now_or_never().expect("ready").is_err());
+        assert!(fake.requests().is_empty());
+
+        item.update(&mut cx, |item, _| {
+            item.detail.threads[0..].iter_mut().for_each(|thread| {
+                if thread.id == "T_suggest" {
+                    thread.is_outdated = false;
+                }
+            })
+        });
+        fake.respond(
+            |request| request.args.iter().any(|arg| arg.ends_with("?ref=head")),
+            Err(crate::GhError::Failed {
+                message: "gh: Not Found (HTTP 404)".into(),
+            }),
+        );
+        let task = item.update(&mut cx, |item, cx| {
+            item.commit_suggestion("T_suggest", 0, cx)
+        });
+        cx.run_until_parked();
+        assert!(task.now_or_never().expect("finished").is_err());
+        item.read_with(&cx, |item, _| {
+            assert!(item.thread_errors["T_suggest"].contains("404"));
+            assert!(!item.committing_suggestions.contains("T_suggest"));
         });
     }
 

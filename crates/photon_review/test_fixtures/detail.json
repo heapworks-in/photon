@@ -5,6 +5,8 @@
     "id": "PR_482",
     "number": 482,
     "title": "Add retry to uploader",
+    "headRefName": "retry-uploads",
+    "headRepository": { "nameWithOwner": "maya/web" },
     "body": "Retries uploads.\n\n- [x] Added tests\n- [ ] Tested on staging",
     "url": "https://github.com/acme/web/pull/482",
     "author": {

@@ -116,6 +116,10 @@ pub struct PrDetail {
     pub threads: Vec<ReviewThread>,
     /// The pull request description.
     pub body: String,
+    /// The branch the pull request merges from, and the repository holding it (a fork's, for a
+    /// pull request from a fork; None when that fork was deleted).
+    pub head_ref: String,
+    pub head_repository: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -243,6 +247,10 @@ struct RawPullRequest {
     files: Option<Nodes<RawFile>>,
     #[serde(default)]
     body: Option<String>,
+    #[serde(default)]
+    head_ref_name: Option<String>,
+    #[serde(default)]
+    head_repository: Option<RawRepository>,
 }
 
 #[derive(Deserialize)]
@@ -514,7 +522,8 @@ pub fn detail_request(key: &PrKey, login: &str) -> GhRequest {
     let query = format!(
         "query($owner: String!, $name: String!, $number: Int!, $login: String!) {{ \
          repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ \
-         {PR_SUMMARY_FIELDS} state additions deletions body \
+         {PR_SUMMARY_FIELDS} state additions deletions body headRefName \
+         headRepository {{ nameWithOwner }} \
          files(first: 100) {{ nodes {{ path viewerViewedState }} }} \
          reviewThreads(first: 100) {{ nodes {{ id isResolved isOutdated path line startLine diffSide \
          comments(first: 100) {{ nodes {{ databaseId author {{ login }} body createdAt }} }} }} }} \
@@ -614,6 +623,10 @@ pub fn parse_detail(key: &PrKey, json: &str) -> Result<PrDetail> {
         files,
         threads,
         body: pull_request.body.unwrap_or_default(),
+        head_ref: pull_request.head_ref_name.unwrap_or_default(),
+        head_repository: pull_request
+            .head_repository
+            .map(|repository| repository.name_with_owner),
     })
 }
 
@@ -909,6 +922,8 @@ mod tests {
         assert_eq!(detail.state, PrState::Open);
         assert_eq!((detail.additions, detail.deletions), (120, 14));
         assert!(detail.body.ends_with("- [ ] Tested on staging"));
+        assert_eq!(detail.head_ref, "retry-uploads");
+        assert_eq!(detail.head_repository.as_deref(), Some("maya/web"));
         assert_eq!(detail.summary.since_review, SinceReview::NewCommits(1));
         assert_eq!(detail.summary.unresolved_threads, 1);
         assert_eq!(
