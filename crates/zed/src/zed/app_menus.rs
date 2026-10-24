@@ -304,38 +304,27 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
         Menu {
             name: "Help".into(),
             disabled: false,
+            // photon: Photon's own links; Zed's telemetry, email, Twitter and jobs are gone.
             items: vec![
                 MenuItem::action(
-                    "View Release Notes Locally",
-                    auto_update_ui::ViewReleaseNotesLocally,
+                    "Release Notes",
+                    super::OpenBrowser {
+                        url: super::photon::release_notes_url().into(),
+                    },
                 ),
-                MenuItem::action("View Telemetry", zed_actions::OpenTelemetryLog),
                 MenuItem::action("View Dependency Licenses", zed_actions::OpenLicenses),
                 MenuItem::action("Show Welcome", onboarding::ShowWelcome),
                 MenuItem::separator(),
                 MenuItem::action("File Bug Report...", zed_actions::feedback::FileBugReport),
                 MenuItem::action("Request Feature...", zed_actions::feedback::RequestFeature),
-                MenuItem::action("Email Us...", zed_actions::feedback::EmailZed),
                 MenuItem::separator(),
                 MenuItem::action(
                     "Documentation",
                     super::OpenBrowser {
-                        url: "https://zed.dev/docs".into(),
+                        url: super::photon::DOCS_URL.into(),
                     },
                 ),
-                MenuItem::action("Zed Repository", feedback::OpenZedRepo),
-                MenuItem::action(
-                    "Zed Twitter",
-                    super::OpenBrowser {
-                        url: "https://twitter.com/zeddotdev".into(),
-                    },
-                ),
-                MenuItem::action(
-                    "Join the Team",
-                    super::OpenBrowser {
-                        url: "https://zed.dev/jobs".into(),
-                    },
-                ),
+                MenuItem::action("Photon Repository", feedback::OpenZedRepo),
             ],
         },
     ]

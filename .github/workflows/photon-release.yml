@@ -48,7 +48,7 @@ jobs:
           APPLE_NOTARIZATION_TEAM: ${{ secrets.APPLE_NOTARIZATION_TEAM }}
         run: |
           echo stable > crates/zed/RELEASE_CHANNEL
-          script/bundle-mac aarch64-apple-darwin
+          PHOTON_VERSION="${TAG#photon-v}" script/bundle-mac aarch64-apple-darwin
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}

@@ -9,6 +9,14 @@ use semver::Version;
 
 const ZED_DOCS_URL: &str = "https://zed.dev/docs";
 
+// photon: Photon's own release number, stamped by script/photon-release. The app version stays
+// Zed's, because extensions check it for compatibility.
+/// Photon's release, such as `0.1.4-alpha.1`, or `dev` for a local build.
+pub const PHOTON_VERSION: &str = match option_env!("PHOTON_VERSION") {
+    Some(version) => version,
+    None => "dev",
+};
+
 /// stable | dev | nightly | preview
 pub static RELEASE_CHANNEL_NAME: LazyLock<String> = LazyLock::new(|| {
     if cfg!(debug_assertions) {

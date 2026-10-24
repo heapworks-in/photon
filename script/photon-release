@@ -28,7 +28,7 @@ fi
 # The build needs the stable channel; put the tracked file back however the script ends.
 trap 'git checkout -q -- crates/zed/RELEASE_CHANNEL' EXIT
 echo stable > crates/zed/RELEASE_CHANNEL
-script/bundle-mac aarch64-apple-darwin
+PHOTON_VERSION="$version" script/bundle-mac aarch64-apple-darwin
 git checkout -q -- crates/zed/RELEASE_CHANNEL
 
 git tag -a "$tag" -m "Photon ${version}"

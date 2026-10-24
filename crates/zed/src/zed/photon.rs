@@ -8,6 +8,17 @@ use workspace::{
     HideStatusItem, ItemHandle, NewCenterTerminal, NewTerminal, StatusItemView, Workspace,
 };
 
+pub const REPO_URL: &str = "https://github.com/heapworks-in/photon";
+pub const DOCS_URL: &str = "https://heapworks-in.github.io/photon/";
+
+/// Release notes for this build, or every release for a local build.
+pub fn release_notes_url() -> String {
+    match release_channel::PHOTON_VERSION {
+        "dev" => format!("{REPO_URL}/releases"),
+        version => format!("{REPO_URL}/releases/tag/photon-v{version}"),
+    }
+}
+
 /// Hides actions for services Photon keeps switched off (Zed account, collaboration, auto-update)
 /// and for the bottom terminal panel, which Photon doesn't use.
 pub fn hide_offline_actions(cx: &mut App) {
@@ -27,6 +38,11 @@ pub fn hide_offline_actions(cx: &mut App) {
             std::any::TypeId::of::<zed_actions::OpenAccountSettings>(),
             // "New Terminal" already opens in the center.
             std::any::TypeId::of::<NewCenterTerminal>(),
+            // Zed's own channels; Photon has no email, status page, shop or telemetry.
+            std::any::TypeId::of::<zed_actions::feedback::EmailZed>(),
+            std::any::TypeId::of::<zed_actions::OpenTelemetryLog>(),
+            std::any::TypeId::of::<super::OpenStatusPage>(),
+            std::any::TypeId::of::<super::GetMerch>(),
         ]);
     });
 }
@@ -216,6 +232,15 @@ mod tests {
 
     /// `cmd-ctrl-t` and `ctrl-cmd-t` are the same keystroke, and a JSON object
     /// keeps only one of two equal keys, so a clash silently drops a binding.
+    #[test]
+    fn help_links_point_at_photon() {
+        assert_eq!(
+            release_notes_url(),
+            "https://github.com/heapworks-in/photon/releases"
+        );
+        assert!(super::super::DOCS_URL.starts_with("https://heapworks-in.github.io/photon"));
+    }
+
     #[test]
     fn photon_tab_shortcuts_are_unique_in_their_keymap_block() {
         fn normalize(keystrokes: &str) -> String {
