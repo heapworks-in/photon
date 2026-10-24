@@ -1,6 +1,6 @@
 {
  "data": {
-  "reviewRequested": {
+  "s0": {
    "nodes": [
     {
      "id": "PR_482",
@@ -230,7 +230,7 @@
     }
    ]
   },
-  "yours": {
+  "s1": {
    "nodes": [
     {
      "id": "PR_490",
@@ -278,7 +278,7 @@
     }
    ]
   },
-  "mentioned": {
+  "s2": {
    "nodes": [
     {
      "id": "PR_483",

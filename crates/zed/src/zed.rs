@@ -111,7 +111,7 @@ use zed_actions::{
     OpenServerSettings, OpenSettingsFile, OpenStatusPage, OpenZedUrl, Quit,
 };
 
-const DOCS_URL: &str = "https://zed.dev/docs/";
+const DOCS_URL: &str = photon::DOCS_URL; // photon: Photon's docs site
 const STATUS_URL: &str = "https://status.zed.dev";
 const MERCH_URL: &str = "https://merch.zed.dev/";
 
@@ -432,6 +432,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
     // photon: hide palette actions for services Photon keeps off.
     photon::hide_offline_actions(cx);
     photon::register_font_styles(cx); // photon: switchable font styles
+    photon::register_review_agent(cx); // photon: PR agent pre-review through the agent panel
     let mut _on_close_subscription = bind_on_window_closed(cx);
     cx.observe_global::<SettingsStore>(move |cx| {
         // A 1.92 regression causes unused-assignment to trigger on this variable.
@@ -1568,7 +1569,7 @@ fn open_about_window(cx: &mut App) {
             let release_channel = ReleaseChannel::global(cx);
             let release_channel_name = release_channel.display_name();
             let full_version: SharedString = AppVersion::global(cx).to_string().into();
-            let version = env!("CARGO_PKG_VERSION");
+            let version = release_channel::PHOTON_VERSION; // photon: Photon's release, not Zed's
 
             let debug = if cfg!(debug_assertions) {
                 "(debug)"
@@ -1597,11 +1598,11 @@ fn open_about_window(cx: &mut App) {
             let content = match self.commit.as_ref() {
                 Some(commit) => {
                     format!(
-                        "{}\nCommit: {}\nVersion: {}",
+                        "{}\nCommit: {}\nBased on Zed: {}", // photon: names the Zed version
                         self.message, commit, self.full_version
                     )
                 }
-                None => format!("{}\nVersion: {}", self.message, self.full_version),
+                None => format!("{}\nBased on Zed: {}", self.message, self.full_version), // photon: names the Zed version
             };
             cx.write_to_clipboard(ClipboardItem::new_string(content));
             window.remove_window();
@@ -1661,7 +1662,7 @@ fn open_about_window(cx: &mut App) {
                                 .child(Label::new(commit).size(LabelSize::Small))
                             })
                             .child(
-                                Label::new("Version")
+                                Label::new("Based on Zed") // photon: the version below is Zed's
                                     .color(Color::Muted)
                                     .size(LabelSize::XSmall),
                             )

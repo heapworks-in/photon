@@ -21,11 +21,11 @@ pub struct HostAuth {
     pub login: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InboxGroup {
-    ReviewRequested,
-    Yours,
-    Mentioned,
+/// One list in the inbox: `query` is GitHub search syntax narrowing the open pull requests.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InboxSection {
+    pub name: String,
+    pub query: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,7 +68,7 @@ pub struct PrSummary {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Inbox {
-    pub sections: Vec<(InboxGroup, Vec<PrSummary>)>,
+    pub sections: Vec<(String, Vec<PrSummary>)>,
     pub closed_tracked: Vec<String>,
     /// Tracked pull requests GitHub no longer resolves (deleted, or access lost).
     pub gone_tracked: Vec<String>,
@@ -114,6 +114,12 @@ pub struct PrDetail {
     pub deletions: u64,
     pub files: Vec<PrFile>,
     pub threads: Vec<ReviewThread>,
+    /// The pull request description.
+    pub body: String,
+    /// The branch the pull request merges from, and the repository holding it (a fork's, for a
+    /// pull request from a fork; None when that fork was deleted).
+    pub head_ref: String,
+    pub head_repository: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -239,6 +245,12 @@ struct RawPullRequest {
     deletions: u64,
     #[serde(default)]
     files: Option<Nodes<RawFile>>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    head_ref_name: Option<String>,
+    #[serde(default)]
+    head_repository: Option<RawRepository>,
 }
 
 #[derive(Deserialize)]
@@ -411,6 +423,7 @@ pub fn inbox_request(
     host: &str,
     login: &str,
     repos: &[String],
+    sections: &[InboxSection],
     tracked_node_ids: &[String],
 ) -> GhRequest {
     let repos = repos
@@ -418,35 +431,39 @@ pub fn inbox_request(
         .map(|repo| format!("repo:{repo}"))
         .collect::<Vec<_>>()
         .join(" ");
-    let search = |alias: &str, qualifier: &str| {
-        format!(
-            "{alias}: search(query: \"is:pr is:open archived:false {repos} {qualifier}\", type: ISSUE, first: 50) \
+    let mut variables = serde_json::json!({ "login": login, "tracked": tracked_node_ids });
+    let mut parameters = String::new();
+    let mut searches = String::new();
+    // Queries come from settings, so they travel as variables rather than inside the query text.
+    for (index, section) in sections.iter().enumerate() {
+        parameters.push_str(&format!(", $s{index}: String!"));
+        searches.push_str(&format!(
+            "s{index}: search(query: $s{index}, type: ISSUE, first: 50) \
              {{ nodes {{ ... on PullRequest {{ {PR_SUMMARY_FIELDS} \
-             reviewThreads(first: 100) {{ nodes {{ isResolved }} }} }} }} }}"
-        )
-    };
+             reviewThreads(first: 100) {{ nodes {{ isResolved }} }} }} }} }} "
+        ));
+        variables[format!("s{index}")] = serde_json::Value::String(
+            format!(
+                "is:pr is:open archived:false {repos} {}",
+                section.query.trim()
+            )
+            .trim_end()
+            .to_string(),
+        );
+    }
     let query = format!(
-        "query($login: String!, $tracked: [ID!]!) {{ {} {} {} \
-         nodes(ids: $tracked) {{ ... on PullRequest {{ id state }} }} }}",
-        search("reviewRequested", "review-requested:@me"),
-        search("yours", "author:@me"),
-        search("mentioned", "mentions:@me"),
+        "query($login: String!, $tracked: [ID!]!{parameters}) {{ {searches}\
+         nodes(ids: $tracked) {{ ... on PullRequest {{ id state }} }} }}"
     );
-    graphql_request(
-        host,
-        &query,
-        serde_json::json!({ "login": login, "tracked": tracked_node_ids }),
-    )
+    graphql_request(host, &query, variables)
 }
 
 #[derive(Deserialize)]
 struct RawInbox {
-    #[serde(rename = "reviewRequested")]
-    review_requested: Option<Nodes<RawPullRequest>>,
-    yours: Option<Nodes<RawPullRequest>>,
-    mentioned: Option<Nodes<RawPullRequest>>,
     #[serde(default)]
     nodes: Vec<Option<RawTracked>>,
+    #[serde(flatten)]
+    searches: HashMap<String, Option<Nodes<RawPullRequest>>>,
 }
 
 #[derive(Deserialize)]
@@ -455,24 +472,27 @@ struct RawTracked {
     state: Option<String>,
 }
 
-/// `tracked_node_ids` are the ids `inbox_request` asked about, in order.
-pub fn parse_inbox(host: &str, json: &str, tracked_node_ids: &[String]) -> Result<Inbox> {
-    let raw: RawInbox = parse_partial_response(json)?;
+/// `sections` and `tracked_node_ids` are what `inbox_request` asked about, in order.
+pub fn parse_inbox(
+    host: &str,
+    json: &str,
+    sections: &[InboxSection],
+    tracked_node_ids: &[String],
+) -> Result<Inbox> {
+    let mut raw: RawInbox = parse_partial_response(json)?;
     let mut seen = HashSet::new();
-    let mut sections = Vec::new();
-    for (group, nodes) in [
-        (InboxGroup::ReviewRequested, raw.review_requested),
-        (InboxGroup::Yours, raw.yours),
-        (InboxGroup::Mentioned, raw.mentioned),
-    ] {
+    let mut rows_by_section = Vec::new();
+    for (index, section) in sections.iter().enumerate() {
+        let nodes = raw.searches.remove(&format!("s{index}")).flatten();
         let mut rows = Vec::new();
         for pull_request in nodes.iter().flat_map(|nodes| nodes.nodes.iter().flatten()) {
             if seen.insert(pull_request.id.clone()) {
                 rows.push(summarize(host, None, pull_request)?);
             }
         }
-        sections.push((group, rows));
+        rows_by_section.push((section.name.clone(), rows));
     }
+    let sections = rows_by_section;
     // `nodes(ids:)` answers in request order, with null for an id it can't resolve.
     let gone_tracked = if raw.nodes.len() == tracked_node_ids.len() {
         raw.nodes
@@ -502,7 +522,8 @@ pub fn detail_request(key: &PrKey, login: &str) -> GhRequest {
     let query = format!(
         "query($owner: String!, $name: String!, $number: Int!, $login: String!) {{ \
          repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ \
-         {PR_SUMMARY_FIELDS} state additions deletions \
+         {PR_SUMMARY_FIELDS} state additions deletions body headRefName \
+         headRepository {{ nameWithOwner }} \
          files(first: 100) {{ nodes {{ path viewerViewedState }} }} \
          reviewThreads(first: 100) {{ nodes {{ id isResolved isOutdated path line startLine diffSide \
          comments(first: 100) {{ nodes {{ databaseId author {{ login }} body createdAt }} }} }} }} \
@@ -601,6 +622,11 @@ pub fn parse_detail(key: &PrKey, json: &str) -> Result<PrDetail> {
         deletions: pull_request.deletions,
         files,
         threads,
+        body: pull_request.body.unwrap_or_default(),
+        head_ref: pull_request.head_ref_name.unwrap_or_default(),
+        head_repository: pull_request
+            .head_repository
+            .map(|repository| repository.name_with_owner),
     })
 }
 
@@ -643,6 +669,7 @@ pub fn review_request(
     head_sha: &str,
     event: ReviewEvent,
     summary: &str,
+    checklist: Option<&str>,
     drafts: &[Draft],
     commentable: &HashMap<String, Vec<RangeInclusive<u32>>>,
     language_for_path: &dyn Fn(&str) -> Option<String>,
@@ -688,6 +715,14 @@ pub fn review_request(
             Placement::ReviewBody { .. } => body_drafts.push((draft, quoted())),
         }
     }
+    // The checklist closes the review, after any comments that couldn't sit on a line.
+    let mut body = review_body(summary, &body_drafts);
+    if let Some(checklist) = checklist {
+        if !body.is_empty() {
+            body.push_str("\n\n");
+        }
+        body.push_str(checklist);
+    }
     rest_request(
         &key.host,
         "POST",
@@ -698,7 +733,7 @@ pub fn review_request(
         Some(serde_json::json!({
             "commit_id": head_sha,
             "event": event.as_str(),
-            "body": review_body(summary, &body_drafts),
+            "body": body,
             "comments": comments,
         })),
     )
@@ -829,16 +864,13 @@ mod tests {
 
     #[test]
     fn inbox_groups_rows_and_counts() {
-        let inbox = parse_inbox("github.com", INBOX, &[]).expect("parse");
-        let groups: Vec<_> = inbox.sections.iter().map(|(group, _)| *group).collect();
-        assert_eq!(
-            groups,
-            [
-                InboxGroup::ReviewRequested,
-                InboxGroup::Yours,
-                InboxGroup::Mentioned
-            ]
-        );
+        let inbox = parse_inbox("github.com", INBOX, &sections(), &[]).expect("parse");
+        let names: Vec<_> = inbox
+            .sections
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert_eq!(names, ["Review requested", "Yours", "Mentioned"]);
         let row = find(&inbox, 482);
         assert_eq!(row.title, "Add retry to uploader");
         assert_eq!(row.author, "alice");
@@ -855,7 +887,7 @@ mod tests {
 
     #[test]
     fn inbox_dedupes_across_groups() {
-        let inbox = parse_inbox("github.com", INBOX, &[]).expect("parse");
+        let inbox = parse_inbox("github.com", INBOX, &sections(), &[]).expect("parse");
         let numbers = |index: usize| -> Vec<u64> {
             inbox.sections[index]
                 .1
@@ -870,7 +902,7 @@ mod tests {
 
     #[test]
     fn since_review_counts() {
-        let inbox = parse_inbox("github.com", INBOX, &[]).expect("parse");
+        let inbox = parse_inbox("github.com", INBOX, &sections(), &[]).expect("parse");
         assert_eq!(find(&inbox, 482).since_review, SinceReview::NotReviewed);
         assert_eq!(find(&inbox, 483).since_review, SinceReview::UpToDate);
         assert_eq!(find(&inbox, 484).since_review, SinceReview::NewCommits(3));
@@ -880,7 +912,7 @@ mod tests {
 
     #[test]
     fn inbox_reports_closed_tracked() {
-        let inbox = parse_inbox("github.com", INBOX, &[]).expect("parse");
+        let inbox = parse_inbox("github.com", INBOX, &sections(), &[]).expect("parse");
         assert_eq!(inbox.closed_tracked, ["PR_x"]);
     }
 
@@ -889,6 +921,9 @@ mod tests {
         let detail = parse_detail(&key(), DETAIL).expect("parse");
         assert_eq!(detail.state, PrState::Open);
         assert_eq!((detail.additions, detail.deletions), (120, 14));
+        assert!(detail.body.ends_with("- [ ] Tested on staging"));
+        assert_eq!(detail.head_ref, "retry-uploads");
+        assert_eq!(detail.head_repository.as_deref(), Some("maya/web"));
         assert_eq!(detail.summary.since_review, SinceReview::NewCommits(1));
         assert_eq!(detail.summary.unresolved_threads, 1);
         assert_eq!(
@@ -923,10 +958,11 @@ mod tests {
     #[test]
     fn inbox_partial_errors_keep_the_data() {
         let mut partial: serde_json::Value = serde_json::from_str(INBOX).expect("fixture");
-        partial["data"]["mentioned"] = serde_json::Value::Null;
+        partial["data"]["s2"] = serde_json::Value::Null;
         partial["errors"] = serde_json::json!([{ "message": "Could not resolve PR_gone" }]);
         let tracked = ["PR_x".to_string(), "PR_y".into(), "PR_gone".into()];
-        let inbox = parse_inbox("github.com", &partial.to_string(), &tracked).expect("partial");
+        let inbox = parse_inbox("github.com", &partial.to_string(), &sections(), &tracked)
+            .expect("partial");
         assert!(!inbox.sections[0].1.is_empty());
         assert!(inbox.sections[2].1.is_empty());
         assert_eq!(inbox.closed_tracked, ["PR_x"]);
@@ -939,7 +975,7 @@ mod tests {
     #[test]
     fn graphql_errors_are_errors() {
         let json = include_str!("../test_fixtures/graphql_error.json");
-        let message = parse_inbox("github.com", json, &[])
+        let message = parse_inbox("github.com", json, &sections(), &[])
             .expect_err("error")
             .to_string();
         assert!(
@@ -960,26 +996,64 @@ mod tests {
     fn inbox_request_shape() {
         let tracked = vec!["PR_x".to_string()];
         let repos = vec!["acme/app".to_string(), "acme/web".to_string()];
-        let request = inbox_request("ghe.corp", "alice", &repos, &tracked);
+        let mut sections = sections();
+        sections.push(InboxSection {
+            name: "Other open".into(),
+            query: "".into(),
+        });
+        let request = inbox_request("ghe.corp", "alice", &repos, &sections, &tracked);
         let expected = graphql_request("ghe.corp", "", serde_json::json!({}));
         assert_eq!(request.args, expected.args);
         let body: serde_json::Value =
             serde_json::from_str(&request.stdin.expect("stdin")).expect("json");
+        let scope = "is:pr is:open archived:false repo:acme/app repo:acme/web";
         assert_eq!(
             body["variables"],
-            serde_json::json!({"login": "alice", "tracked": ["PR_x"]})
+            serde_json::json!({
+                "login": "alice",
+                "tracked": ["PR_x"],
+                "s0": format!("{scope} review-requested:@me"),
+                "s1": format!("{scope} author:@me"),
+                "s2": format!("{scope} mentions:@me"),
+                "s3": scope,
+            })
         );
         let query = body["query"].as_str().expect("query");
         assert!(query.contains("states: [APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]"));
         assert!(query.contains("lastCommit: commits(last: 1)"));
-        for search in ["review-requested:@me", "author:@me", "mentions:@me"] {
-            assert!(
-                query.contains(&format!(
-                    "is:pr is:open archived:false repo:acme/app repo:acme/web {search}"
-                )),
-                "{search}"
-            );
-        }
+        assert!(query.contains("$s3: String!"));
+        assert!(query.contains("s3: search(query: $s3, type: ISSUE, first: 50)"));
+    }
+
+    #[test]
+    fn section_query_quotes_stay_out_of_the_query_text() {
+        let sections = [InboxSection {
+            name: "Tricky".into(),
+            query: r#"label:"needs review" } evil"#.into(),
+        }];
+        let request = inbox_request("github.com", "alice", &["a/b".into()], &sections, &[]);
+        let body: serde_json::Value =
+            serde_json::from_str(&request.stdin.expect("stdin")).expect("json");
+        assert!(!body["query"].as_str().expect("query").contains("evil"));
+        assert!(
+            body["variables"]["s0"]
+                .as_str()
+                .expect("s0")
+                .ends_with("evil")
+        );
+    }
+
+    fn sections() -> Vec<InboxSection> {
+        [
+            ("Review requested", "review-requested:@me"),
+            ("Yours", "author:@me"),
+            ("Mentioned", "mentions:@me"),
+        ]
+        .map(|(name, query)| InboxSection {
+            name: name.into(),
+            query: query.into(),
+        })
+        .to_vec()
     }
 
     fn draft(path: &str, start_line: u32, end_line: u32, body: &str) -> crate::Draft {
@@ -1032,6 +1106,7 @@ mod tests {
             "head",
             ReviewEvent::RequestChanges,
             "Needs work.",
+            Some("### Checklist (1/1)\n- [x] Done\n"),
             &drafts,
             &commentable,
             &|path| path.ends_with(".rs").then(|| "rust".to_string()),
@@ -1067,6 +1142,11 @@ mod tests {
         assert!(review_body.contains("Audit this"));
         assert!(review_body.contains("Still true"));
         assert!(!review_body.contains("Stale"));
+        assert!(
+            review_body.ends_with("\n\n### Checklist (1/1)\n- [x] Done\n"),
+            "{review_body}"
+        );
+        assert!(review_body.find("Still true") < review_body.find("### Checklist"));
         assert!(!body.to_string().contains("Maybe posted"));
         assert_eq!(ReviewEvent::Comment.as_str(), "COMMENT");
         assert_eq!(ReviewEvent::Approve.as_str(), "APPROVE");

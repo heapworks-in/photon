@@ -17,6 +17,7 @@ doctest = false
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 buffer_diff.workspace = true
 db.workspace = true
 editor.workspace = true
@@ -29,12 +30,16 @@ multi_buffer.workspace = true
 parking_lot.workspace = true
 paths.workspace = true
 project.workspace = true
+globset.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 settings.workspace = true
 task.workspace = true
+photon_blocks.workspace = true
+terminal.workspace = true
 terminal_view.workspace = true
 ui.workspace = true
+urlencoding.workspace = true
 util.workspace = true
 workspace.workspace = true
 

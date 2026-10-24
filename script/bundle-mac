@@ -126,6 +126,11 @@ else
     echo "cargo::warning=Missing ${document_icon_source}; macOS document icons may not appear in Finder."
 fi
 
+# photon: Finder and `photon --version` show Photon's release instead of Zed's crate version.
+if [[ -n "${PHOTON_VERSION:-}" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${PHOTON_VERSION}" "${app_path}/Contents/Info.plist"
+fi
+
 # photon: signing also needs the identity, since Photon has no built-in default.
 if [[ -n "${MACOS_SIGNING_IDENTITY:-}" && -n "${MACOS_CERTIFICATE:-}" && -n "${MACOS_CERTIFICATE_PASSWORD:-}" && -n "${APPLE_NOTARIZATION_KEY:-}" && -n "${APPLE_NOTARIZATION_KEY_ID:-}" && -n "${APPLE_NOTARIZATION_ISSUER_ID:-}" ]]; then
     can_code_sign=true

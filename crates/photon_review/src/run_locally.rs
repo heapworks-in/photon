@@ -3,34 +3,64 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, AsyncWindowContext, Context, Entity, Task, Window,
+    AnyWindowHandle, App, AppContext as _, AsyncWindowContext, Context, Entity, Global, Task,
+    Window,
 };
 use paths::local_settings_file_relative_path;
+use photon_blocks::BlockEvent;
 use settings::{ProjectSettingsContent, RegisterSetting, RootUserSettings as _, Settings};
+use terminal::{Event as TerminalEvent, Terminal};
 use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
 use util::ResultExt as _;
 use workspace::{AppState, Toast, Workspace, notifications::NotificationId};
 
 use crate::{
-    Checkout, FetchedCheckout, PrKey, PrSummary, ReviewDb, Tracked, candidate_repos,
-    fetch_checkout, fetch_url, find_clone, finish_checkout, forget_stale_trust, git, repo_id,
-    review_root, worktree_path,
+    AutoCheck, Checkout, FetchedCheckout, InboxSection, LocalRun, PrKey, PrSummary, ReviewDb,
+    Tracked, candidate_repos, counts_as_test_run, fetch_checkout, fetch_url, find_clone,
+    finish_checkout, forget_stale_trust, git, repo_id, review_root, worktree_path,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, RegisterSetting)]
 pub struct PrReviewSettings {
     pub test_command: Option<String>,
+    pub sections: Vec<InboxSection>,
+    pub checklists: Vec<settings::PrReviewChecklistContent>,
+    pub auto_checks: Vec<AutoCheck>,
+    /// Names in `auto_checks` that aren't checks, so a typo is shown instead of ignored.
+    pub unknown_auto_checks: Vec<String>,
 }
 
 impl Settings for PrReviewSettings {
     fn from_settings(content: &settings::SettingsContent) -> Self {
+        let pr_review = content.project.pr_review.as_ref();
+        let auto_check_names = pr_review
+            .and_then(|settings| settings.auto_checks.as_ref())
+            .into_iter()
+            .flatten();
         Self {
-            test_command: content
-                .project
-                .pr_review
-                .as_ref()
+            test_command: pr_review
                 .and_then(|settings| settings.test_command.clone())
                 .and_then(non_empty),
+            sections: pr_review
+                .and_then(|settings| settings.sections.as_ref())
+                .into_iter()
+                .flatten()
+                .map(|section| InboxSection {
+                    name: section.name.clone(),
+                    query: section.query.clone(),
+                })
+                .collect(),
+            checklists: pr_review
+                .and_then(|settings| settings.checklists.clone())
+                .unwrap_or_default(),
+            auto_checks: auto_check_names
+                .clone()
+                .filter_map(|name| AutoCheck::from_name(name))
+                .collect(),
+            unknown_auto_checks: auto_check_names
+                .filter(|name| AutoCheck::from_name(name).is_none())
+                .cloned()
+                .collect(),
         }
     }
 }
@@ -229,8 +259,12 @@ async fn open_terminal(
     {
         return Ok(());
     }
+    let key = summary.key.clone();
     let checkout = cx
-        .background_spawn(async move { finish_local_checkout(&summary, fetched, database).await })
+        .background_spawn({
+            let database = database.clone();
+            async move { finish_local_checkout(&summary, fetched, database).await }
+        })
         .await?;
     let worktree = checkout.worktree.clone();
     cx.update(|_, cx| forget_stale_trust(&checkout, cx))?;
@@ -257,10 +291,24 @@ async fn open_terminal(
 
     let user_setting = cx.update(|_, cx| PrReviewSettings::get(None, cx).test_command.clone())?;
     let resolved = cx
-        .background_spawn(
-            async move { resolve_test_command(user_setting, &checkout, &review_root()) },
-        )
+        .background_spawn({
+            let checkout = checkout.clone();
+            async move { resolve_test_command(user_setting, &checkout, &review_root()) }
+        })
         .await;
+    if let Some(terminal) = terminal.upgrade() {
+        let test_command = resolved.as_ref().map(|(command, _)| command.clone());
+        cx.update(|_, cx| {
+            record_test_runs(
+                &terminal,
+                key,
+                checkout.worktree.clone(),
+                test_command,
+                database,
+                cx,
+            )
+        })?;
+    }
     let Some((test_command, source)) = resolved else {
         return Ok(());
     };
@@ -278,6 +326,64 @@ async fn open_terminal(
         })
     })?;
     Ok(())
+}
+
+/// Bumped after a test run is recorded, so open reviews reload it.
+#[derive(Default)]
+pub struct LocalRunsVersion(pub usize);
+
+impl Global for LocalRunsVersion {}
+
+/// Stores the latest test command finished in a PR's Run locally terminal, for the
+/// "Tests ran locally" check.
+fn record_test_runs(
+    terminal: &Entity<Terminal>,
+    key: PrKey,
+    worktree: PathBuf,
+    test_command: Option<String>,
+    database: ReviewDb,
+    cx: &mut App,
+) {
+    cx.subscribe(terminal, move |terminal, event, cx| {
+        let TerminalEvent::BlocksChanged(Some(BlockEvent::Finished(id))) = event else {
+            return;
+        };
+        let Some((command, exit_code, cwd)) = terminal
+            .read(cx)
+            .blocks()
+            .and_then(|blocks| blocks.block(*id))
+            .and_then(|block| {
+                let cwd = block.cwd.clone().unwrap_or_else(|| worktree.clone());
+                Some((block.command.trim().to_string(), block.exit_code?, cwd))
+            })
+        else {
+            return;
+        };
+        if !counts_as_test_run(&command, test_command.as_deref()) {
+            return;
+        }
+        let database = database.clone();
+        let key = key.clone();
+        cx.spawn(async move |cx| {
+            // Read now, not when the terminal opened: the reviewer may have switched branches
+            // in it, and a run on another commit says nothing about this PR's head.
+            let Some(head_sha) = crate::checkout::git(&cwd, &["rev-parse", "HEAD"])
+                .await
+                .log_err()
+            else {
+                return;
+            };
+            let run = LocalRun {
+                head_sha,
+                command,
+                exit_code,
+            };
+            database.set_local_run(key, run).await.log_err();
+            cx.update(|cx| cx.default_global::<LocalRunsVersion>().0 += 1);
+        })
+        .detach();
+    })
+    .detach();
 }
 
 #[cfg(test)]

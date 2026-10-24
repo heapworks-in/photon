@@ -8,6 +8,152 @@ use workspace::{
     HideStatusItem, ItemHandle, NewCenterTerminal, NewTerminal, StatusItemView, Workspace,
 };
 
+/// Runs the PR review's agent pre-review as a visible thread in the agent panel, with the user's
+/// selected agent, and returns the agent's final reply.
+pub struct PanelReviewAgent;
+
+pub fn register_review_agent(cx: &mut App) {
+    photon_review::set_review_agent(std::rc::Rc::new(PanelReviewAgent), cx);
+}
+
+impl photon_review::ReviewAgent for PanelReviewAgent {
+    fn review(
+        &self,
+        workspace: gpui::WeakEntity<Workspace>,
+        prompt: String,
+        work_dir: std::path::PathBuf,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> gpui::Task<anyhow::Result<String>> {
+        use agent_client_protocol::schema::v2 as acp_v2;
+        use agent_ui::{AgentInitialContent, AgentPanel, AgentThreadSource, CreateThreadOptions};
+
+        let Some(workspace) = workspace.upgrade() else {
+            return gpui::Task::ready(Err(anyhow::anyhow!("The review's window is closed.")));
+        };
+        let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx) else {
+            return gpui::Task::ready(Err(anyhow::anyhow!(
+                "This window has no agent panel. Open it once, then try again."
+            )));
+        };
+        let blocks = vec![acp_v2::ContentBlock::Text(acp_v2::TextContent::new(prompt))];
+        let thread_id = panel.update(cx, |panel, cx| {
+            let thread_id = panel.create_thread_with_options(
+                CreateThreadOptions {
+                    title: Some("PR pre-review".into()),
+                    initial_content: Some(AgentInitialContent::ContentBlock {
+                        blocks,
+                        auto_submit: true,
+                    }),
+                    work_dirs: Some(util::path_list::PathList::new(&[work_dir])),
+                    ..CreateThreadOptions::default()
+                },
+                AgentThreadSource::AgentPanel,
+                window,
+                cx,
+            );
+            panel.activate_retained_thread(thread_id, false, window, cx);
+            thread_id
+        });
+        workspace.update(cx, |workspace, cx| {
+            workspace.focus_panel::<AgentPanel>(window, cx);
+        });
+        let panel = panel.downgrade();
+        cx.spawn(async move |cx| wait_for_agent_reply(panel, thread_id, cx).await)
+    }
+}
+
+enum AgentProgress {
+    Connecting,
+    Working,
+    StoppedWithoutReply,
+    Replied(String),
+}
+
+/// Waits until the thread's agent has answered the prompt and stopped, then returns its last
+/// message. The thread stays in the panel, so the user can follow and continue it.
+async fn wait_for_agent_reply(
+    panel: gpui::WeakEntity<agent_ui::AgentPanel>,
+    thread_id: agent_ui::ThreadId,
+    cx: &mut gpui::AsyncApp,
+) -> anyhow::Result<String> {
+    use acp_thread::{AgentThreadEntry, ThreadStatus};
+    use anyhow::Context as _;
+    use std::time::{Duration, Instant};
+
+    const CONNECT_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+    const TIMEOUT: Duration = Duration::from_secs(30 * 60);
+    // Idle polls in a row, after the prompt, with no reply: the turn ended in an error or was
+    // cancelled. More than one, since the thread is briefly idle between appending the prompt
+    // and starting to generate.
+    const IDLE_POLLS: usize = 3;
+    let started = Instant::now();
+    let mut idle_polls = 0;
+    loop {
+        cx.background_executor().timer(Duration::from_secs(1)).await;
+        let progress = panel.update(cx, |panel, cx| -> anyhow::Result<AgentProgress> {
+            let view = panel
+                .conversation_view_for_id(&thread_id, cx)
+                .context("The agent thread was closed.")?;
+            let Some(thread) = view.read(cx).root_thread(cx) else {
+                return Ok(AgentProgress::Connecting);
+            };
+            let thread = thread.read(cx);
+            if thread.status() != ThreadStatus::Idle {
+                return Ok(AgentProgress::Working);
+            }
+            let entries = thread.entries();
+            let Some(prompt) = entries
+                .iter()
+                .rposition(|entry| matches!(entry, AgentThreadEntry::UserMessage(_)))
+            else {
+                return Ok(AgentProgress::Working);
+            };
+            Ok(entries
+                .get(prompt + 1..)
+                .unwrap_or_default()
+                .iter()
+                .rev()
+                .find_map(|entry| match entry {
+                    AgentThreadEntry::AssistantMessage(message) => {
+                        Some(AgentProgress::Replied(message.to_markdown(cx)))
+                    }
+                    _ => None,
+                })
+                .unwrap_or(AgentProgress::StoppedWithoutReply))
+        })??;
+        match progress {
+            AgentProgress::Replied(reply) => return Ok(reply),
+            AgentProgress::Connecting if started.elapsed() > CONNECT_TIMEOUT => {
+                anyhow::bail!("The agent didn't start. See the agent panel for why.");
+            }
+            AgentProgress::StoppedWithoutReply => {
+                idle_polls += 1;
+                if idle_polls >= IDLE_POLLS {
+                    anyhow::bail!(
+                        "The agent stopped without answering. See the agent panel for why."
+                    );
+                }
+            }
+            AgentProgress::Connecting | AgentProgress::Working => idle_polls = 0,
+        }
+        if started.elapsed() > TIMEOUT {
+            anyhow::bail!("The agent didn't finish within 30 minutes.");
+        }
+    }
+}
+
+pub const REPO_URL: &str = "https://github.com/heapworks-in/photon";
+pub const DOCS_URL: &str = "https://heapworks-in.github.io/photon/";
+
+/// Release notes for this build, or every release for a local build.
+pub fn release_notes_url() -> String {
+    match release_channel::PHOTON_VERSION {
+        "dev" => format!("{REPO_URL}/releases"),
+        version => format!("{REPO_URL}/releases/tag/photon-v{version}"),
+    }
+}
+
 /// Hides actions for services Photon keeps switched off (Zed account, collaboration, auto-update)
 /// and for the bottom terminal panel, which Photon doesn't use.
 pub fn hide_offline_actions(cx: &mut App) {
@@ -27,6 +173,11 @@ pub fn hide_offline_actions(cx: &mut App) {
             std::any::TypeId::of::<zed_actions::OpenAccountSettings>(),
             // "New Terminal" already opens in the center.
             std::any::TypeId::of::<NewCenterTerminal>(),
+            // Zed's own channels; Photon has no email, status page, shop or telemetry.
+            std::any::TypeId::of::<zed_actions::feedback::EmailZed>(),
+            std::any::TypeId::of::<zed_actions::OpenTelemetryLog>(),
+            std::any::TypeId::of::<super::OpenStatusPage>(),
+            std::any::TypeId::of::<super::GetMerch>(),
         ]);
     });
 }
@@ -216,6 +367,15 @@ mod tests {
 
     /// `cmd-ctrl-t` and `ctrl-cmd-t` are the same keystroke, and a JSON object
     /// keeps only one of two equal keys, so a clash silently drops a binding.
+    #[test]
+    fn help_links_point_at_photon() {
+        assert_eq!(
+            release_notes_url(),
+            "https://github.com/heapworks-in/photon/releases"
+        );
+        assert!(super::super::DOCS_URL.starts_with("https://heapworks-in.github.io/photon"));
+    }
+
     #[test]
     fn photon_tab_shortcuts_are_unique_in_their_keymap_block() {
         fn normalize(keystrokes: &str) -> String {

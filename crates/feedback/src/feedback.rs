@@ -9,27 +9,26 @@ use zed_actions::feedback::{EmailZed, FileBugReport, RequestFeature};
 actions!(
     zed,
     [
-        /// Opens the Zed repository on GitHub.
+        /// Opens the Photon repository on GitHub.
         OpenZedRepo,
         /// Copies installed extensions to the clipboard for bug reports.
         CopyInstalledExtensionsIntoClipboard
     ]
 );
 
-const ZED_REPO_URL: &str = "https://github.com/zed-industries/zed";
+// photon: bugs and requests go to Photon's repository, not Zed's.
+const ZED_REPO_URL: &str = "https://github.com/heapworks-in/photon";
 
-const REQUEST_FEATURE_URL: &str = "https://github.com/zed-industries/zed/discussions/new/choose";
+const REQUEST_FEATURE_URL: &str = "https://github.com/heapworks-in/photon/issues/new";
 
 fn file_bug_report_url(specs: &SystemSpecs) -> String {
     format!(
         concat!(
-            "https://github.com/zed-industries/zed/issues/new",
+            "https://github.com/heapworks-in/photon/issues/new", // photon: Photon's issues
             "?",
-            "template=10_bug_report.yml",
-            "&",
-            "environment={}"
+            "body={}"
         ),
-        urlencoding::encode(&specs.to_string())
+        email_body(specs)
     )
 }
 

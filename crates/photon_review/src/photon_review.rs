@@ -1,4 +1,7 @@
+mod agent_review;
 mod anchoring;
+mod author;
+mod checklist;
 mod checkout;
 mod context;
 mod diff;
@@ -11,8 +14,12 @@ mod review_map;
 mod run_locally;
 mod since_review;
 mod store;
+mod suggestions;
 
+pub use agent_review::*;
 pub use anchoring::*;
+pub use author::*;
+pub use checklist::*;
 pub use checkout::*;
 pub use context::*;
 pub use diff::*;
@@ -25,6 +32,7 @@ pub use review_map::*;
 pub use run_locally::*;
 pub use since_review::*;
 pub use store::*;
+pub use suggestions::*;
 
 use gpui::{App, ElementId, SharedString};
 use ui::{Button, ButtonCommon, ButtonSize};

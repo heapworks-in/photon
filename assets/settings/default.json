@@ -1731,8 +1731,25 @@
   //
   // Default: false
   "disable_ai": false,
-  // photon: command pre-filled (not run) in the terminal that "Run locally" opens for a PR.
-  "pr_review": { "test_command": null },
+  "pr_review": {
+    // photon: command pre-filled (not run) in the terminal that "Run locally" opens for a PR.
+    "test_command": null,
+    // photon: lists in the Pull Requests panel. Each query is GitHub search syntax, added to
+    // "is:pr is:open archived:false" and the project's repositories; "" lists every open PR.
+    // A PR is shown only in the first list it matches.
+    "sections": [
+      { "name": "Review requested", "query": "review-requested:@me" },
+      { "name": "Yours", "query": "author:@me" },
+      { "name": "Mentioned", "query": "mentions:@me" },
+      { "name": "Other open", "query": "" }
+    ],
+    // photon: checklists offered while reviewing, e.g.
+    // { "name": "Migrations", "when": { "paths": ["migrations/**"] }, "items": ["Reversible"] }.
+    // A repository can add its own in .photon/review.json, read from the base branch.
+    "checklists": [],
+    // photon: checks Photon answers itself from evidence.
+    "auto_checks": ["checks_pass", "threads_resolved", "tests_changed", "ran_locally", "no_debug_leftovers"]
+  },
   // Automatically update Zed. This setting may be ignored on Linux if
   // installed through a package manager.
   "auto_update": false, // photon: update by pulling and rebuilding
