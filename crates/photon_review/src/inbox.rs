@@ -22,8 +22,8 @@ use workspace::{
 };
 
 use crate::{
-    ChecksState, GhError, GhFix, GhRunner, HostAuth, Inbox, InboxSection, PrKey, PrReviewSettings, PrSummary,
-    RepoId, ReviewDb, SinceReview, Tracked, auth_status_request,
+    ChecksState, GhError, GhFix, GhRunner, HostAuth, Inbox, InboxSection, PrKey, PrReviewSettings,
+    PrSummary, RepoId, ReviewDb, SinceReview, Tracked, auth_status_request,
     checkout::{
         ensure_safe_segment, force_remove_worktree, parse_remote_url, review_root, worktree_path,
     },
@@ -1130,7 +1130,11 @@ mod tests {
                 panic!("expected Loaded, got {:?}", panel.state());
             };
             let inbox = hosts[0].result.as_ref().expect("inbox");
-            let names: Vec<_> = inbox.sections.iter().map(|(name, _)| name.as_str()).collect();
+            let names: Vec<_> = inbox
+                .sections
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect();
             assert_eq!(names, ["Everything"]);
         });
     }

@@ -102,6 +102,33 @@ pub struct PrReviewSettingsContent {
     /// `is:pr is:open archived:false` and the project's repositories; an empty query lists every
     /// open pull request. A pull request is shown only in the first list it matches.
     pub sections: Option<Vec<PrReviewSectionContent>>,
+    /// Checklists offered while reviewing. A checklist applies when its `when` rules match the
+    /// pull request; with no `when`, it always applies.
+    pub checklists: Option<Vec<PrReviewChecklistContent>>,
+    /// Checks Photon answers itself from evidence: "checks_pass", "threads_resolved",
+    /// "tests_changed", "ran_locally", "no_debug_leftovers".
+    pub auto_checks: Option<Vec<String>>,
+}
+
+// photon: a review checklist, from settings or a repository's .photon/review.json
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PrReviewChecklistContent {
+    pub name: String,
+    #[serde(default)]
+    pub when: PrReviewChecklistWhenContent,
+    #[serde(default)]
+    pub items: Vec<String>,
+}
+
+// photon: when a review checklist applies
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PrReviewChecklistWhenContent {
+    /// Globs matched against the pull request's changed files.
+    #[serde(default)]
+    pub paths: Vec<String>,
+    /// `owner/repo` names.
+    #[serde(default)]
+    pub repos: Vec<String>,
 }
 
 // photon: one list in the PR panel

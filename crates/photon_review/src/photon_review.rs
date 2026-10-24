@@ -1,4 +1,5 @@
 mod anchoring;
+mod checklist;
 mod checkout;
 mod context;
 mod diff;
@@ -13,6 +14,7 @@ mod since_review;
 mod store;
 
 pub use anchoring::*;
+pub use checklist::*;
 pub use checkout::*;
 pub use context::*;
 pub use diff::*;

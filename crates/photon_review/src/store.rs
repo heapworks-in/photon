@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result};
 use db::sqlez::{domain::Domain, thread_safe_connection::ThreadSafeConnection};
 
-use crate::{PrKey, Side};
+use crate::{Answer, LocalRun, PrKey, Side};
 
 pub struct ReviewDb(ThreadSafeConnection);
 
@@ -12,6 +12,10 @@ pub const SUMMARY_SLOT: &str = "summary";
 
 pub fn reply_slot(thread_id: &str) -> String {
     format!("reply:{thread_id}")
+}
+
+pub fn checklist_note_slot(item_key: &str) -> String {
+    format!("check:{item_key}")
 }
 
 impl Domain for ReviewDb {
@@ -62,6 +66,25 @@ impl Domain for ReviewDb {
             slot TEXT NOT NULL,
             body TEXT NOT NULL,
             PRIMARY KEY(host, owner, repo, number, slot)
+        ) STRICT;",
+        "CREATE TABLE checklist_answers(
+            host TEXT NOT NULL,
+            owner TEXT NOT NULL,
+            repo TEXT NOT NULL,
+            number INTEGER NOT NULL,
+            item_key TEXT NOT NULL,
+            answer INTEGER NOT NULL,
+            PRIMARY KEY(host, owner, repo, number, item_key)
+        ) STRICT;
+        CREATE TABLE local_runs(
+            host TEXT NOT NULL,
+            owner TEXT NOT NULL,
+            repo TEXT NOT NULL,
+            number INTEGER NOT NULL,
+            head_sha TEXT NOT NULL,
+            command TEXT NOT NULL,
+            exit_code INTEGER NOT NULL,
+            PRIMARY KEY(host, owner, repo, number)
         ) STRICT;",
     ];
 }
@@ -396,6 +419,94 @@ impl ReviewDb {
     }
 }
 
+impl ReviewDb {
+    pub fn checklist_answers(&self, key: &PrKey) -> Result<HashMap<String, Answer>> {
+        let number = i64::try_from(key.number)?;
+        Ok(
+            self.select_bound::<(String, String, String, i64), (String, i64)>(
+                "SELECT item_key, answer FROM checklist_answers
+                 WHERE host = ?1 AND owner = ?2 AND repo = ?3 AND number = ?4",
+            )?((
+                key.host.clone(),
+                key.owner.clone(),
+                key.repo.clone(),
+                number,
+            ))?
+            .into_iter()
+            .filter_map(|(item_key, answer)| Some((item_key, Answer::from_i64(answer)?)))
+            .collect(),
+        )
+    }
+
+    /// `None` clears the answer.
+    pub async fn set_checklist_answer(
+        &self,
+        key: PrKey,
+        item_key: String,
+        answer: Option<Answer>,
+    ) -> Result<()> {
+        let number = i64::try_from(key.number)?;
+        self.write(move |connection| match answer {
+            Some(answer) => connection.exec_bound::<(String, String, String, i64, String, i64)>(
+                "INSERT OR REPLACE INTO checklist_answers(host, owner, repo, number, item_key, answer)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?((
+                key.host,
+                key.owner,
+                key.repo,
+                number,
+                item_key,
+                answer.to_i64(),
+            )),
+            None => connection.exec_bound::<(String, String, String, i64, String)>(
+                "DELETE FROM checklist_answers
+                 WHERE host = ?1 AND owner = ?2 AND repo = ?3 AND number = ?4 AND item_key = ?5",
+            )?((key.host, key.owner, key.repo, number, item_key)),
+        })
+        .await
+    }
+
+    pub fn local_run(&self, key: &PrKey) -> Result<Option<LocalRun>> {
+        let number = i64::try_from(key.number)?;
+        let rows = self.select_bound::<(String, String, String, i64), (String, String, i64)>(
+            "SELECT head_sha, command, exit_code FROM local_runs
+                 WHERE host = ?1 AND owner = ?2 AND repo = ?3 AND number = ?4",
+        )?((
+            key.host.clone(),
+            key.owner.clone(),
+            key.repo.clone(),
+            number,
+        ))?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .map(|(head_sha, command, exit_code)| LocalRun {
+                head_sha,
+                command,
+                exit_code: i32::try_from(exit_code).unwrap_or(i32::MAX),
+            }))
+    }
+
+    pub async fn set_local_run(&self, key: PrKey, run: LocalRun) -> Result<()> {
+        let number = i64::try_from(key.number)?;
+        self.write(move |connection| {
+            connection.exec_bound::<(String, String, String, i64, String, String, i64)>(
+                "INSERT OR REPLACE INTO local_runs(host, owner, repo, number, head_sha, command, exit_code)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?((
+                key.host,
+                key.owner,
+                key.repo,
+                number,
+                run.head_sha,
+                run.command,
+                i64::from(run.exit_code),
+            ))
+        })
+        .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,6 +527,47 @@ mod tests {
             repo_dir: PathBuf::from("/repos/app"),
             worktree: PathBuf::from(format!("/wt/{number}")),
         }
+    }
+
+    #[gpui::test]
+    async fn checklist_answers_and_local_runs_round_trip(cx: &mut gpui::TestAppContext) {
+        let db = cx
+            .foreground_executor()
+            .block_test(ReviewDb::open_test_db("checklist_round_trip"));
+        assert!(db.checklist_answers(&key(7)).unwrap().is_empty());
+        db.set_checklist_answer(key(7), "a".into(), Some(Answer::No))
+            .await
+            .unwrap();
+        db.set_checklist_answer(key(7), "b".into(), Some(Answer::Yes))
+            .await
+            .unwrap();
+        db.set_checklist_answer(key(7), "b".into(), Some(Answer::NotApplicable))
+            .await
+            .unwrap();
+        db.set_checklist_answer(key(8), "a".into(), Some(Answer::Yes))
+            .await
+            .unwrap();
+        db.set_checklist_answer(key(7), "a".into(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.checklist_answers(&key(7)).unwrap(),
+            HashMap::from_iter([("b".to_string(), Answer::NotApplicable)])
+        );
+
+        assert_eq!(db.local_run(&key(7)).unwrap(), None);
+        let run = |command: &str, exit_code| LocalRun {
+            head_sha: "h1".into(),
+            command: command.into(),
+            exit_code,
+        };
+        db.set_local_run(key(7), run("cargo test", 101))
+            .await
+            .unwrap();
+        db.set_local_run(key(7), run("cargo test", 0))
+            .await
+            .unwrap();
+        assert_eq!(db.local_run(&key(7)).unwrap(), Some(run("cargo test", 0)));
     }
 
     #[gpui::test]

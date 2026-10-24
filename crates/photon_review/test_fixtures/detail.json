@@ -5,6 +5,7 @@
     "id": "PR_482",
     "number": 482,
     "title": "Add retry to uploader",
+    "body": "Retries uploads.\n\n- [x] Added tests\n- [ ] Tested on staging",
     "url": "https://github.com/acme/web/pull/482",
     "author": {
      "login": "alice"

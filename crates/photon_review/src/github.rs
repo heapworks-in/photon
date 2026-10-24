@@ -114,6 +114,8 @@ pub struct PrDetail {
     pub deletions: u64,
     pub files: Vec<PrFile>,
     pub threads: Vec<ReviewThread>,
+    /// The pull request description.
+    pub body: String,
 }
 
 #[derive(Deserialize)]
@@ -239,6 +241,8 @@ struct RawPullRequest {
     deletions: u64,
     #[serde(default)]
     files: Option<Nodes<RawFile>>,
+    #[serde(default)]
+    body: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -431,9 +435,12 @@ pub fn inbox_request(
              reviewThreads(first: 100) {{ nodes {{ isResolved }} }} }} }} }} "
         ));
         variables[format!("s{index}")] = serde_json::Value::String(
-            format!("is:pr is:open archived:false {repos} {}", section.query.trim())
-                .trim_end()
-                .to_string(),
+            format!(
+                "is:pr is:open archived:false {repos} {}",
+                section.query.trim()
+            )
+            .trim_end()
+            .to_string(),
         );
     }
     let query = format!(
@@ -507,7 +514,7 @@ pub fn detail_request(key: &PrKey, login: &str) -> GhRequest {
     let query = format!(
         "query($owner: String!, $name: String!, $number: Int!, $login: String!) {{ \
          repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ \
-         {PR_SUMMARY_FIELDS} state additions deletions \
+         {PR_SUMMARY_FIELDS} state additions deletions body \
          files(first: 100) {{ nodes {{ path viewerViewedState }} }} \
          reviewThreads(first: 100) {{ nodes {{ id isResolved isOutdated path line startLine diffSide \
          comments(first: 100) {{ nodes {{ databaseId author {{ login }} body createdAt }} }} }} }} \
@@ -606,6 +613,7 @@ pub fn parse_detail(key: &PrKey, json: &str) -> Result<PrDetail> {
         deletions: pull_request.deletions,
         files,
         threads,
+        body: pull_request.body.clone().unwrap_or_default(),
     })
 }
 
@@ -835,7 +843,11 @@ mod tests {
     #[test]
     fn inbox_groups_rows_and_counts() {
         let inbox = parse_inbox("github.com", INBOX, &sections(), &[]).expect("parse");
-        let names: Vec<_> = inbox.sections.iter().map(|(name, _)| name.as_str()).collect();
+        let names: Vec<_> = inbox
+            .sections
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
         assert_eq!(names, ["Review requested", "Yours", "Mentioned"]);
         let row = find(&inbox, 482);
         assert_eq!(row.title, "Add retry to uploader");
@@ -887,6 +899,7 @@ mod tests {
         let detail = parse_detail(&key(), DETAIL).expect("parse");
         assert_eq!(detail.state, PrState::Open);
         assert_eq!((detail.additions, detail.deletions), (120, 14));
+        assert!(detail.body.ends_with("- [ ] Tested on staging"));
         assert_eq!(detail.summary.since_review, SinceReview::NewCommits(1));
         assert_eq!(detail.summary.unresolved_threads, 1);
         assert_eq!(
@@ -924,7 +937,8 @@ mod tests {
         partial["data"]["s2"] = serde_json::Value::Null;
         partial["errors"] = serde_json::json!([{ "message": "Could not resolve PR_gone" }]);
         let tracked = ["PR_x".to_string(), "PR_y".into(), "PR_gone".into()];
-        let inbox = parse_inbox("github.com", &partial.to_string(), &sections(), &tracked).expect("partial");
+        let inbox = parse_inbox("github.com", &partial.to_string(), &sections(), &tracked)
+            .expect("partial");
         assert!(!inbox.sections[0].1.is_empty());
         assert!(inbox.sections[2].1.is_empty());
         assert_eq!(inbox.closed_tracked, ["PR_x"]);
@@ -997,7 +1011,12 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_str(&request.stdin.expect("stdin")).expect("json");
         assert!(!body["query"].as_str().expect("query").contains("evil"));
-        assert!(body["variables"]["s0"].as_str().expect("s0").ends_with("evil"));
+        assert!(
+            body["variables"]["s0"]
+                .as_str()
+                .expect("s0")
+                .ends_with("evil")
+        );
     }
 
     fn sections() -> Vec<InboxSection> {

@@ -1742,7 +1742,13 @@
       { "name": "Yours", "query": "author:@me" },
       { "name": "Mentioned", "query": "mentions:@me" },
       { "name": "Other open", "query": "" }
-    ]
+    ],
+    // photon: checklists offered while reviewing, e.g.
+    // { "name": "Migrations", "when": { "paths": ["migrations/**"] }, "items": ["Reversible"] }.
+    // A repository can add its own in .photon/review.json, read from the base branch.
+    "checklists": [],
+    // photon: checks Photon answers itself from evidence.
+    "auto_checks": ["checks_pass", "threads_resolved", "tests_changed", "ran_locally", "no_debug_leftovers"]
   },
   // Automatically update Zed. This setting may be ignored on Linux if
   // installed through a package manager.
