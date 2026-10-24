@@ -61,16 +61,17 @@ Each item has a stable key, `"{source}:{checklist name}:{item text}"`, so answer
 - Every result carries a one-line evidence text.
 - Results are recomputed from the current PR data, so a new push updates them. The Run locally
   record is tied to a head commit and ignored once the head moves.
-- An auto check that doesn't pass can be answered by hand like any item.
+- An auto check that is unknown can be answered by hand like any item. One that failed can only
+  be marked N/A: evidence of a failure overrides an earlier Yes (say, given while CI was pending).
 - **Ran locally record:** when Run locally opens a terminal, Photon watches that terminal's command
-  blocks. A finished command counts when it starts with `pr_review.test_command` (if set) or
-  contains the word `test` (case-insensitive). The latest such command and its exit code are
+  blocks. A finished command counts when it starts with `pr_review.test_command` (if set), or
+  one of its words is `test`, starts with `test:`, or is a known test runner (`pytest`, `jest`, …). The latest such command and its exit code are
   stored per PR and head commit.
 
 ## Answering (B)
 
 - Manual items are answered **Yes**, **No** or **N/A** (click again to clear).
-- A **No** opens a one-line note.
+- A **No** opens a short note. It is edited in the sidebar list; under a step it shows as text.
 - Items from a checklist with `when.paths` also appear under the selected review-map step, but only
   if that step contains a matching file. The same answer shows in both places.
 - Answers are stored locally per PR, like viewed steps. Notes use the existing composer-text
@@ -102,7 +103,7 @@ If any manual item exists or any item was answered by hand, the review body ends
 - [ ] Card data isn't logged: not checked
 ```
 
-- The block is appended after the reviewer's summary.
+- The block closes the review body, after the summary and any comments that couldn't sit on a line.
 - A review where only passing auto checks exist adds nothing, so default reviews look the same on
   GitHub.
 

@@ -213,6 +213,16 @@ impl AutoResult {
         matches!(self, AutoResult::Passed(_))
     }
 
+    /// Whether a reviewer's answer counts. Evidence of a failure overrides a Yes or No given
+    /// earlier (say, while CI was pending); only "doesn't apply" still holds.
+    pub fn accepts(&self, answer: Answer) -> bool {
+        match self {
+            AutoResult::Passed(_) => false,
+            AutoResult::Failed(_) => answer == Answer::NotApplicable,
+            AutoResult::Unknown(_) => true,
+        }
+    }
+
     pub fn evidence(&self) -> &str {
         match self {
             AutoResult::Passed(text) | AutoResult::Failed(text) | AutoResult::Unknown(text) => text,
@@ -316,13 +326,25 @@ pub fn evaluate(check: AutoCheck, inputs: &AutoInputs) -> AutoResult {
     }
 }
 
-/// Whether a command finished in the Run locally terminal counts as running the tests.
+const TEST_RUNNERS: [&str; 8] = [
+    "pytest", "jest", "vitest", "mocha", "rspec", "phpunit", "ctest", "nextest",
+];
+
+/// Whether a command finished in the Run locally terminal counts as running the tests: it starts
+/// with the PR's test command, or one of its words is `test` (`cargo test`, `npm run test:unit`)
+/// or a test runner. `git checkout test-fix` and `ls tests/` don't count.
 pub fn counts_as_test_run(command: &str, test_command: Option<&str>) -> bool {
     let command = command.trim();
-    match test_command.map(str::trim).filter(|test| !test.is_empty()) {
-        Some(test_command) if command.starts_with(test_command) => true,
-        _ => command.to_ascii_lowercase().contains("test"),
+    if let Some(test_command) = test_command.map(str::trim).filter(|test| !test.is_empty())
+        && command.starts_with(test_command)
+    {
+        return true;
     }
+    command.split_whitespace().any(|word| {
+        let word = word.to_ascii_lowercase();
+        let program = word.rsplit('/').next().unwrap_or(&word);
+        word == "test" || word.starts_with("test:") || TEST_RUNNERS.contains(&program)
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -367,12 +389,18 @@ pub fn progress(
         total: auto.len() + items.len(),
         ..Progress::default()
     };
-    let keys = auto
+    let auto_answers = auto.iter().map(|(check, result)| {
+        let answer = answers
+            .get(&check.key())
+            .copied()
+            .filter(|answer| result.accepts(*answer));
+        (result.passed(), answer)
+    });
+    let item_answers = items
         .iter()
-        .map(|(check, result)| (check.key(), result.passed()))
-        .chain(items.iter().map(|item| (item.key.clone(), false)));
-    for (key, passed) in keys {
-        match (passed, answers.get(&key)) {
+        .map(|item| (false, answers.get(&item.key).copied()));
+    for (passed, answer) in auto_answers.chain(item_answers) {
+        match (passed, answer) {
             (true, _) | (false, Some(Answer::Yes | Answer::NotApplicable)) => progress.done += 1,
             (false, Some(Answer::No)) => progress.no += 1,
             (false, None) => {}
@@ -399,40 +427,61 @@ pub fn review_block(
     answers: &HashMap<String, Answer>,
     notes: &HashMap<String, String>,
 ) -> Option<String> {
+    let auto_answer = |check: &AutoCheck, result: &AutoResult| {
+        answers
+            .get(&check.key())
+            .copied()
+            .filter(|answer| result.accepts(*answer))
+    };
     let answered_auto = auto
         .iter()
-        .any(|(check, result)| !result.passed() && answers.contains_key(&check.key()));
+        .any(|(check, result)| auto_answer(check, result).is_some());
     if items.is_empty() && !answered_auto {
         return None;
     }
     let progress = progress(auto, items, answers);
     let mut block = format!("### Checklist ({}/{})\n", progress.done, progress.total);
-    let rows = auto
-        .iter()
-        .map(|(check, result)| {
-            let evidence = result.passed().then(|| result.evidence().to_lowercase());
-            (check.key(), check.title().to_string(), evidence)
-        })
-        .chain(
-            items
-                .iter()
-                .map(|item| (item.key.clone(), item.text.clone(), None)),
-        );
-    for (key, text, evidence) in rows {
-        let line = match (evidence, answers.get(&key)) {
-            (Some(evidence), _) => format!("- [x] {text}: {evidence}"),
-            (None, Some(Answer::Yes)) => format!("- [x] {text}"),
-            (None, Some(Answer::NotApplicable)) => format!("- N/A {text}"),
-            (None, Some(Answer::No)) => match notes.get(&key).map(|note| note.trim()) {
-                Some(note) if !note.is_empty() => format!("- [ ] {text}: **No**, {note}"),
-                _ => format!("- [ ] {text}: **No**"),
-            },
-            (None, None) => format!("- [ ] {text}: not checked"),
+    for (check, result) in auto {
+        let title = check.title();
+        let evidence = sentence_case(result.evidence());
+        let line = match (result, auto_answer(check, result)) {
+            (AutoResult::Passed(_), _) => format!("- [x] {title}: {evidence}"),
+            (_, Some(Answer::Yes)) => format!("- [x] {title}: checked by the reviewer"),
+            (_, Some(Answer::NotApplicable)) => format!("- N/A {title}"),
+            (_, Some(Answer::No)) => no_line(title, notes.get(&check.key())),
+            (_, None) => format!("- [ ] {title}: {evidence}"),
+        };
+        block.push_str(&line);
+        block.push('\n');
+    }
+    for item in items {
+        let text = &item.text;
+        let line = match answers.get(&item.key) {
+            Some(Answer::Yes) => format!("- [x] {text}"),
+            Some(Answer::NotApplicable) => format!("- N/A {text}"),
+            Some(Answer::No) => no_line(text, notes.get(&item.key)),
+            None => format!("- [ ] {text}: not checked"),
         };
         block.push_str(&line);
         block.push('\n');
     }
     Some(block)
+}
+
+fn no_line(text: &str, note: Option<&String>) -> String {
+    match note.map(|note| note.trim()) {
+        Some(note) if !note.is_empty() => format!("- [ ] {text}: **No**, {note}"),
+        _ => format!("- [ ] {text}: **No**"),
+    }
+}
+
+/// Lowercases only the first letter, so paths and commands in evidence keep their case.
+fn sentence_case(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 #[cfg(test)]
@@ -652,7 +701,13 @@ mod tests {
         assert!(counts_as_test_run("make check-all", Some("make check")));
         assert!(counts_as_test_run("cargo test -p api", None));
         assert!(counts_as_test_run("npm run Test", Some("make check")));
+        assert!(counts_as_test_run("npm run test:unit", None));
+        assert!(counts_as_test_run("./node_modules/.bin/jest src", None));
+        assert!(counts_as_test_run("python -m pytest -q", None));
         assert!(!counts_as_test_run("ls -la", None));
+        assert!(!counts_as_test_run("git checkout test-fix", None));
+        assert!(!counts_as_test_run("ls tests/", None));
+        assert!(!counts_as_test_run("echo attest", None));
         assert!(!counts_as_test_run("git status", Some("  ")));
     }
 
@@ -719,10 +774,52 @@ mod tests {
             review_block(&auto, &items, &answers, &notes).expect("block"),
             "### Checklist (2/5)\n\
              - [x] CI checks pass: all checks passed\n\
-             - [ ] Tests ran locally: not checked\n\
+             - [ ] Tests ran locally: not run\n\
              - [ ] Replay safe: **No**, needs an idempotency key\n\
              - N/A Migration reversible\n\
              - [ ] No card data logged: not checked\n"
+        );
+    }
+
+    #[test]
+    fn failing_evidence_overrides_an_earlier_yes() {
+        let pending_then_failed = [(
+            AutoCheck::ChecksPass,
+            AutoResult::Failed("Some checks failed".into()),
+        )];
+        let yes = HashMap::from_iter([(AutoCheck::ChecksPass.key(), Answer::Yes)]);
+        assert_eq!(progress(&pending_then_failed, &[], &yes).done, 0);
+        assert_eq!(
+            review_block(&pending_then_failed, &[], &yes, &HashMap::default()),
+            None
+        );
+
+        let not_applicable =
+            HashMap::from_iter([(AutoCheck::ChecksPass.key(), Answer::NotApplicable)]);
+        assert_eq!(progress(&pending_then_failed, &[], &not_applicable).done, 1);
+        let unknown = [(
+            AutoCheck::RanLocally,
+            AutoResult::Unknown("Use Run locally".into()),
+        )];
+        let yes_run = HashMap::from_iter([(AutoCheck::RanLocally.key(), Answer::Yes)]);
+        assert_eq!(
+            review_block(&unknown, &[], &yes_run, &HashMap::default()).expect("block"),
+            "### Checklist (1/1)\n- [x] Tests ran locally: checked by the reviewer\n"
+        );
+        let failed = [(
+            AutoCheck::TestsChanged,
+            AutoResult::Failed("dbg! in src/Api.rs:3".into()),
+        )];
+        let items = applicable_items(
+            &[(ChecklistSource::Settings, checklist("A", &[], &[], &["x"]))],
+            "a/b",
+            &[],
+        )
+        .0;
+        assert!(
+            review_block(&failed, &items, &HashMap::default(), &HashMap::default())
+                .expect("block")
+                .contains("- [ ] Tests changed with the code: dbg! in src/Api.rs:3\n")
         );
     }
 

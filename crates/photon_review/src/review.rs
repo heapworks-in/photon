@@ -225,6 +225,8 @@ struct SelectedLines {
     anchor_text: String,
 }
 
+const ALL_ANSWERS: [Answer; 3] = [Answer::Yes, Answer::No, Answer::NotApplicable];
+
 pub struct ReviewItem {
     project: Entity<Project>,
     detail: PrDetail,
@@ -269,6 +271,7 @@ pub struct ReviewItem {
     since_review_note: Option<SharedString>,
     loading_since_review: bool,
     checklist_items: Vec<ChecklistItem>,
+    auto_results: Vec<(AutoCheck, AutoResult)>,
     checklist_errors: Vec<String>,
     team_checklists: Vec<PrReviewChecklistContent>,
     team_error: Option<String>,
@@ -1123,6 +1126,7 @@ impl ReviewItem {
                 .local_run(&this.detail.summary.key)
                 .log_err()
                 .flatten();
+            this.refresh_auto_results(cx);
             cx.notify();
         }));
         let checklist_answers = database
@@ -1181,6 +1185,7 @@ impl ReviewItem {
             since_review_note: None,
             loading_since_review: false,
             checklist_items: Vec::new(),
+            auto_results: Vec::new(),
             checklist_errors: Vec::new(),
             team_checklists: Vec::new(),
             team_error: None,
@@ -1450,7 +1455,9 @@ impl ReviewItem {
     }
 
     pub fn can_comment(&self, cx: &App) -> bool {
-        self.sendable_drafts() > 0 || !self.summary_editor.read(cx).text(cx).trim().is_empty()
+        self.sendable_drafts() > 0
+            || !self.summary_editor.read(cx).text(cx).trim().is_empty()
+            || self.checklist_block(cx).is_some()
     }
 
     fn buffer_for_path(&self, path: &str, cx: &App) -> Option<Entity<Buffer>> {
@@ -1487,18 +1494,7 @@ impl ReviewItem {
         let key = self.detail.summary.key.clone();
         let head_sha = self.checkout.head_sha.clone();
         let summary = self.summary_editor.read(cx).text(cx);
-        let mut body = summary.trim().to_string();
-        if let Some(block) = review_block(
-            &self.auto_results(cx),
-            &self.checklist_items,
-            &self.checklist_answers,
-            &self.checklist_notes(cx),
-        ) {
-            if !body.is_empty() {
-                body.push_str("\n\n");
-            }
-            body.push_str(&block);
-        }
+        let checklist = self.checklist_block(cx);
         let summary_sync = self.text_sync(SUMMARY_SLOT);
         let commentable = self.commentable.clone();
         let languages = self.draft_languages(cx);
@@ -1560,7 +1556,8 @@ impl ReviewItem {
                 &key,
                 &head_sha,
                 event,
-                &body,
+                summary.trim(),
+                checklist.as_deref(),
                 &drafts,
                 &commentable,
                 &|path| languages.get(path).cloned(),
@@ -1709,6 +1706,7 @@ impl ReviewItem {
                     this.last_review = Some(commit.clone());
                 }
                 this.detail = detail;
+                this.refresh_auto_results(cx);
                 this.add_reply_editors(&HashMap::new(), window, cx);
                 this.show_comments(cx);
                 cx.notify();
@@ -2816,14 +2814,14 @@ impl ReviewItem {
         cx.notify();
     }
 
-    fn progress_text(&self, cx: &App) -> String {
+    fn progress_text(&self) -> String {
         let viewed = self
             .steps
             .iter()
             .filter(|step| self.viewed_steps.contains(&step.key))
             .count();
         let mut text = format!("{viewed} of {} steps viewed", self.steps.len());
-        let checklist = self.checklist_progress(cx);
+        let checklist = self.checklist_progress();
         if checklist.total > 0 {
             text.push_str(&format!(" · checklist {}", checklist.text()));
         }
@@ -2866,6 +2864,7 @@ impl ReviewItem {
         );
         self.checklist_items = items;
         self.checklist_errors = errors;
+        self.refresh_auto_results(cx);
         cx.notify();
     }
 
@@ -2880,7 +2879,12 @@ impl ReviewItem {
         self.rebuild_checklist(cx);
     }
 
-    pub fn auto_results(&self, cx: &App) -> Vec<(AutoCheck, AutoResult)> {
+    pub fn auto_results(&self) -> &[(AutoCheck, AutoResult)] {
+        &self.auto_results
+    }
+
+    /// Re-run after anything the checks read changes: files, PR detail, the local run, settings.
+    fn refresh_auto_results(&mut self, cx: &App) {
         let inputs = AutoInputs {
             checks: self.detail.summary.checks,
             threads: &self.detail.threads,
@@ -2888,18 +2892,27 @@ impl ReviewItem {
             head_sha: &self.checkout.head_sha,
             local_run: self.local_run.as_ref(),
         };
-        PrReviewSettings::get_global(cx)
+        self.auto_results = PrReviewSettings::get_global(cx)
             .auto_checks
             .iter()
             .map(|check| (*check, evaluate(*check, &inputs)))
-            .collect()
+            .collect();
     }
 
-    fn checklist_progress(&self, cx: &App) -> Progress {
+    fn checklist_progress(&self) -> Progress {
         crate::progress(
-            &self.auto_results(cx),
+            &self.auto_results,
             &self.checklist_items,
             &self.checklist_answers,
+        )
+    }
+
+    fn checklist_block(&self, cx: &App) -> Option<String> {
+        review_block(
+            &self.auto_results,
+            &self.checklist_items,
+            &self.checklist_answers,
+            &self.checklist_notes(cx),
         )
     }
 
@@ -3039,7 +3052,7 @@ impl ReviewItem {
             }))
             .child(
                 div().ml_auto().child(
-                    Label::new(self.progress_text(cx))
+                    Label::new(self.progress_text())
                         .size(LabelSize::Small)
                         .color(Color::Muted),
                 ),
@@ -3047,15 +3060,23 @@ impl ReviewItem {
     }
 
     /// A manual item, or an auto check that didn't pass: answered Yes, No or N/A.
+    /// `place` is "list" for the sidebar list, which owns the note editor, or "step" for the
+    /// copy under a review-map step, which shows the note as text: one editor can't be drawn
+    /// twice. `choices` are the answers offered.
     fn render_check_row(
         &self,
         place: &'static str,
         item_key: &str,
         text: &str,
         evidence: Option<(&str, Color)>,
+        choices: &[Answer],
         cx: &Context<Self>,
     ) -> AnyElement {
-        let answer = self.checklist_answers.get(item_key).copied();
+        let answer = self
+            .checklist_answers
+            .get(item_key)
+            .copied()
+            .filter(|answer| choices.contains(answer));
         let choice = |label: &'static str, value: Answer| {
             let item_key = item_key.to_string();
             Button::new(
@@ -3088,21 +3109,32 @@ impl ReviewItem {
                     .size(LabelSize::XSmall)
                     .color(color)
             }))
-            .child(
-                h_flex()
-                    .gap_1()
-                    .child(choice("Yes", Answer::Yes))
-                    .child(choice("No", Answer::No))
-                    .child(choice("N/A", Answer::NotApplicable)),
-            )
+            .child(h_flex().gap_1().children(choices.iter().map(|value| {
+                let label = match value {
+                    Answer::Yes => "Yes",
+                    Answer::No => "No",
+                    Answer::NotApplicable => "N/A",
+                };
+                choice(label, *value)
+            })))
             .when(answer == Some(Answer::No), |row| {
-                row.children(self.note_editors.get(item_key).cloned())
+                let editor = self.note_editors.get(item_key);
+                if place == "list" {
+                    row.children(editor.cloned())
+                } else {
+                    let note = editor
+                        .map(|editor| editor.read(cx).text(cx))
+                        .unwrap_or_default();
+                    row.when(!note.trim().is_empty(), |row| {
+                        row.child(Label::new(note).size(LabelSize::XSmall).color(Color::Muted))
+                    })
+                }
             })
             .into_any_element()
     }
 
     fn render_checklist(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        let auto = self.auto_results(cx);
+        let auto = &self.auto_results;
         let boxes = parse_author_boxes(&self.detail.body);
         let errors: Vec<&String> = self
             .checklist_errors
@@ -3116,7 +3148,7 @@ impl ReviewItem {
         {
             return None;
         }
-        let progress = crate::progress(&auto, &self.checklist_items, &self.checklist_answers);
+        let progress = self.checklist_progress();
         let group = |title: &'static str| {
             Label::new(title)
                 .size(LabelSize::XSmall)
@@ -3158,15 +3190,17 @@ impl ReviewItem {
         if !open.is_empty() || !self.checklist_items.is_empty() {
             section = section.child(group("For you"));
             for (check, result) in open {
-                let color = match result {
-                    AutoResult::Failed(_) => Color::Warning,
-                    _ => Color::Muted,
+                // Against evidence of a failure, the reviewer can only say it doesn't apply.
+                let (color, choices): (Color, &[Answer]) = match result {
+                    AutoResult::Failed(_) => (Color::Warning, &[Answer::NotApplicable]),
+                    _ => (Color::Muted, &ALL_ANSWERS),
                 };
                 section = section.child(self.render_check_row(
                     "list",
                     &check.key(),
                     check.title(),
                     Some((result.evidence(), color)),
+                    choices,
                     cx,
                 ));
             }
@@ -3176,6 +3210,7 @@ impl ReviewItem {
                     &item.key,
                     &item.text,
                     Some((&item.checklist, Color::Muted)),
+                    &ALL_ANSWERS,
                     cx,
                 ));
             }
@@ -3343,11 +3378,14 @@ impl ReviewItem {
                     .iter()
                     .filter(|item| item.matches_any(&step.files))
                 {
-                    map = map.child(
-                        div()
-                            .pl_6()
-                            .child(self.render_check_row("step", &item.key, &item.text, None, cx)),
-                    );
+                    map = map.child(div().pl_6().child(self.render_check_row(
+                        "step",
+                        &item.key,
+                        &item.text,
+                        None,
+                        &ALL_ANSWERS,
+                        cx,
+                    )));
                 }
             }
         }
@@ -3578,11 +3616,18 @@ impl ReviewItem {
                             "{} draft comment{} · {}",
                             self.drafts.len(),
                             if self.drafts.len() == 1 { "" } else { "s" },
-                            self.progress_text(cx)
+                            self.progress_text()
                         ))
                         .size(LabelSize::Small)
                         .color(Color::Muted),
                     )
+                    .when(self.checklist_progress().total > 0, |this| {
+                        this.child(
+                            Label::new(format!("Checklist {}", self.checklist_progress().text()))
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        )
+                    })
                     .child(self.summary_editor.clone())
                     .child(
                         h_flex()
@@ -5510,7 +5555,7 @@ fn verify_password(user: &str, password: &str) -> bool {
         });
         assert_eq!(checklist_keys(&item, &mut cx), ["team:Team:Owner approved"]);
         let ran_locally =
-            |cx: &mut VisualTestContext| item.read_with(cx, |item, cx| item.auto_results(cx));
+            |cx: &mut VisualTestContext| item.read_with(cx, |item, _| item.auto_results().to_vec());
         assert!(matches!(
             ran_locally(&mut cx)[..],
             [(AutoCheck::RanLocally, AutoResult::Unknown(_))]

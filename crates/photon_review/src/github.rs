@@ -656,6 +656,7 @@ pub fn review_request(
     head_sha: &str,
     event: ReviewEvent,
     summary: &str,
+    checklist: Option<&str>,
     drafts: &[Draft],
     commentable: &HashMap<String, Vec<RangeInclusive<u32>>>,
     language_for_path: &dyn Fn(&str) -> Option<String>,
@@ -701,6 +702,14 @@ pub fn review_request(
             Placement::ReviewBody { .. } => body_drafts.push((draft, quoted())),
         }
     }
+    // The checklist closes the review, after any comments that couldn't sit on a line.
+    let mut body = review_body(summary, &body_drafts);
+    if let Some(checklist) = checklist {
+        if !body.is_empty() {
+            body.push_str("\n\n");
+        }
+        body.push_str(checklist);
+    }
     rest_request(
         &key.host,
         "POST",
@@ -711,7 +720,7 @@ pub fn review_request(
         Some(serde_json::json!({
             "commit_id": head_sha,
             "event": event.as_str(),
-            "body": review_body(summary, &body_drafts),
+            "body": body,
             "comments": comments,
         })),
     )
@@ -1082,6 +1091,7 @@ mod tests {
             "head",
             ReviewEvent::RequestChanges,
             "Needs work.",
+            Some("### Checklist (1/1)\n- [x] Done\n"),
             &drafts,
             &commentable,
             &|path| path.ends_with(".rs").then(|| "rust".to_string()),
@@ -1117,6 +1127,11 @@ mod tests {
         assert!(review_body.contains("Audit this"));
         assert!(review_body.contains("Still true"));
         assert!(!review_body.contains("Stale"));
+        assert!(
+            review_body.ends_with("\n\n### Checklist (1/1)\n- [x] Done\n"),
+            "{review_body}"
+        );
+        assert!(review_body.find("Still true") < review_body.find("### Checklist"));
         assert!(!body.to_string().contains("Maybe posted"));
         assert_eq!(ReviewEvent::Comment.as_str(), "COMMENT");
         assert_eq!(ReviewEvent::Approve.as_str(), "APPROVE");
