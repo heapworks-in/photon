@@ -60,11 +60,11 @@ use crate::{
     refuse_head_change_under_open_window, reply_request, reply_slot, resolve_request,
     review_request, review_root, since_review_files, viewed_request,
 };
+use crate::{Move, ViewFile, open_feedback, push_command, simplified_bases};
 use crate::{
     apply_suggestion, commit_file_request, file_at_commit_request, parse_file_contents,
     parse_suggestion, suggestion_block,
 };
-use crate::{open_feedback, push_command};
 
 actions!(
     photon_review,
@@ -79,6 +79,8 @@ actions!(
 );
 
 const LEFT_COMMENT_NOTE: &str = "Switch to the full diff to comment on removed lines";
+const SIMPLIFIED_LEFT_COMMENT_NOTE: &str =
+    "Show whitespace and moved code to comment on removed lines";
 const VIEWED_DISABLED_TOOLTIP: &str = "Switch to the full diff to mark things viewed";
 const HUNK_CONTEXT_LINES: u32 = 3;
 const COMPOSER_MAX_LINES: u32 = 4;
@@ -288,6 +290,12 @@ pub struct ReviewItem {
     marking_viewed: HashSet<String>,
     last_review: Option<String>,
     full_files: Option<Vec<LoadedFile>>,
+    hide_whitespace: bool,
+    hide_moves: bool,
+    /// Each file's real base text, kept while the diff shows a simplified one.
+    original_bases: HashMap<EntityId, Option<String>>,
+    moves: Vec<Move>,
+    _diff_view_task: Task<()>,
     since_review_note: Option<SharedString>,
     loading_since_review: bool,
     checklist_items: Vec<ChecklistItem>,
@@ -1276,6 +1284,11 @@ impl ReviewItem {
             marking_viewed: HashSet::new(),
             last_review,
             full_files: None,
+            hide_whitespace: false,
+            hide_moves: false,
+            original_bases: HashMap::new(),
+            moves: Vec::new(),
+            _diff_view_task: Task::ready(()),
             since_review_note: None,
             loading_since_review: false,
             checklist_items: Vec::new(),
@@ -1408,7 +1421,94 @@ impl ReviewItem {
     }
 
     fn set_files(&mut self, files: Vec<LoadedFile>, cx: &mut Context<Self>) {
-        let (lsp_handles, changed_rows) = index_files(&self.project, &files, cx);
+        self.files = files;
+        self.reindex_files(cx);
+        self.apply_diff_view(cx);
+    }
+
+    fn diff_simplified(&self) -> bool {
+        self.hide_whitespace || self.hide_moves
+    }
+
+    fn toggle_diff_view(&mut self, whitespace: bool, cx: &mut Context<Self>) {
+        if whitespace {
+            self.hide_whitespace = !self.hide_whitespace;
+        } else {
+            self.hide_moves = !self.hide_moves;
+        }
+        self.apply_diff_view(cx);
+        cx.notify();
+    }
+
+    /// Gives every shown file's diff the base text the toggles call for, then rebuilds the map
+    /// from the diff that results.
+    fn apply_diff_view(&mut self, cx: &mut Context<Self>) {
+        let (hide_whitespace, hide_moves) = (self.hide_whitespace, self.hide_moves);
+        let mut entries = Vec::new();
+        for file in &self.files {
+            let Some((buffer, diff)) = &file.contents else {
+                continue;
+            };
+            if !hide_whitespace
+                && !hide_moves
+                && !self.original_bases.contains_key(&diff.entity_id())
+            {
+                continue;
+            }
+            let original = self
+                .original_bases
+                .entry(diff.entity_id())
+                .or_insert_with(|| diff.read(cx).base_text_string(cx))
+                .clone();
+            let snapshot = buffer.read(cx).snapshot().text;
+            entries.push((file.diff.path.clone(), original, snapshot, diff.clone()));
+        }
+        if entries.is_empty() {
+            self.moves.clear();
+            return;
+        }
+        self._diff_view_task = cx.spawn(async move |this, cx| {
+            let (entries, bases, moves) = cx
+                .background_spawn(async move {
+                    let texts: Vec<String> = entries
+                        .iter()
+                        .map(|(_, _, snapshot, _)| snapshot.text())
+                        .collect();
+                    let view = if hide_whitespace || hide_moves {
+                        let files: Vec<ViewFile> = entries
+                            .iter()
+                            .zip(&texts)
+                            .map(|((path, original, _, _), new)| ViewFile {
+                                path,
+                                old: original.as_deref(),
+                                new,
+                            })
+                            .collect();
+                        let view = simplified_bases(&files, hide_whitespace, hide_moves);
+                        (view.bases, view.moves)
+                    } else {
+                        let bases = entries.iter().map(|entry| entry.1.clone()).collect();
+                        (bases, Vec::new())
+                    };
+                    (entries, view.0, view.1)
+                })
+                .await;
+            for ((_, _, snapshot, diff), base) in entries.into_iter().zip(bases) {
+                diff.update(cx, |diff, cx| {
+                    diff.set_base_text(base.map(Into::into), snapshot, cx)
+                })
+                .await;
+            }
+            this.update(cx, |this, cx| {
+                this.moves = moves;
+                this.reindex_files(cx);
+            })
+            .log_err();
+        });
+    }
+
+    fn reindex_files(&mut self, cx: &mut Context<Self>) {
+        let (lsp_handles, changed_rows) = index_files(&self.project, &self.files, cx);
         // The full set's handles live in `_lsp_handles`; only the subset's are replaced here.
         self._since_review_lsp_handles = if self.full_files.is_some() {
             lsp_handles
@@ -1416,7 +1516,6 @@ impl ReviewItem {
             Vec::new()
         };
         self.changed_rows = changed_rows;
-        self.files = files;
         self.analyses = Vec::new();
         self.functions = Vec::new();
         self.contexts = Vec::new();
@@ -2726,6 +2825,12 @@ impl ReviewItem {
             cx.notify();
             return;
         }
+        // The simplified base's line numbers are not the old file's.
+        if self.diff_simplified() && lines.side == Side::Left {
+            self.since_review_note = Some(SIMPLIFIED_LEFT_COMMENT_NOTE.into());
+            cx.notify();
+            return;
+        }
         let draft = Draft {
             id: None,
             key: self.detail.summary.key.clone(),
@@ -2889,6 +2994,9 @@ impl ReviewItem {
                     .anchor_in_excerpt(buffer.anchor_before(Point::new(row, buffer.line_len(row))))
             }
             Side::Left => {
+                if self.diff_simplified() {
+                    return None;
+                }
                 let file = self.files.iter().find(|file| file.diff.path == path)?;
                 let (buffer, diff) = file.contents.as_ref()?;
                 let buffer = buffer.read(cx).snapshot();
@@ -3145,11 +3253,22 @@ impl ReviewItem {
         self.update_impact(cx);
     }
 
+    /// A file whose every change is whitespace or moved code, while those are hidden.
+    fn hidden_by_view(&self, file: &LoadedFile) -> bool {
+        self.diff_simplified()
+            && file.contents.is_some()
+            && self
+                .changed_rows
+                .get(&file.diff.path)
+                .is_none_or(|rows| rows.is_empty())
+    }
+
     fn map_inputs(&self) -> (Vec<MapFile>, Vec<MapFunction>) {
         let files = self
             .files
             .iter()
             .enumerate()
+            .filter(|(_, file)| !self.hidden_by_view(file))
             .map(|(index, file)| {
                 let mut kind = classify_path(&file.diff.path);
                 let unanalysable = file.contents.is_none()
@@ -3637,6 +3756,24 @@ impl ReviewItem {
                 .size(LabelSize::Small)
                 .color(Color::Muted),
             )
+            .child(
+                crate::button("hide-whitespace", "Hide whitespace")
+                    .style(ButtonStyle::Outlined)
+                    .toggle_state(self.hide_whitespace)
+                    .tooltip(Tooltip::text(
+                        "Hide changes that only re-indent or re-space lines",
+                    ))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_diff_view(true, cx))),
+            )
+            .child(
+                crate::button("hide-moves", "Hide moved code")
+                    .style(ButtonStyle::Outlined)
+                    .toggle_state(self.hide_moves)
+                    .tooltip(Tooltip::text(
+                        "Hide blocks of 3 or more lines moved without changes; the map lists them",
+                    ))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_diff_view(false, cx))),
+            )
             .when(self.changes_since_review_offered(), |header| {
                 let showing = self.showing_changes_since_review();
                 header.child(
@@ -3765,6 +3902,46 @@ impl ReviewItem {
                 }
             })
             .into_any_element()
+    }
+
+    fn render_hidden_by_view(&self) -> Option<AnyElement> {
+        let hidden_files: Vec<&str> = self
+            .files
+            .iter()
+            .filter(|file| self.hidden_by_view(file))
+            .map(|file| file.diff.path.as_str())
+            .collect();
+        if hidden_files.is_empty() && self.moves.is_empty() {
+            return None;
+        }
+        let row = |text: String| {
+            Label::new(text)
+                .size(LabelSize::XSmall)
+                .color(Color::Muted)
+                .truncate()
+        };
+        Some(
+            v_flex()
+                .pt_4()
+                .gap_1()
+                .child(
+                    Label::new("Hidden from the diff")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .children(self.moves.iter().map(|moved| {
+                    row(format!(
+                        "Moved {} lines: {}:{} → {}:{}",
+                        moved.lines, moved.from_path, moved.from_line, moved.to_path, moved.to_line
+                    ))
+                }))
+                .children(
+                    hidden_files
+                        .into_iter()
+                        .map(|path| row(format!("{path}: only whitespace or moved code"))),
+                )
+                .into_any_element(),
+        )
     }
 
     fn render_checklist(&self, cx: &Context<Self>) -> Option<AnyElement> {
@@ -4025,6 +4202,7 @@ impl ReviewItem {
             }
         }
         map = map.children(self.render_checklist(cx));
+        map = map.children(self.render_hidden_by_view());
         let legend_row = |text: &'static str, color: Color| {
             h_flex()
                 .gap_1p5()
@@ -5802,6 +5980,72 @@ fn verify_password(user: &str, password: &str) -> bool {
             assert_eq!(draft.anchor_text, "    let a = 1;");
             assert_eq!(item.comment_blocks.len(), 1);
         });
+    }
+
+    #[gpui::test]
+    async fn hiding_whitespace_drops_reformatted_files_and_base_comments(cx: &mut TestAppContext) {
+        const C_BASE: &str = "fn other() {\n  let c = 3;\n}\n";
+        const C_HEAD: &str = "fn other() {\n    let c = 3;\n}\n";
+        let (item, mut cx) = open_item(
+            cx,
+            json!({ "src": { "b.rs": B_HEAD, "c.rs": C_HEAD } }),
+            vec![modified("src/b.rs", B_BASE), modified("src/c.rs", C_BASE)],
+            Graph {
+                functions: vec![
+                    function("callee", "src/b.rs", 0, 2),
+                    function("other", "src/c.rs", 0, 2),
+                ],
+                calls: Vec::new(),
+            },
+            true,
+            None,
+        )
+        .await;
+        settle(&mut cx);
+        let step_files = |item: &Entity<ReviewItem>, cx: &mut VisualTestContext| {
+            item.read_with(cx, |item, _| {
+                let mut files: Vec<String> = item
+                    .steps()
+                    .iter()
+                    .flat_map(|step| step.files.clone())
+                    .collect();
+                files.sort();
+                files.dedup();
+                files
+            })
+        };
+        assert_eq!(step_files(&item, &mut cx), ["src/b.rs", "src/c.rs"]);
+
+        item.update(&mut cx, |item, cx| item.toggle_diff_view(true, cx));
+        settle(&mut cx);
+        assert_eq!(step_files(&item, &mut cx), ["src/b.rs"]);
+        item.update(&mut cx, |item, _| {
+            assert!(item.hidden_by_view(&item.files[1]));
+            item.selected = 0;
+        });
+        item.update_in(&mut cx, |item, _, cx| item.show_step(cx));
+        cx.run_until_parked();
+        select_text(&item, "let a = 1;", &mut cx);
+        cx.dispatch_action(AddComment);
+        cx.run_until_parked();
+        item.read_with(&cx, |item, _| {
+            assert!(item.drafts().is_empty());
+            assert_eq!(
+                item.since_review_note.as_deref(),
+                Some(SIMPLIFIED_LEFT_COMMENT_NOTE)
+            );
+        });
+
+        item.update(&mut cx, |item, cx| item.toggle_diff_view(true, cx));
+        settle(&mut cx);
+        assert_eq!(step_files(&item, &mut cx), ["src/b.rs", "src/c.rs"]);
+        let base = item.read_with(&cx, |item, cx| {
+            item.files[1]
+                .contents
+                .as_ref()
+                .and_then(|(_, diff)| diff.read(cx).base_text_string(cx))
+        });
+        assert_eq!(base.as_deref(), Some(C_BASE));
     }
 
     #[gpui::test]

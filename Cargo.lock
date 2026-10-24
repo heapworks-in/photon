@@ -13495,6 +13495,7 @@ dependencies = [
  "serde",
  "serde_json",
  "settings",
+ "similar",
  "task",
  "tempfile",
  "terminal",
