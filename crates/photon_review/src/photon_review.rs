@@ -10,6 +10,7 @@ mod functions;
 mod gh;
 mod github;
 mod inbox;
+mod open_url;
 mod review;
 mod review_map;
 mod run_locally;
@@ -29,6 +30,7 @@ pub use functions::*;
 pub use gh::*;
 pub use github::*;
 pub use inbox::*;
+pub use open_url::*;
 pub use review::*;
 pub use review_map::*;
 pub use run_locally::*;
@@ -41,6 +43,7 @@ use ui::{Button, ButtonCommon, ButtonSize};
 
 pub fn init(cx: &mut App) {
     inbox::init_inbox(cx);
+    open_url::init_open_url(cx);
     review::refuse_parent_trust(checkout::review_root(), cx);
 }
 

@@ -13753,6 +13753,7 @@ dependencies = [
  "language",
  "log",
  "lsp",
+ "menu",
  "multi_buffer",
  "parking_lot",
  "paths",
