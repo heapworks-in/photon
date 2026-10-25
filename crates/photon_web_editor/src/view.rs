@@ -6,6 +6,7 @@ use anyhow::{Context as _, Result};
 use collections::HashSet;
 use db::kvp::KeyValueStore;
 use db::sqlez::statement::Statement;
+use fs::MTime;
 use futures::channel::oneshot;
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, FutureExt as _, Keystroke, Render,
@@ -13,6 +14,7 @@ use gpui::{
 };
 use language::{Buffer, BufferEvent};
 use project::{Project, ProjectItem as _, ProjectPath};
+use serde::{Deserialize, Serialize};
 use theme::GlobalTheme;
 use ui::prelude::*;
 use util::ResultExt as _;
@@ -24,7 +26,13 @@ use workspace::{
 use crate::{Appearance, FromPage, ToPage, WebDocument, forwarded_shortcuts};
 
 const FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
-const UNSAVED_NAMESPACE: &str = "web_editor_unsaved";
+
+#[derive(Serialize, Deserialize)]
+struct SerializedTab {
+    path: PathBuf,
+    unsaved_text: Option<String>,
+    saved_mtime: Option<MTime>,
+}
 
 pub trait PageConnection {
     fn send(&self, message: ToPage);
@@ -98,6 +106,11 @@ impl WebEditorView {
         match message {
             FromPage::Ready { .. } => self.load_page(cx),
             FromPage::Changed { text } => {
+                // After an error the page may hold a half-read scene; writing it back could destroy the file.
+                if self.error.is_some() {
+                    log::warn!("ignoring a change from a web editor page that reported an error");
+                    return;
+                }
                 let buffer = self.buffer(cx);
                 if buffer.read(cx).text() != text {
                     self.page_text = Some(text.clone());
@@ -188,9 +201,12 @@ impl WebEditorView {
         .detach_and_log_err(cx);
     }
 
-    fn send_load(&mut self, text: String, cx: &App) {
+    fn send_load(&mut self, text: String, cx: &mut Context<Self>) {
         let file_name = self.tab_content_text(0, cx).to_string();
         self.page_text = Some(text.clone());
+        if self.error.take().is_some() {
+            cx.notify();
+        }
         self.send(ToPage::Load {
             text,
             file_name,
@@ -494,11 +510,12 @@ impl SerializableItem for WebEditorView {
     ) -> Task<Result<Entity<Self>>> {
         let store = KeyValueStore::global(cx);
         window.spawn(cx, async move |cx| {
-            let abs_path = store
+            let tab = store
                 .scoped(&items_namespace(workspace_id))
                 .read(&item_id.to_string())?
-                .context("no path stored for this web editor tab")?;
-            let unsaved = store.scoped(UNSAVED_NAMESPACE).read(&abs_path)?;
+                .context("nothing stored for this web editor tab")?;
+            let tab: SerializedTab = serde_json::from_str(&tab)?;
+            let abs_path = tab.path;
 
             let (worktree, path) = project
                 .update(cx, |project, cx| {
@@ -511,15 +528,26 @@ impl SerializableItem for WebEditorView {
             };
             let editor_id = cx
                 .update(|_, cx| WebDocument::editor_id_for_path(&project, &project_path, cx))?
-                .with_context(|| format!("no web editor is installed for {abs_path}"))?;
+                .with_context(|| format!("no web editor is installed for {abs_path:?}"))?;
             let document = cx
                 .update(|_, cx| WebDocument::open(project.clone(), project_path, editor_id, cx))?
                 .await?;
-            if let Some(unsaved) = unsaved {
+            if let Some(unsaved_text) = tab.unsaved_text {
                 let buffer = document.read_with(cx, |document, _| document.buffer().clone());
+                // Same as Editor's restore: start from the mtime the text was based on, so a file
+                // changed while Photon was closed shows as a conflict instead of being overwritten.
                 buffer.update(cx, |buffer, cx| {
-                    if buffer.text() != unsaved {
-                        buffer.set_text(unsaved, cx);
+                    if tab.saved_mtime.is_some() {
+                        buffer.did_reload(
+                            buffer.version(),
+                            buffer.line_ending(),
+                            tab.saved_mtime,
+                            cx,
+                        );
+                    }
+                    buffer.set_text(unsaved_text, cx);
+                    if let Some(entry) = buffer.peek_undo_stack() {
+                        buffer.forget_transaction(entry.transaction_id());
                     }
                 });
             }
@@ -535,21 +563,22 @@ impl SerializableItem for WebEditorView {
         cx: &mut Context<Self>,
     ) -> Option<Task<Result<()>>> {
         let workspace_id = workspace.database_id()?;
-        let abs_path = self.abs_path(cx)?.to_str()?.to_string();
+        let path = self.abs_path(cx)?;
         let buffer = self.buffer(cx);
         let buffer = buffer.read(cx);
-        let unsaved = buffer.is_dirty().then(|| buffer.text());
+        let unsaved_text = buffer.is_dirty().then(|| buffer.text());
+        let saved_mtime = buffer.saved_mtime();
         let store = KeyValueStore::global(cx);
         Some(cx.background_spawn(async move {
+            let tab = serde_json::to_string(&SerializedTab {
+                path,
+                unsaved_text,
+                saved_mtime,
+            })?;
             store
                 .scoped(&items_namespace(workspace_id))
-                .write(item_id.to_string(), abs_path.clone())
-                .await?;
-            let unsaved_store = store.scoped(UNSAVED_NAMESPACE);
-            match unsaved {
-                Some(text) => unsaved_store.write(abs_path, text).await,
-                None => unsaved_store.delete(abs_path).await,
-            }
+                .write(item_id.to_string(), tab)
+                .await
         }))
     }
 
@@ -898,9 +927,10 @@ mod tests {
         drop(project);
     }
 
-    #[gpui::test]
-    async fn unsaved_edits_survive_a_restart(cx: &mut TestAppContext) {
-        let (fs, project) = project_with("{}", cx).await;
+    async fn workspace_with_id<'a>(
+        project: &Entity<Project>,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Workspace>, WorkspaceId, &'a mut VisualTestContext) {
         let (multi_workspace, cx) =
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
         let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
@@ -908,24 +938,45 @@ mod tests {
         let workspace_id = workspace
             .read_with(cx, |workspace, _| workspace.database_id())
             .expect("workspace has an id");
+        (workspace, workspace_id, cx)
+    }
 
-        let document = open_document(&project, cx).await;
-        let view = cx.new_window_entity(|window, cx| {
-            WebEditorView::new(document, project.clone(), window, cx)
-        });
-        send(&view, changed("unsaved"), cx);
-        let item_id = 42;
+    fn another_workspace(
+        project: &Entity<Project>,
+        cx: &mut VisualTestContext,
+    ) -> (Entity<Workspace>, WorkspaceId) {
+        let workspace =
+            cx.new_window_entity(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        workspace.update(cx, |workspace, _| workspace.set_random_database_id());
+        let workspace_id = workspace
+            .read_with(cx, |workspace, _| workspace.database_id())
+            .expect("workspace has an id");
+        (workspace, workspace_id)
+    }
+
+    async fn serialize_view(
+        workspace: &Entity<Workspace>,
+        view: &Entity<WebEditorView>,
+        item_id: ItemId,
+        cx: &mut VisualTestContext,
+    ) {
         workspace
             .update(cx, |workspace, cx| {
                 view.update(cx, |view, cx| view.serialize(workspace, item_id, false, cx))
             })
-            .expect("dirty tab serializes")
+            .expect("tab serializes")
             .await
             .expect("serialized");
-        drop(view);
+    }
 
-        let project = Project::test(fs.clone(), [Path::new("/root")], cx).await;
-        let restored = workspace
+    async fn restore_view(
+        workspace: &Entity<Workspace>,
+        project: &Entity<Project>,
+        workspace_id: WorkspaceId,
+        item_id: ItemId,
+        cx: &mut VisualTestContext,
+    ) -> Entity<WebEditorView> {
+        workspace
             .update_in(cx, |workspace, window, cx| {
                 WebEditorView::deserialize(
                     project.clone(),
@@ -937,12 +988,101 @@ mod tests {
                 )
             })
             .await
-            .expect("tab restores");
+            .expect("tab restores")
+    }
+
+    async fn dirty_view_serialized(
+        text: &str,
+        project: &Entity<Project>,
+        workspace: &Entity<Workspace>,
+        item_id: ItemId,
+        cx: &mut VisualTestContext,
+    ) {
+        let document = open_document(project, cx).await;
+        let view = cx.new_window_entity(|window, cx| {
+            WebEditorView::new(document, project.clone(), window, cx)
+        });
+        send(&view, changed(text), cx);
+        serialize_view(workspace, &view, item_id, cx).await;
+    }
+
+    #[gpui::test]
+    async fn unsaved_edits_survive_a_restart(cx: &mut TestAppContext) {
+        let (fs, project) = project_with("{}", cx).await;
+        let (workspace, workspace_id, cx) = workspace_with_id(&project, cx).await;
+        dirty_view_serialized("unsaved", &project, &workspace, 42, cx).await;
+
+        let project = Project::test(fs.clone(), [Path::new("/root")], cx).await;
+        let restored = restore_view(&workspace, &project, workspace_id, 42, cx).await;
         restored.read_with(cx, |view, cx| {
             assert!(view.is_dirty(cx));
+            assert!(!view.has_conflict(cx));
             assert_eq!(view.document.read(cx).buffer().read(cx).text(), "unsaved");
         });
         assert_eq!(file_text(&fs, FILE).await, "{}");
+    }
+
+    #[gpui::test]
+    async fn unsaved_text_is_kept_per_workspace(cx: &mut TestAppContext) {
+        let (fs, project) = project_with("{}", cx).await;
+        let (first_workspace, first_id, cx) = workspace_with_id(&project, cx).await;
+        dirty_view_serialized("first window", &project, &first_workspace, 1, cx).await;
+
+        let second_project = Project::test(fs.clone(), [Path::new("/root")], cx).await;
+        let (second_workspace, second_id) = another_workspace(&second_project, cx);
+        let document = open_document(&second_project, cx).await;
+        let clean = cx.new_window_entity(|window, cx| {
+            WebEditorView::new(document, second_project.clone(), window, cx)
+        });
+        serialize_view(&second_workspace, &clean, 2, cx).await;
+
+        let project = Project::test(fs.clone(), [Path::new("/root")], cx).await;
+        let restored_first = restore_view(&first_workspace, &project, first_id, 1, cx).await;
+        restored_first.read_with(cx, |view, cx| {
+            assert_eq!(
+                view.document.read(cx).buffer().read(cx).text(),
+                "first window"
+            );
+        });
+        let project = Project::test(fs.clone(), [Path::new("/root")], cx).await;
+        let restored_second = restore_view(&second_workspace, &project, second_id, 2, cx).await;
+        restored_second.read_with(cx, |view, cx| {
+            assert!(!view.is_dirty(cx));
+            assert_eq!(view.document.read(cx).buffer().read(cx).text(), "{}");
+        });
+    }
+
+    #[gpui::test]
+    async fn disk_change_while_closed_conflicts_on_restore(cx: &mut TestAppContext) {
+        let (fs, project) = project_with("{}", cx).await;
+        let (workspace, workspace_id, cx) = workspace_with_id(&project, cx).await;
+        dirty_view_serialized("unsaved", &project, &workspace, 42, cx).await;
+        drop(project);
+
+        fs.insert_file(FILE, b"changed while closed".to_vec()).await;
+        cx.run_until_parked();
+
+        let project = Project::test(fs.clone(), [Path::new("/root")], cx).await;
+        let (restart_workspace, _) = another_workspace(&project, cx);
+        let restored = restore_view(&restart_workspace, &project, workspace_id, 42, cx).await;
+        restored.read_with(cx, |view, cx| {
+            assert!(view.is_dirty(cx));
+            assert!(view.has_conflict(cx));
+            assert_eq!(view.document.read(cx).buffer().read(cx).text(), "unsaved");
+        });
+
+        restart_workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(restored.clone()), None, true, window, cx)
+        });
+        let saving = restart_workspace.update_in(cx, |workspace, window, cx| {
+            workspace.save_active_item(workspace::SaveIntent::Save, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt(), "a conflicting save asks first");
+        assert_eq!(file_text(&fs, FILE).await, "changed while closed");
+        cx.simulate_prompt_answer("Cancel");
+        saving.await.ok();
+        assert_eq!(file_text(&fs, FILE).await, "changed while closed");
     }
 
     #[gpui::test]
@@ -993,7 +1133,7 @@ mod tests {
 
     #[gpui::test]
     async fn page_error_is_shown_and_nothing_is_written(cx: &mut TestAppContext) {
-        let (fs, project, view, _page, cx) = open_view("{\"keep\":true}", cx).await;
+        let (fs, project, view, page, cx) = open_view("{\"keep\":true}", cx).await;
         send(&view, ready(), cx);
         send(
             &view,
@@ -1005,12 +1145,27 @@ mod tests {
         view.read_with(cx, |view, _| {
             assert_eq!(view.error.as_deref(), Some("Could not read this drawing"));
         });
+        send(&view, changed(""), cx);
+        assert!(!view.read_with(cx, |view, cx| view.is_dirty(cx)));
+        page.take();
 
-        view.update(cx, |view, _| view.set_page(None));
         let writes = fs.write_count_for_path(FILE);
-        save(&view, &project, cx).await;
+        let saving = view.update_in(cx, |view, window, cx| {
+            view.save(SaveOptions::default(), project.clone(), window, cx)
+        });
+        let ToPage::Flush { request } = page.take().pop().expect("flush sent") else {
+            panic!("expected a flush");
+        };
+        send(&view, FromPage::Flushed { request }, cx);
+        saving.await.expect("save succeeds");
         assert_eq!(fs.write_count_for_path(FILE), writes);
         assert_eq!(file_text(&fs, FILE).await, "{\"keep\":true}");
+
+        send(&view, ready(), cx);
+        assert!(
+            view.read_with(cx, |view, _| view.error.is_none()),
+            "a new load clears the error"
+        );
     }
 
     #[gpui::test]
