@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -13,7 +14,7 @@ use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, FutureExt as _, Keystroke, Render,
     Subscription, Task, WeakEntity, Window, div,
 };
-use language::{Buffer, BufferEvent};
+use language::{Buffer, BufferEvent, LineEnding};
 use project::{Project, ProjectItem as _, ProjectPath};
 use serde::{Deserialize, Serialize};
 use theme::GlobalTheme;
@@ -144,17 +145,23 @@ impl WebEditorView {
                 cx.notify();
             }
             FromPage::Ready { .. } => self.load_page(cx),
-            FromPage::Changed { text } => {
+            FromPage::Changed { mut text } => {
                 // After an error the page may hold a half-read scene; writing it back could destroy the file.
                 if self.error.is_some() {
                     log::warn!("ignoring a change from a web editor page that reported an error");
                     return;
                 }
+                // The buffer stores LF, so the diff below and the echo check compare like with like.
+                LineEnding::normalize(&mut text);
                 let buffer = self.buffer(cx);
-                if buffer.read(cx).text() != text {
-                    self.page_text = Some(text.clone());
+                let (old_range, new_range) = differing_range(&buffer.read(cx).text(), &text);
+                if !old_range.is_empty() || !new_range.is_empty() {
+                    // Only the changed part is replaced: the buffer keeps deleted text for the
+                    // whole session, so replacing everything would keep a copy of the file per change.
+                    let inserted = text[new_range].to_string();
+                    self.page_text = Some(text);
                     buffer.update(cx, |buffer, cx| {
-                        buffer.set_text(text, cx);
+                        buffer.edit([(old_range, inserted)], None, cx);
                     });
                 }
             }
@@ -334,6 +341,24 @@ fn appearance(cx: &App) -> Appearance {
         theme::Appearance::Light => Appearance::Light,
         theme::Appearance::Dark => Appearance::Dark,
     }
+}
+
+/// The byte ranges of `old` and `new` between their common prefix and suffix.
+fn differing_range(old: &str, new: &str) -> (Range<usize>, Range<usize>) {
+    let prefix: usize = old
+        .chars()
+        .zip(new.chars())
+        .take_while(|(old, new)| old == new)
+        .map(|(character, _)| character.len_utf8())
+        .sum();
+    let suffix: usize = old[prefix..]
+        .chars()
+        .rev()
+        .zip(new[prefix..].chars().rev())
+        .take_while(|(old, new)| old == new)
+        .map(|(character, _)| character.len_utf8())
+        .sum();
+    (prefix..old.len() - suffix, prefix..new.len() - suffix)
 }
 
 fn has_deleted_file(buffer: &Buffer) -> bool {
@@ -895,6 +920,86 @@ mod tests {
         let writes = fs.write_count_for_path(FILE);
         save(&view, &project, cx).await;
         assert_eq!(fs.write_count_for_path(FILE), writes);
+    }
+
+    // The buffer keeps every deleted byte for the session, so a change must not delete the file.
+    #[gpui::test]
+    async fn changes_edit_only_the_part_that_differs(cx: &mut TestAppContext) {
+        let line = "{\"id\":\"element\",\"version\":1,\"text\":\"héllo 😀\"},\n";
+        let original = line.repeat(2_000);
+        let (_fs, _project, view, _page, cx) = open_view(&original, cx).await;
+        send(&view, ready(), cx);
+
+        let mut text = original.clone();
+        let edits = 50;
+        for edit in 0..edits {
+            let position = (edit * 997) % (text.len() - 1);
+            let position = (position..text.len())
+                .find(|position| text.is_char_boundary(*position))
+                .expect("a char boundary");
+            let replaced = text[position..].chars().next().map_or(0, char::len_utf8);
+            text.replace_range(position..position + replaced, "ü");
+            send(&view, changed(&text), cx);
+        }
+
+        view.read_with(cx, |view, cx| {
+            let buffer = view.buffer(cx);
+            let buffer = buffer.read(cx);
+            assert_eq!(buffer.text(), text);
+            let deleted = buffer.deleted_text().len();
+            assert!(
+                deleted < 1_000,
+                "{edits} small changes to a {}-byte file kept {deleted} deleted bytes",
+                original.len()
+            );
+        });
+    }
+
+    #[test]
+    fn differing_range_is_exact_on_char_boundaries() {
+        let alphabet = ["a", "é", "😀", "\u{301}", "\n"];
+        let mut strings = vec![String::new()];
+        for _ in 0..3 {
+            let longer: Vec<String> = strings
+                .iter()
+                .flat_map(|string| alphabet.iter().map(move |piece| format!("{string}{piece}")))
+                .collect();
+            strings.extend(longer);
+        }
+        strings.sort();
+        strings.dedup();
+        for old in &strings {
+            for new in &strings {
+                let (old_range, new_range) = differing_range(old, new);
+                assert_eq!(old_range.start, new_range.start, "{old:?} -> {new:?}");
+                let rebuilt = format!(
+                    "{}{}{}",
+                    &old[..old_range.start],
+                    &new[new_range.clone()],
+                    &old[old_range.end..]
+                );
+                assert_eq!(&rebuilt, new, "{old:?} -> {new:?}");
+                if old == new {
+                    assert!(old_range.is_empty() && new_range.is_empty());
+                }
+            }
+        }
+    }
+
+    #[gpui::test]
+    async fn changes_with_windows_line_endings_match_set_text(cx: &mut TestAppContext) {
+        let (_fs, _project, view, page, cx) = open_view("a\nb", cx).await;
+        send(&view, ready(), cx);
+        page.take();
+        send(&view, changed("a\r\nb\r\nc"), cx);
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.buffer(cx).read(cx).text(), "a\nb\nc");
+        });
+        assert_eq!(
+            page.take(),
+            vec![],
+            "the page's own change is not echoed back"
+        );
     }
 
     #[gpui::test]
