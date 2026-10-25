@@ -32,7 +32,7 @@ pub struct OpenRecentProject {
 actions!(
     zed,
     [
-        /// Show the Zed welcome screen
+        /// Show the welcome screen
         ShowWelcome
     ]
 );
@@ -450,10 +450,11 @@ impl Render for WelcomePage {
                 .into_any_element()
         };
 
+        // photon: Photon's name and tagline.
         let welcome_label = if self.fallback_to_recent_projects {
-            "Welcome back to Zed"
+            "Welcome back to Photon"
         } else {
-            "Welcome to Zed"
+            "Welcome to Photon"
         };
 
         h_flex()
@@ -483,7 +484,7 @@ impl Render for WelcomePage {
                             .child(Vector::square(VectorName::ZedLogo, rems_from_px(45_f32)))
                             .child(
                                 v_flex().child(Headline::new(welcome_label)).child(
-                                    Label::new("The editor for what's next")
+                                    Label::new("The terminal is where the work happens") // photon: Photon's tagline
                                         .size(LabelSize::Small)
                                         .color(Color::Muted)
                                         .italic(),

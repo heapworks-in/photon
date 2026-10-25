@@ -346,7 +346,8 @@ fn render_base_keymap_section(tab_index: &mut isize, cx: &mut App) -> impl IntoE
         ToggleButtonGroup::two_rows(
             "base_keymap_selection",
             [
-                ToggleButtonWithIcon::new("Zed", IconName::AiZed, |_, _, cx| {
+                // photon: the default keymap carries Photon's name.
+                ToggleButtonWithIcon::new("Photon", IconName::Terminal, |_, _, cx| {
                     write_keymap_base(BaseKeymap::Zed, cx);
                 }),
                 ToggleButtonWithIcon::new("VS Code", IconName::EditorVsCode, |_, _, cx| {
@@ -439,12 +440,15 @@ fn render_worktree_auto_trust_switch(tab_index: &mut isize, cx: &mut App) -> imp
         ui::ToggleState::Unselected
     };
 
-    let tooltip_description = "Zed can only allow services like language servers, project settings, and MCP servers to run after you mark a new project as trusted.";
+    // photon: Photon's name.
+    let tooltip_description = "Photon can only allow services like language servers, project settings, and MCP servers to run after you mark a new project as trusted.";
 
     SwitchField::new(
         "onboarding-auto-trust-worktrees",
         Some("Trust All Projects By Default"),
-        Some("Automatically mark all new projects as trusted to unlock all Zed's features".into()),
+        Some(
+            "Automatically mark all new projects as trusted to unlock all Photon's features".into(),
+        ),
         toggle_state,
         {
             let fs = <dyn Fs>::global(cx);
@@ -680,7 +684,7 @@ fn render_ai_section(user_store: &Entity<UserStore>, cx: &mut App) -> impl IntoE
         .get::<AllAgentServersSettings>(None)
         .clone();
 
-    let column_count = 1 + FEATURED_AGENT_IDS.len() as u16;
+    let column_count = FEATURED_AGENT_IDS.len() as u16; // photon: no Zed Agent card
 
     let grid = FEATURED_AGENT_IDS.iter().fold(
         div()
@@ -689,7 +693,10 @@ fn render_ai_section(user_store: &Entity<UserStore>, cx: &mut App) -> impl IntoE
             .grid()
             .grid_cols(column_count)
             .gap_2()
-            .child(render_zed_agent_button(user_store, cx)),
+            // photon: no Zed Agent card; it needs a zed.dev sign-in, which Photon never does.
+            .when(false, |grid| {
+                grid.child(render_zed_agent_button(user_store, cx))
+            }),
         |grid, agent_id| {
             let Some(agent) = registry_agents
                 .iter()
@@ -724,6 +731,9 @@ pub(crate) fn render_basics_page(user_store: &Entity<UserStore>, cx: &mut App) -
         .child(render_import_settings_section(&mut tab_index, cx))
         .child(render_vim_mode_switch(&mut tab_index, cx))
         .child(render_worktree_auto_trust_switch(&mut tab_index, cx))
-        .child(Divider::horizontal().color(ui::DividerColor::BorderVariant))
-        .child(render_telemetry_section(&mut tab_index, cx))
+        // photon: no telemetry toggles; Photon sends no usage data or crash reports.
+        .when(false, |page| {
+            page.child(Divider::horizontal().color(ui::DividerColor::BorderVariant))
+                .child(render_telemetry_section(&mut tab_index, cx))
+        })
 }

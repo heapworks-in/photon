@@ -211,6 +211,7 @@ struct Onboarding {
     user_store: Entity<UserStore>,
     scroll_handle: ScrollHandle,
     _settings_subscription: Subscription,
+    _registry_subscription: Option<Subscription>, // photon: agent cards fill in once fetched
 }
 
 impl Onboarding {
@@ -262,7 +263,14 @@ impl Onboarding {
             })
             .detach();
 
+            // photon: Photon skips the agent registry fetch at startup; the agent cards need it.
+            let _registry_subscription = project::AgentRegistryStore::try_global(cx).map(|store| {
+                store.update(cx, |store, cx| store.refresh_if_stale(cx));
+                cx.observe(&store, |_, _, cx| cx.notify())
+            });
+
             Self {
+                _registry_subscription,
                 workspace: workspace.weak_handle(),
                 focus_handle: cx.focus_handle(),
                 scroll_handle: ScrollHandle::new(),
@@ -351,11 +359,12 @@ impl Render for Onboarding {
                                             .child(
                                                 v_flex()
                                                     .child(
-                                                        Headline::new("Welcome to Zed")
+                                                        // photon: Photon's name and tagline.
+                                                        Headline::new("Welcome to Photon")
                                                             .size(HeadlineSize::Small),
                                                     )
                                                     .child(
-                                                        Label::new("The editor for what's next")
+                                                        Label::new("The terminal is where the work happens")
                                                             .color(Color::Muted)
                                                             .size(LabelSize::Small)
                                                             .italic(),
@@ -418,12 +427,18 @@ impl Item for Onboarding {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Option<Entity<Self>>> {
-        Task::ready(Some(cx.new(|cx| Onboarding {
-            workspace: self.workspace.clone(),
-            user_store: self.user_store.clone(),
-            scroll_handle: ScrollHandle::new(),
-            focus_handle: cx.focus_handle(),
-            _settings_subscription: cx.observe_global::<SettingsStore>(move |_, cx| cx.notify()),
+        Task::ready(Some(cx.new(|cx| {
+            Onboarding {
+                workspace: self.workspace.clone(),
+                user_store: self.user_store.clone(),
+                scroll_handle: ScrollHandle::new(),
+                focus_handle: cx.focus_handle(),
+                _settings_subscription: cx
+                    .observe_global::<SettingsStore>(move |_, cx| cx.notify()),
+                _registry_subscription:
+                    project::AgentRegistryStore::try_global(cx) // photon: as in `new`
+                        .map(|store| cx.observe(&store, |_, _, cx| cx.notify())),
+            }
         })))
     }
 

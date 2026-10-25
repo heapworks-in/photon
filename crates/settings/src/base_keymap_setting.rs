@@ -58,7 +58,7 @@ impl Into<BaseKeymapContent> for BaseKeymap {
 impl Display for BaseKeymap {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            BaseKeymap::Zed => write!(f, "Zed"),
+            BaseKeymap::Zed => write!(f, "Photon"), // photon: the default keymap carries Photon's name
             BaseKeymap::VSCode => write!(f, "VS Code"),
             BaseKeymap::JetBrains => write!(f, "JetBrains"),
             BaseKeymap::SublimeText => write!(f, "Sublime Text"),
