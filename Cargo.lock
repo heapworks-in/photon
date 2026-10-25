@@ -13563,13 +13563,27 @@ name = "photon_web_editor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "collections",
+ "db",
+ "fs",
+ "futures 0.3.34",
  "gpui",
+ "language",
+ "log",
+ "paths",
+ "project",
  "serde",
  "serde_json",
+ "settings",
  "smol",
  "tempfile",
+ "theme",
+ "theme_settings",
  "thiserror 2.0.17",
+ "ui",
  "urlencoding",
+ "util",
+ "workspace",
 ]
 
 [[package]]

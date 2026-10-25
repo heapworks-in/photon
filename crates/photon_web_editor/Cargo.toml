@@ -13,13 +13,31 @@ path = "src/photon_web_editor.rs"
 doctest = false
 
 [dependencies]
+anyhow.workspace = true
+collections.workspace = true
+db.workspace = true
+futures.workspace = true
 gpui.workspace = true
+language.workspace = true
+log.workspace = true
+paths.workspace = true
+project.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+theme.workspace = true
 thiserror.workspace = true
+ui.workspace = true
 urlencoding.workspace = true
+util.workspace = true
+workspace.workspace = true
 
 [dev-dependencies]
-anyhow.workspace = true
+db = { workspace = true, features = ["test-support"] }
+fs = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
+project = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }
 smol.workspace = true
 tempfile.workspace = true
+theme_settings.workspace = true
+workspace = { workspace = true, features = ["test-support"] }
