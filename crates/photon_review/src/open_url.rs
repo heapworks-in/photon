@@ -80,7 +80,27 @@ async fn fetch_summary(runner: Arc<dyn GhRunner>, key: PrKey) -> Result<PrSummar
             host: Some(key.host.clone()),
         })?;
     let output = runner.run(detail_request(&key, &login)).await?;
-    Ok(parse_detail(&key, &output).map_err(failed)?.summary)
+    let mut summary = parse_detail(&key, &output).map_err(failed)?.summary;
+    // GitHub names are case-insensitive; the panel keys a pull request by GitHub's own spelling,
+    // which its URL carries, so a review opened from the panel is found again.
+    if let Some(canonical) = parse_pull_request_url(&summary.url) {
+        summary.key = canonical;
+    }
+    Ok(summary)
+}
+
+/// The panel's wording says "refresh", which this prompt doesn't have.
+fn modal_error(error: GhError) -> SharedString {
+    match error {
+        GhError::LoggedOut { host: Some(host) } => format!(
+            "Not logged in to {host}. Sign in with \"gh auth login --hostname {host}\", then try again."
+        )
+        .into(),
+        GhError::LoggedOut { host: None } => {
+            "Not logged in to GitHub. Sign in with \"gh auth login\", then try again.".into()
+        }
+        error => error.to_string().into(),
+    }
 }
 
 pub struct OpenPullRequestModal {
@@ -139,7 +159,7 @@ impl OpenPullRequestModal {
                     cx.emit(DismissEvent);
                 }
                 Err(error) => {
-                    this.error = Some(error.to_string().into());
+                    this.error = Some(modal_error(error));
                     this.opening = None;
                     cx.notify();
                 }
@@ -346,8 +366,6 @@ mod tests {
             },
             Ok(DETAIL.into()),
         );
-        // Opening the review checks the login again.
-        fake.respond(|request| request.args[0] == "auth", Ok(AUTH.into()));
 
         let modal = open_modal(&workspace, &mut cx);
         modal.update_in(&mut cx, |modal, window, cx| {
@@ -369,6 +387,30 @@ mod tests {
                 Some(review.entity_id())
             );
         });
+    }
+
+    #[gpui::test]
+    async fn url_in_other_case_reuses_the_open_review(cx: &mut TestAppContext) {
+        let fake = FakeGh::new();
+        init_test(cx, &fake);
+        let (workspace, project, mut cx) = window(cx).await;
+        let review = add_review(&workspace, &project, 482, &mut cx);
+        add_review(&workspace, &project, 7, &mut cx);
+        fake.respond(|request| request.args[0] == "auth", Ok(AUTH.into()));
+        fake.respond(|request| request.stdin.is_some(), Ok(DETAIL.into()));
+
+        let modal = open_modal(&workspace, &mut cx);
+        enter(&modal, "https://GitHub.com/Acme/WEB/pull/482", &mut cx);
+
+        workspace.read_with(&cx, |workspace, cx| {
+            assert_eq!(workspace.items_of_type::<ReviewItem>(cx).count(), 2);
+            assert_eq!(
+                workspace.active_item(cx).map(|item| item.item_id()),
+                Some(review.entity_id())
+            );
+        });
+        // Only the login and the detail: a second checkout would also fetch and check out.
+        assert_eq!(fake.requests().len(), 2);
     }
 
     #[gpui::test]
@@ -397,7 +439,10 @@ mod tests {
         let modal = open_modal(&workspace, &mut cx);
         enter(&modal, "https://github.com/acme/web/pull/482", &mut cx);
         let error = modal_error(&workspace, &mut cx).expect("error shown");
-        assert!(error.contains("Not logged in to github.com"), "{error}");
+        assert_eq!(
+            error,
+            "Not logged in to github.com. Sign in with \"gh auth login --hostname github.com\", then try again."
+        );
         workspace.read_with(&cx, |workspace, cx| {
             assert_eq!(workspace.items_of_type::<ReviewItem>(cx).count(), 0)
         });
