@@ -567,7 +567,7 @@ mod tests {
             debug_adapters: Default::default(),
             debug_locators: Default::default(),
             language_model_providers: BTreeMap::default(),
-            web_editors: BTreeMap::default(),
+            web_editors: BTreeMap::default(), // photon: new manifest field
         }
     }
 
@@ -667,6 +667,7 @@ mod tests {
         assert!(manifest.allow_exec("docker", &["ps"]).is_err()); // wrong first arg
     }
 
+    // photon: web editor manifest entries parse
     #[test]
     fn web_editors_parse_from_extension_toml() {
         let manifest: ExtensionManifest = toml::from_str(indoc::indoc! {r#"
