@@ -161,4 +161,21 @@ mod tests {
                 .is_none()
         );
     }
+
+    #[test]
+    fn excalidraw_extension_manifest_declares_the_editor() {
+        let manifest: ExtensionManifest = toml::from_str(include_str!(
+            "../../../extensions/photon-excalidraw/extension.toml"
+        ))
+        .expect("extension.toml parses");
+        let built_in = built_in_editors()
+            .into_iter()
+            .next()
+            .expect("a built-in editor");
+        assert_eq!(manifest.id.as_ref(), built_in.extension_id.as_ref());
+        let declared = &manifest.web_editors[built_in.id.as_ref()];
+        assert_eq!(declared.name, built_in.name);
+        assert_eq!(declared.file_suffixes, built_in.file_suffixes);
+        assert_eq!(declared.entry.as_unix_str(), built_in.entry);
+    }
 }

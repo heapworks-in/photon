@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# Rebuilds Photon's built-in Excalidraw editor into assets/web_editors/excalidraw/.
+# A developer tool, run when bumping Excalidraw; the output is committed so building Photon needs
+# no npm or network.
+set -euo pipefail
+
+# The excalidraw/excalidraw tag matching the pinned npm package, for its LICENSE.
+EXCALIDRAW_COMMIT=a2ec2889babf7d2295469c6d90ebe77fae57df84 # v0.18.1
+# github.com/excalidraw/excalidraw-libraries, for the bundled community libraries.
+LIBRARIES_COMMIT=297a349eaff859e678f78d4dbc8e68df5fce42e5
+LIBRARY_COUNT=30
+LIBRARY_BUDGET_BYTES=3000000
+# A few icon sets are each most of the budget; leaving them out keeps room for many smaller ones.
+LIBRARY_MAX_BYTES=300000
+FONTS=(Excalifont Virgil Nunito ComicShanns Lilita Cascadia Liberation Assistant)
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+extension="$root/extensions/photon-excalidraw"
+out="$root/assets/web_editors/excalidraw"
+downloads="$(mktemp -d)"
+trap 'rm -rf "$downloads"' EXIT
+
+cd "$extension"
+npm ci --ignore-scripts
+npx vite build
+
+rm -rf "$out"
+mkdir -p "$out/fonts" "$out/libraries"
+cp -R dist/editor "$out/editor"
+for font in "${FONTS[@]}"; do
+  cp -R "node_modules/@excalidraw/excalidraw/dist/prod/fonts/$font" "$out/fonts/$font"
+done
+
+raw="https://raw.githubusercontent.com"
+curl -sfL -o "$out/LICENSE" "$raw/excalidraw/excalidraw/$EXCALIDRAW_COMMIT/LICENSE"
+for file in libraries.json stats.json LICENSE; do
+  curl -sfL -o "$downloads/$file" "$raw/excalidraw/excalidraw-libraries/$LIBRARIES_COMMIT/$file"
+done
+
+node --input-type=module - "$downloads" "$out" <<EOF
+import fs from "node:fs";
+import path from "node:path";
+
+const [downloads, out] = process.argv.slice(2);
+const read = (file) => fs.readFileSync(path.join(downloads, file), "utf8");
+
+// Libraries are published under the repository's licence unless they declare their own.
+if (!read("LICENSE").startsWith("MIT License")) {
+  throw new Error("excalidraw-libraries is no longer MIT licensed");
+}
+const stats = JSON.parse(read("stats.json"));
+const downloadsOf = (library) =>
+  stats[library.source.replace(/\.excalidrawlib$/, "").replaceAll("/", "-").toLowerCase()]?.total ?? 0;
+const libraries = JSON.parse(read("libraries.json")).sort((a, b) => downloadsOf(b) - downloadsOf(a));
+
+const chosen = [];
+const skipped = [];
+for (const library of libraries) {
+  if (chosen.length === $LIBRARY_COUNT) break;
+  const url = "$raw/excalidraw/excalidraw-libraries/$LIBRARIES_COMMIT/libraries/" + library.source;
+  const response = await fetch(url);
+  if (!response.ok) {
+    skipped.push(library.name + " (missing)");
+    continue;
+  }
+  const data = await response.json();
+  const license = library.license ?? data.license ?? "MIT";
+  if (data.type !== "excalidrawlib" || license !== "MIT") {
+    skipped.push(library.name + " (" + license + ")");
+    continue;
+  }
+  const text = JSON.stringify(data);
+  if (text.length > $LIBRARY_MAX_BYTES) {
+    skipped.push(library.name + " (" + text.length + " bytes)");
+    continue;
+  }
+  chosen.push({
+    name: library.name,
+    authors: library.authors.map((author) => author.name),
+    file: library.source.replaceAll("/", "-").toLowerCase(),
+    license,
+    text,
+  });
+}
+// Over budget: drop the least popular.
+let total = chosen.reduce((sum, library) => sum + library.text.length, 0);
+while (total > $LIBRARY_BUDGET_BYTES) {
+  const dropped = chosen.pop();
+  skipped.push(dropped.name + " (over budget)");
+  total -= dropped.text.length;
+}
+for (const library of chosen) {
+  fs.writeFileSync(path.join(out, "libraries", library.file), library.text);
+}
+
+fs.writeFileSync(
+  path.join(out, "libraries", "index.json"),
+  JSON.stringify(chosen.map(({ name, authors, file, license }) => ({ name, authors, file, license })), null, 2) + "\n",
+);
+
+const rows = chosen.map((library) => "| " + library.name + " | " + library.authors.join(", ") + " | " + library.license + " |");
+fs.writeFileSync(
+  path.join(out, "THIRD_PARTY.md"),
+  [
+    "# Third-party software in Photon's Excalidraw editor",
+    "",
+    "- Excalidraw (@excalidraw/excalidraw 0.18.1), MIT, see LICENSE. Its npm dependencies are bundled under their own licences.",
+    "- React and React DOM, MIT.",
+    "- Fonts shipped by Excalidraw: Excalifont, Virgil, Nunito, Lilita One, Cascadia Code, Liberation Sans and Assistant (SIL Open Font License 1.1), Comic Shanns (MIT).",
+    "",
+    "## Community libraries",
+    "",
+    "From excalidraw-libraries at commit $LIBRARIES_COMMIT, published under that repository's MIT licence.",
+    "",
+    "| Library | Authors | Licence |",
+    "| --- | --- | --- |",
+    ...rows,
+    "",
+  ].join("\n"),
+);
+
+console.log("libraries: " + chosen.length + ", " + total + " bytes");
+console.log("skipped: " + skipped.join("; "));
+EOF
+
+du -sh "$out" "$out/libraries"

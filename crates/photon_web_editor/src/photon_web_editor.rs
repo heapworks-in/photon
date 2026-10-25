@@ -1,4 +1,6 @@
 mod document;
+#[cfg(test)]
+mod excalidraw;
 mod extensions;
 mod lifecycle;
 #[cfg(target_os = "macos")]

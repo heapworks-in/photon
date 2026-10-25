@@ -62,3 +62,6 @@ crates/docs_preprocessor/actions.json
 
 .local*
 .cache
+# photon: the Excalidraw editor build; its output is committed under assets/web_editors
+/extensions/photon-excalidraw/node_modules/
+/extensions/photon-excalidraw/dist/

@@ -13857,6 +13857,7 @@ dependencies = [
  "theme",
  "theme_settings",
  "thiserror 2.0.17",
+ "toml 0.9.8",
  "ui",
  "urlencoding",
  "util",

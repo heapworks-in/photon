@@ -54,4 +54,5 @@ settings = { workspace = true, features = ["test-support"] }
 smol.workspace = true
 tempfile.workspace = true
 theme_settings.workspace = true
+toml.workspace = true
 workspace = { workspace = true, features = ["test-support"] }
