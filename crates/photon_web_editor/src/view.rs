@@ -123,9 +123,19 @@ impl WebEditorView {
             .is_none()
     }
 
+    /// The native view draws over everything in the window, so an error label is only seen
+    /// while it is off screen.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn shows_live_page(&self, focused: bool) -> bool {
+        focused && self.error.is_none()
+    }
+
     pub fn set_page(&mut self, page: Option<Rc<dyn PageConnection>>) {
         self.page = page;
         self.page_text = None;
+        // Errors come from the page; without this a tab whose page was dropped would keep its
+        // error and never show a page again.
+        self.error = None;
         // Dropping the senders lets pending saves go ahead with what the buffer has.
         self.pending_flushes.clear();
     }
@@ -1403,6 +1413,28 @@ mod tests {
         });
         send(&view, changed("from a mismatched page"), cx);
         assert!(!view.read_with(cx, |view, cx| view.is_dirty(cx)));
+    }
+
+    // The native view draws over everything, so an error label is only seen once it is gone.
+    #[gpui::test]
+    async fn an_error_takes_the_live_page_off_screen(cx: &mut TestAppContext) {
+        let (_fs, _project, view, _page, cx) = open_view("{}", cx).await;
+        send(&view, ready(), cx);
+        assert!(view.read_with(cx, |view, _| view.shows_live_page(true)));
+        assert!(!view.read_with(cx, |view, _| view.shows_live_page(false)));
+
+        send(&view, FromPage::Ready { version: 2 }, cx);
+        assert!(
+            !view.read_with(cx, |view, _| view.shows_live_page(true)),
+            "a focused tab with an error shows the error, not the page"
+        );
+
+        // A dropped page takes its error with it, so the next page gets a fresh start.
+        view.update(cx, |view, _| view.set_page(None));
+        view.read_with(cx, |view, _| {
+            assert!(view.error.is_none());
+            assert!(view.shows_live_page(true));
+        });
     }
 
     fn uninstall_built_in(cx: &mut VisualTestContext) {

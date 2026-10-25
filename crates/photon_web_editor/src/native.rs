@@ -400,7 +400,7 @@ fn on_frame(
     window: &mut Window,
     cx: &mut Context<WebEditorView>,
 ) {
-    let focused = view.focus_handle(cx).contains_focused(window, cx);
+    let focused = view.shows_live_page(view.focus_handle(cx).contains_focused(window, cx));
     let now = Instant::now();
     let mut action = view.native.lifecycle.on_frame(visible, focused, now);
     if action == Action::Create {
@@ -431,6 +431,7 @@ fn on_frame(
         Action::Drop => {
             view.native.page = None;
             view.set_page(None);
+            cx.notify();
         }
         Action::None | Action::Create => {}
     }
