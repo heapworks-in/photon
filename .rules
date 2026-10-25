@@ -151,6 +151,10 @@ Photon is a fork of Zed. Keep upstream merges cheap:
 * **Look and behave like Zed.** A Photon feature should look as if Zed shipped it. Build it from Zed's
   existing components and patterns (`ContextMenu`, `PopoverMenu`, toggleable menu entries, `Checkbox`,
   `Label` sizes and colours, notifications, settings) before inventing new UI.
+* **Never resource hungry.** Write the most efficient code that does the job: no work at idle, no
+  polling where an event exists, nothing loaded or spawned until it's used, and nothing kept alive
+  after it's closed. Prefer one shared process or cache over one per tab. Measure memory and CPU for
+  anything that runs in the background, and keep the lean baseline (`tooling/photon-perf`) green.
 * **Keep controls few.** Group related options in one menu instead of adding buttons. Configure through
   `settings.json`, like Zed does.
 * **No Zed in anything a user sees**: UI text, tooltips, settings descriptions, menus, errors, docs.
