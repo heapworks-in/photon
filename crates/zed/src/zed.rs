@@ -3904,18 +3904,36 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
         assert_eq!(active_tabs(cx), ["Onboarding"]);
-        let window = cx.update(|cx| cx.windows()[0]);
+        // Another view (the agent panel, say) can hold focus; the button must still work.
+        let window = cx
+            .update(|cx| cx.windows()[0].downcast::<MultiWorkspace>())
+            .unwrap();
+        window.update(cx, |_, window, cx| window.blur(cx)).unwrap();
+        let mut window_cx = VisualTestContext::from_window(window.into(), cx);
+        window_cx.run_until_parked();
+        let bounds = window_cx
+            .debug_bounds("onboarding-finish")
+            .expect("Finish Setup is drawn");
+        window_cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
         window
-            .update(cx, |_, window, cx| {
-                window.dispatch_action(onboarding::Finish.boxed_clone(), cx)
+            .update(cx, |multi_workspace, _, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
+                    assert!(
+                        workspace
+                            .items(cx)
+                            .all(|item| item.tab_content_text(0, cx) != "Onboarding"),
+                        "Finish Setup closes onboarding"
+                    );
+                    assert!(
+                        workspace
+                            .active_item_as::<terminal_view::TerminalView>(cx)
+                            .is_some(),
+                        "Finish Setup leaves you in a terminal, like any Photon launch"
+                    );
+                });
             })
             .unwrap();
-        cx.run_until_parked();
-        assert_eq!(
-            active_tabs(cx),
-            ["Welcome"],
-            "Finish Setup goes to the welcome page"
-        );
 
         cx.update(|cx| {
             for window in cx.windows() {

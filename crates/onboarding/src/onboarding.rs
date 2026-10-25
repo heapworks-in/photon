@@ -283,7 +283,7 @@ impl Onboarding {
 
     fn on_finish(_: &Finish, _: &mut Window, cx: &mut App) {
         telemetry::event!("Finish Setup");
-        go_to_welcome_page(cx);
+        finish_into_terminal(cx);
     }
 
     fn handle_sign_in(&mut self, _: &SignIn, window: &mut Window, cx: &mut Context<Self>) {
@@ -371,7 +371,8 @@ impl Render for Onboarding {
                                                     ),
                                             ),
                                     )
-                                    .child({
+                                    // photon: lets tests click Finish Setup.
+                                    .child(div().debug_selector(|| "onboarding-finish".into()).child({
                                         Button::new("finish_setup", "Finish Setup")
                                             .style(ButtonStyle::Filled)
                                             .size(ButtonSize::Medium)
@@ -384,7 +385,7 @@ impl Render for Onboarding {
                                             .on_click(|_, window, cx| {
                                                 window.dispatch_action(Finish.boxed_clone(), cx);
                                             })
-                                    }),
+                                    })),
                             )
                             .child(Divider::horizontal().color(ui::DividerColor::BorderVariant))
                             .child(self.render_page(cx)),
@@ -447,6 +448,34 @@ impl Item for Onboarding {
     }
 }
 
+// photon: Photon is terminal-first, so finishing onboarding closes it (in whichever pane it sits)
+// and opens a terminal, as every other launch does. The welcome page stays one command away.
+fn finish_into_terminal(cx: &mut App) {
+    with_active_or_new_workspace(cx, |workspace, window, cx| {
+        for pane in workspace.panes().to_vec() {
+            let onboarding: Vec<_> = pane
+                .read(cx)
+                .items()
+                .filter(|item| item.downcast::<Onboarding>().is_some())
+                .map(|item| item.item_id())
+                .collect();
+            pane.update(cx, |pane, cx| {
+                for item_id in onboarding {
+                    pane.remove_item(item_id, false, false, window, cx);
+                }
+            });
+        }
+        if workspace.items(cx).next().is_none() {
+            // The terminal action is handled by the workspace, which is being updated here.
+            let focus = workspace.focus_handle(cx);
+            window.defer(cx, move |window, cx| {
+                focus.dispatch_action(&workspace::NewCenterTerminal::default(), window, cx);
+            });
+        }
+    });
+}
+
+#[allow(dead_code)] // photon: replaced by `finish_into_terminal`; kept so upstream merges stay small
 fn go_to_welcome_page(cx: &mut App) {
     with_active_or_new_workspace(cx, |workspace, window, cx| {
         let Some((onboarding_id, onboarding_idx)) = workspace
