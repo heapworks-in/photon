@@ -209,11 +209,14 @@ fn read_global_last_used_agent(kvp: &KeyValueStore) -> Option<Agent> {
         .map(|entry| entry.agent)
         // photon: a fresh install opens Claude Code (the user's subscription) instead of Zed's
         // hosted agent.
-        .or_else(|| {
-            Some(Agent::Custom {
-                id: agent_servers::CLAUDE_AGENT_ID.into(),
-            })
-        })
+        .or_else(|| Some(photon_default_agent()))
+}
+
+// photon: the built-in agent is off; agents run over ACP, Claude Code first.
+fn photon_default_agent() -> Agent {
+    Agent::Custom {
+        id: agent_servers::CLAUDE_AGENT_ID.into(),
+    }
 }
 
 async fn write_global_last_used_agent(kvp: KeyValueStore, agent: Agent) {
@@ -1571,7 +1574,7 @@ impl AgentPanel {
             pending_serialization: None,
             new_user_onboarding: onboarding,
             thread_store,
-            selected_agent: Agent::default(),
+            selected_agent: photon_default_agent(), // photon: the built-in agent is off
             _thread_view_subscription: None,
             _active_thread_focus_subscription: None,
             new_user_onboarding_upsell_dismissed: AtomicBool::new(OnboardingUpsell::dismissed(cx)),
@@ -1650,6 +1653,10 @@ impl AgentPanel {
     }
 
     fn should_restore_agent(&self, agent: &Agent, cx: &App) -> bool {
+        // photon: the built-in agent is off, so a saved choice of it falls back to Claude Code.
+        if agent.is_native() {
+            return self.project.read(cx).is_via_collab();
+        }
         let Agent::Custom { id } = agent else {
             return true;
         };
@@ -1666,7 +1673,7 @@ impl AgentPanel {
         if self.should_restore_agent(&agent, cx) {
             agent
         } else {
-            Agent::NativeAgent
+            photon_default_agent() // photon: the built-in agent is off
         }
     }
 
@@ -5933,37 +5940,41 @@ impl AgentPanel {
             Rc::new(move |window, cx| {
                 Some(ContextMenu::build(window, cx, |menu, _window, cx| {
                     menu.context(focus_handle.clone())
-                        .item(
-                            ContextMenuEntry::new("Photon Agent")
-                                .when(
-                                    !showing_terminal && is_agent_selected(Agent::NativeAgent),
-                                    |this| this.action(Box::new(NewThread)),
-                                )
-                                .icon(IconName::ZedAgent)
-                                .icon_color(Color::Muted)
-                                .handler({
-                                    let workspace = workspace.clone();
-                                    move |window, cx| {
-                                        if let Some(workspace) = workspace.upgrade() {
-                                            workspace.update(cx, |workspace, cx| {
-                                                if let Some(panel) =
-                                                    workspace.panel::<AgentPanel>(cx)
-                                                {
-                                                    panel.update(cx, |panel, cx| {
-                                                        panel.selected_agent = Agent::NativeAgent;
-                                                        panel.activate_new_thread(
-                                                            true,
-                                                            AgentThreadSource::AgentPanel,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    });
-                                                }
-                                            });
+                        // photon: the built-in agent is off; agents run over ACP.
+                        .when(false, |menu| {
+                            menu.item(
+                                ContextMenuEntry::new("Photon Agent")
+                                    .when(
+                                        !showing_terminal && is_agent_selected(Agent::NativeAgent),
+                                        |this| this.action(Box::new(NewThread)),
+                                    )
+                                    .icon(IconName::ZedAgent)
+                                    .icon_color(Color::Muted)
+                                    .handler({
+                                        let workspace = workspace.clone();
+                                        move |window, cx| {
+                                            if let Some(workspace) = workspace.upgrade() {
+                                                workspace.update(cx, |workspace, cx| {
+                                                    if let Some(panel) =
+                                                        workspace.panel::<AgentPanel>(cx)
+                                                    {
+                                                        panel.update(cx, |panel, cx| {
+                                                            panel.selected_agent =
+                                                                Agent::NativeAgent;
+                                                            panel.activate_new_thread(
+                                                                true,
+                                                                AgentThreadSource::AgentPanel,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        });
+                                                    }
+                                                });
+                                            }
                                         }
-                                    }
-                                }),
-                        )
+                                    }),
+                            )
+                        })
                         .when(supports_terminal, |menu| {
                             menu.item(
                                 ContextMenuEntry::new("Terminal")
@@ -12427,6 +12438,61 @@ mod tests {
         });
     }
 
+    // photon: the built-in agent is off.
+    #[gpui::test]
+    async fn photon_built_in_agent_is_not_offered_or_restored(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+            cx.set_global(db::AppDatabase::test_new());
+        });
+        let kvp = cx.update(|cx| KeyValueStore::global(cx));
+        write_global_last_used_agent(kvp, Agent::NativeAgent).await;
+
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        fs.insert_tree("/project", json!({ "file.txt": "" })).await;
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+        workspace.update(cx, |workspace, _cx| workspace.set_random_database_id());
+        let mut cx = VisualTestContext::from_window(multi_workspace.into(), cx);
+
+        let async_cx = cx.update(|window, cx| window.to_async(cx));
+        let panel = AgentPanel::load(workspace.downgrade(), async_cx)
+            .await
+            .expect("panel load should succeed");
+        cx.run_until_parked();
+        panel.read_with(&cx, |panel, _| {
+            assert_eq!(
+                panel.selected_agent,
+                photon_default_agent(),
+                "a saved choice of the built-in agent falls back to Claude Code"
+            );
+        });
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.focus_panel::<AgentPanel>(window, cx);
+        });
+        cx.run_until_parked();
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.toggle_new_thread_menu(&ToggleNewThreadMenu, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("MENU_ITEM-Terminal").is_some(),
+            "the menu is open"
+        );
+        assert!(cx.debug_bounds("MENU_ITEM-Photon Agent").is_none());
+    }
+
     #[gpui::test]
     async fn test_new_workspace_ignores_uninstalled_global_last_used_agent(
         cx: &mut TestAppContext,
@@ -12475,7 +12541,7 @@ mod tests {
         panel.read_with(cx, |panel, _cx| {
             assert_eq!(
                 panel.selected_agent,
-                Agent::NativeAgent,
+                photon_default_agent(), // photon: the built-in agent is off
                 "a workspace should not inherit a last-used agent that is no longer installed"
             );
         });
@@ -12599,7 +12665,7 @@ mod tests {
         panel_b.read_with(cx, |panel, _cx| {
             assert_eq!(
                 panel.selected_agent,
-                Agent::NativeAgent,
+                photon_default_agent(), // photon: the built-in agent is off
                 "a newly opened project should not inherit an uninstalled agent"
             );
         });
@@ -12770,12 +12836,12 @@ mod tests {
             );
             assert_eq!(
                 *draft.read(cx).agent_key(),
-                Agent::NativeAgent,
+                photon_default_agent(), // photon: the built-in agent is off
                 "a restored draft should drop an uninstalled agent"
             );
             assert_eq!(
                 panel.selected_agent,
-                Agent::NativeAgent,
+                photon_default_agent(), // photon: the built-in agent is off
                 "the panel should not stay selected on the uninstalled agent"
             );
         });
@@ -13039,9 +13105,9 @@ mod tests {
 
         let first_draft_id = panel.read_with(cx, |panel, cx| {
             assert!(panel.draft_thread.is_some());
-            assert_eq!(panel.selected_agent, Agent::NativeAgent);
+            assert_eq!(panel.selected_agent, photon_default_agent()); // photon: the built-in agent is off
             let draft = panel.draft_thread.as_ref().unwrap();
-            assert_eq!(*draft.read(cx).agent_key(), Agent::NativeAgent);
+            assert_eq!(*draft.read(cx).agent_key(), photon_default_agent()); // photon: the built-in agent is off
             draft.entity_id()
         });
 
@@ -14667,7 +14733,7 @@ mod tests {
             let draft = panel.draft_thread.as_ref().expect("draft should exist");
             assert_eq!(
                 *draft.read(cx).agent_key(),
-                Agent::NativeAgent,
+                photon_default_agent(), // photon: the built-in agent is off
                 "destination draft should start on the default agent"
             );
             draft.entity_id()

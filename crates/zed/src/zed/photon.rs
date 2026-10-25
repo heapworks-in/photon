@@ -178,6 +178,8 @@ pub fn hide_offline_actions(cx: &mut App) {
             std::any::TypeId::of::<zed_actions::OpenTelemetryLog>(),
             std::any::TypeId::of::<super::OpenStatusPage>(),
             std::any::TypeId::of::<super::GetMerch>(),
+            // The built-in agent is off; agents run over ACP.
+            std::any::TypeId::of::<agent_ui::NewNativeAgentThreadFromSummary>(),
         ]);
     });
 }
@@ -423,6 +425,10 @@ mod tests {
             assert!(filter.is_hidden(&zed_actions::OpenAccountSettings));
             assert!(filter.is_hidden(&workspace::NewCenterTerminal::default()));
             assert!(!filter.is_hidden(&workspace::NewTerminal::default()));
+            let from_summary: agent_ui::NewNativeAgentThreadFromSummary =
+                serde_json::from_value(serde_json::json!({ "from_session_id": "session" }))
+                    .expect("action");
+            assert!(filter.is_hidden(&from_summary));
         });
     }
 
