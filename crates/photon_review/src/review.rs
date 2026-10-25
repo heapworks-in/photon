@@ -15,10 +15,10 @@ use editor::{
 };
 use futures::future::{FutureExt as _, Shared, join_all, try_join_all};
 use gpui::{
-    Action as _, AnyWindowHandle, App, AsyncApp, AsyncWindowContext, BackgroundExecutor,
-    ClickEvent, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Global,
-    HighlightStyle, MouseButton, PromptLevel, Render, SharedString, Stateful, StyledText,
-    Subscription, Task, WeakEntity, Window, actions, rgb,
+    Action as _, AnyWindowHandle, App, AsyncApp, AsyncWindowContext, BackgroundExecutor, Context,
+    DismissEvent, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Global, MouseButton,
+    PromptLevel, Render, ScrollHandle, SharedString, Stateful, Subscription, Task, WeakEntity,
+    Window, actions, rgb,
 };
 use language::{Buffer, Capability, Point};
 use multi_buffer::{ToPoint as _, build_excerpt_ranges};
@@ -28,7 +28,10 @@ use project::{
     lsp_store::OpenLspBufferHandle,
     trusted_worktrees::{TrustedWorktrees, TrustedWorktreesEvent},
 };
-use ui::{Checkbox, Disclosure, TintColor, ToggleState, Tooltip, prelude::*};
+use ui::{
+    Checkbox, Disclosure, Indicator, TintColor, ToggleState, Tooltip, VisibleOnHover as _,
+    prelude::*,
+};
 use util::{ResultExt as _, rel_path::RelPath};
 use workspace::{
     AppState, Item, OpenOptions, Toast, ToggleWorktreeSecurity, Workspace, WorkspaceDb,
@@ -90,9 +93,6 @@ const INTERRUPTED_NOTE: &str =
     "May already be posted: a submit was interrupted. Include it again or delete it.";
 const EARLIER_VERSION_NOTE: &str = "An earlier version of this comment was posted. Include this \
      version too, or delete it.";
-const IMPACT_LEGEND: &str = "Every caller in the repo, not just the diff. Red: the signature \
-     changed and this caller wasn't updated. Amber: the body changed and this caller wasn't \
-     touched, so check it.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContextState {
@@ -108,6 +108,8 @@ pub struct ImpactRow {
 }
 
 struct UnchangedContext;
+struct NoteToast;
+struct AgentReviewToast;
 
 /// The database side of one draft. Writes run one at a time; a newer body replaces a pending
 /// one, so the newest text always lands last without a timer.
@@ -259,8 +261,9 @@ pub struct ReviewItem {
     shown_context: Vec<ContextExcerpt>,
     expanded_context: HashSet<(EntityId, Point)>,
     label_blocks: HashSet<CustomBlockId>,
-    impact_function: Option<String>,
-    impact: Vec<ImpactRow>,
+    /// Each changed function's callers, by function index, worked out once the call data
+    /// arrives.
+    callers: Vec<Vec<ImpactRow>>,
     database: ReviewDb,
     commentable: HashMap<String, Vec<RangeInclusive<u32>>>,
     drafts: Vec<Draft>,
@@ -294,6 +297,13 @@ pub struct ReviewItem {
     hide_moves: bool,
     hide_generated: bool,
     checklist_open: bool,
+    photon_checked_open: bool,
+    author_boxes_open: bool,
+    /// Whether the View menu was opened, so a newly offered entry in it can be pointed out.
+    view_menu_seen: bool,
+    show_hidden: bool,
+    verdict: ReviewEvent,
+    map_scroll: ScrollHandle,
     /// Each file's real base text, kept while the diff shows a simplified one.
     original_bases: HashMap<EntityId, Option<String>>,
     moves: Vec<Move>,
@@ -765,7 +775,9 @@ fn draft_renderer(
         let edit_item = item.clone();
         let delete_item = item.clone();
         let focused_border = block.app.theme().colors().border_focused;
+        let group = SharedString::from(format!("photon-review-draft-{local_id}"));
         comment_card(("photon-review-draft", local_id).into(), block)
+            .group(group.clone())
             .when(composer.is_some(), |this| this.border_color(focused_border))
             .child(
                 h_flex()
@@ -775,7 +787,51 @@ fn draft_renderer(
                         Label::new(format!("· on line {line} · draft"))
                             .size(LabelSize::Small)
                             .color(Color::Muted),
-                    ),
+                    )
+                    .when(composer.is_none(), |this| {
+                        this.child(
+                            h_flex()
+                                .ml_auto()
+                                .child(
+                                    div()
+                                        .debug_selector(move || {
+                                            format!("photon-review-draft-edit-{local_id}")
+                                        })
+                                        .child(
+                                            IconButton::new("edit", IconName::Pencil)
+                                                .icon_size(IconSize::Small)
+                                                .visible_on_hover(group.clone())
+                                                .tooltip(Tooltip::text("Edit"))
+                                                .on_click(move |_, window, cx| {
+                                                    edit_item
+                                                        .update(cx, |item, cx| {
+                                                            item.edit_draft(local_id, window, cx)
+                                                        })
+                                                        .log_err();
+                                                }),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .debug_selector(move || {
+                                            format!("photon-review-draft-delete-{local_id}")
+                                        })
+                                        .child(
+                                            IconButton::new("delete", IconName::Trash)
+                                                .icon_size(IconSize::Small)
+                                                .visible_on_hover(group.clone())
+                                                .tooltip(Tooltip::text("Delete"))
+                                                .on_click(move |_, window, cx| {
+                                                    delete_item
+                                                        .update(cx, |item, cx| {
+                                                            item.cancel_draft(local_id, window, cx)
+                                                        })
+                                                        .log_err();
+                                                }),
+                                        ),
+                                ),
+                        )
+                    }),
             )
             .map(|this| match &composer {
                 Some(editor) => this.child(editor.clone()),
@@ -839,7 +895,7 @@ fn draft_renderer(
                         .when(can_suggest, |this| {
                             this.child(
                                 crate::button("suggest", "Suggest change")
-                                    .style(ButtonStyle::Outlined)
+                                    .style(ButtonStyle::Subtle)
                                     .tooltip(Tooltip::text(
                                         "Adds the lines as a suggestion the author can commit",
                                     ))
@@ -854,37 +910,9 @@ fn draft_renderer(
                         })
                         .child(
                             crate::button("cancel", "Cancel")
-                                .style(ButtonStyle::Outlined)
+                                .style(ButtonStyle::Subtle)
                                 .on_click(move |_, window, cx| {
                                     cancel_item
-                                        .update(cx, |item, cx| {
-                                            item.cancel_draft(local_id, window, cx)
-                                        })
-                                        .log_err();
-                                }),
-                        ),
-                )
-            })
-            .when(composer.is_none(), |this| {
-                this.child(
-                    h_flex()
-                        .gap_1()
-                        .child(
-                            crate::button("edit", "Edit")
-                                .style(ButtonStyle::Outlined)
-                                .on_click(move |_, window, cx| {
-                                    edit_item
-                                        .update(cx, |item, cx| {
-                                            item.edit_draft(local_id, window, cx)
-                                        })
-                                        .log_err();
-                                }),
-                        )
-                        .child(
-                            crate::button("delete", "Delete")
-                                .style(ButtonStyle::Outlined)
-                                .on_click(move |_, window, cx| {
-                                    delete_item
                                         .update(cx, |item, cx| {
                                             item.cancel_draft(local_id, window, cx)
                                         })
@@ -980,7 +1008,7 @@ fn thread_renderer(
                     )
                     .child(
                         crate::button("resolve", if resolved { "Unresolve" } else { "Resolve" })
-                            .style(ButtonStyle::Outlined)
+                            .style(ButtonStyle::Subtle)
                             .disabled(resolve_pending)
                             .on_click(move |_, _, cx| {
                                 resolve_item
@@ -1147,11 +1175,7 @@ impl ReviewItem {
             editor
         });
         let (lsp_handles, changed_rows) = index_files(&project, &files, cx);
-        let mut subscriptions = vec![cx.subscribe(&editor, |this, _, event: &EditorEvent, cx| {
-            if matches!(event, EditorEvent::SelectionsChanged { .. }) {
-                this.update_impact(cx);
-            }
-        })];
+        let mut subscriptions = Vec::new();
         if let Some(trusted_worktrees) = TrustedWorktrees::try_get_global(cx) {
             subscriptions.push(cx.subscribe(
                 &trusted_worktrees,
@@ -1258,8 +1282,7 @@ impl ReviewItem {
             shown_context: Vec::new(),
             expanded_context: HashSet::new(),
             label_blocks: HashSet::new(),
-            impact_function: None,
-            impact: Vec::new(),
+            callers: Vec::new(),
             database,
             commentable,
             drafts: Vec::new(),
@@ -1289,7 +1312,13 @@ impl ReviewItem {
             hide_whitespace: false,
             hide_moves: false,
             hide_generated: false,
-            checklist_open: true,
+            checklist_open: false,
+            photon_checked_open: false,
+            author_boxes_open: false,
+            view_menu_seen: false,
+            show_hidden: false,
+            verdict: ReviewEvent::Comment,
+            map_scroll: ScrollHandle::new(),
             original_bases: HashMap::new(),
             moves: Vec::new(),
             _diff_view_task: Task::ready(()),
@@ -1351,6 +1380,7 @@ impl ReviewItem {
         if self.loading_since_review {
             self.loading_since_review = false;
             self._since_review_task = Task::ready(());
+            self.dismiss_toast::<NoteToast>(cx);
             cx.notify();
             return;
         }
@@ -1371,6 +1401,22 @@ impl ReviewItem {
         let url = fetch_url(&repo_id(&self.detail.summary));
         let project = self.project.clone();
         self.loading_since_review = true;
+        let item = cx.weak_entity();
+        self.show_toast(
+            Toast::new(
+                NotificationId::unique::<NoteToast>(),
+                "Loading the changes since your review…",
+            )
+            .on_click("Cancel", move |window, cx| {
+                item.update(cx, |item, cx| {
+                    if item.loading_since_review {
+                        item.toggle_changes_since_review(&ToggleChangesSinceReview, window, cx);
+                    }
+                })
+                .log_err();
+            }),
+            cx,
+        );
         self._since_review_task = cx.spawn(async move |this, cx| {
             let outcome = cx
                 .background_spawn({
@@ -1409,14 +1455,12 @@ impl ReviewItem {
                 this.loading_since_review = false;
                 match loaded {
                     Ok(files) => {
+                        this.dismiss_toast::<NoteToast>(cx);
                         let full = std::mem::take(&mut this.files);
                         this.full_files = Some(full);
                         this.set_files(files, cx);
                     }
-                    Err(message) => {
-                        this.since_review_note = Some(message.into());
-                        cx.notify();
-                    }
+                    Err(message) => this.set_note(message.into(), cx),
                 }
             })
             .log_err();
@@ -1529,6 +1573,7 @@ impl ReviewItem {
         self.analyses = Vec::new();
         self.functions = Vec::new();
         self.contexts = Vec::new();
+        self.callers = Vec::new();
         self.steps = Vec::new();
         self.selected = 0;
         self.expanded_context.clear();
@@ -2198,21 +2243,20 @@ impl ReviewItem {
         if self.agent_reviewing {
             self.agent_reviewing = false;
             self._agent_review_task = Task::ready(());
-            self.agent_review_note = Some(("Agent pre-review cancelled.".into(), Color::Muted));
-            cx.notify();
+            self.set_agent_note("Agent pre-review cancelled.".into(), Color::Muted, cx);
             return;
         }
         if review_agent(cx).is_none() || self.workspace.is_none() {
             return;
         }
         if self.worktree_restricted(cx) {
-            self.agent_review_note = Some((
+            self.set_agent_note(
                 "The agent works in this PR's checkout: trust it first, and only if you trust the author."
                     .into(),
                 Color::Warning,
-            ));
+                cx,
+            );
             window.dispatch_action(ToggleWorktreeSecurity.boxed_clone(), cx);
-            cx.notify();
             return;
         }
         let config_files: Vec<String> =
@@ -2262,18 +2306,18 @@ impl ReviewItem {
             cx,
         );
         self.agent_reviewing = true;
-        self.agent_review_note = Some((
+        self.set_agent_note(
             "The agent is reviewing; follow it in the agent panel.".into(),
             Color::Muted,
-        ));
-        cx.notify();
+            cx,
+        );
         self._agent_review_task = cx.spawn(async move |this, cx| {
             let comments = reply
                 .await
                 .and_then(|reply| parse_agent_comments(&reply));
             this.update(cx, |this, cx| {
                 this.agent_reviewing = false;
-                this.agent_review_note = Some(match comments {
+                let (note, color) = match comments {
                     Ok(comments) if comments.is_empty() => {
                         ("The agent found nothing to comment on.".into(), Color::Muted)
                     }
@@ -2295,8 +2339,8 @@ impl ReviewItem {
                         )
                     }
                     Err(error) => (format!("{error:#}").into(), Color::Error),
-                });
-                cx.notify();
+                };
+                this.set_agent_note(note, color, cx);
             })
             .log_err();
         });
@@ -2304,6 +2348,76 @@ impl ReviewItem {
 
     pub fn agent_review_note(&self) -> Option<&(SharedString, Color)> {
         self.agent_review_note.as_ref()
+    }
+
+    /// The agent's progress and result go to a toast, so nothing in the tab changes width while
+    /// it runs. While it runs, the toast offers to cancel it.
+    fn set_agent_note(&mut self, note: SharedString, color: Color, cx: &mut Context<Self>) {
+        self.agent_review_note = Some((note.clone(), color));
+        let mut toast = Toast::new(
+            NotificationId::unique::<AgentReviewToast>(),
+            note.to_string(),
+        );
+        if self.agent_reviewing {
+            let item = cx.weak_entity();
+            toast = toast.on_click("Cancel", move |window, cx| {
+                item.update(cx, |item, cx| {
+                    if item.agent_reviewing {
+                        item.start_agent_review(window, cx);
+                    }
+                })
+                .log_err();
+            });
+        } else if !matches!(color, Color::Error | Color::Warning) {
+            toast = toast.autohide();
+        }
+        self.show_toast(toast, cx);
+        cx.notify();
+    }
+
+    fn set_note(&mut self, note: SharedString, cx: &mut Context<Self>) {
+        self.since_review_note = Some(note.clone());
+        self.show_toast(
+            Toast::new(NotificationId::unique::<NoteToast>(), note.to_string()),
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn show_toast(&self, toast: Toast, cx: &mut Context<Self>) {
+        if let Some(workspace) = self.workspace.as_ref().and_then(WeakEntity::upgrade) {
+            workspace.update(cx, |workspace, cx| workspace.show_toast(toast, cx));
+        }
+    }
+
+    fn dismiss_toast<T: 'static>(&self, cx: &mut Context<Self>) {
+        if let Some(workspace) = self.workspace.as_ref().and_then(WeakEntity::upgrade) {
+            workspace.update(cx, |workspace, cx| {
+                workspace.dismiss_toast(&NotificationId::unique::<T>(), cx)
+            });
+        }
+    }
+
+    fn run_locally(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.as_ref().and_then(WeakEntity::upgrade) else {
+            return;
+        };
+        let summary = self.detail.summary.clone();
+        workspace.update(cx, |workspace, cx| {
+            crate::run_locally(summary, workspace, window, cx).detach_and_log_err(cx)
+        });
+    }
+
+    /// After a submit from the popover: what came of it, as a toast.
+    fn report_submitted(&mut self, cx: &mut Context<Self>) {
+        let message = self
+            .submit_note
+            .clone()
+            .unwrap_or_else(|| "Review posted.".into());
+        self.show_toast(
+            Toast::new(NotificationId::unique::<NoteToast>(), message.to_string()).autohide(),
+            cx,
+        );
     }
 
     /// A draft on the comment's line of the head, or a general draft naming the place when the
@@ -2858,14 +2972,12 @@ impl ReviewItem {
         };
         // The base text here is the reviewed commit's, so its line numbers are not GitHub's.
         if self.full_files.is_some() && lines.side == Side::Left {
-            self.since_review_note = Some(LEFT_COMMENT_NOTE.into());
-            cx.notify();
+            self.set_note(LEFT_COMMENT_NOTE.into(), cx);
             return;
         }
         // The simplified base's line numbers are not the old file's.
         if self.diff_simplified() && lines.side == Side::Left {
-            self.since_review_note = Some(SIMPLIFIED_LEFT_COMMENT_NOTE.into());
-            cx.notify();
+            self.set_note(SIMPLIFIED_LEFT_COMMENT_NOTE.into(), cx);
             return;
         }
         let draft = Draft {
@@ -3068,7 +3180,7 @@ impl ReviewItem {
             let body_rows = draft.body.lines().count().max(1) as u32;
             let height = match view.composer {
                 Some(_) => COMPOSER_MAX_LINES + 4,
-                None => 3 + body_rows,
+                None => 2 + body_rows,
             } + if note.is_some() { 2 } else { 0 }
                 + if posted_note.is_some() { 2 } else { 0 };
             blocks.push(BlockProperties {
@@ -3167,10 +3279,6 @@ impl ReviewItem {
         &self.editor
     }
 
-    pub fn impact(&self) -> &[ImpactRow] {
-        &self.impact
-    }
-
     pub fn expand_context(&mut self, excerpt_index: usize, cx: &mut Context<Self>) {
         let Some(excerpt) = self.shown_context.get(excerpt_index) else {
             return;
@@ -3243,6 +3351,7 @@ impl ReviewItem {
             })
             .collect();
         self.contexts = vec![None; self.functions.len()];
+        self.callers = Vec::new();
         self.analyses = analyses;
         self.rebuild_map(&[], cx);
     }
@@ -3286,8 +3395,8 @@ impl ReviewItem {
         };
         self.contexts = results.into_iter().map(Result::ok).collect();
         let edges = call_edges(&self.functions, &self.contexts, cx);
+        self.compute_callers(cx);
         self.rebuild_map(&edges, cx);
-        self.update_impact(cx);
     }
 
     /// A generated file, or one whose every change is whitespace or moved code, while those are
@@ -3521,59 +3630,54 @@ impl ReviewItem {
         self.show_comments(cx);
     }
 
-    fn update_impact(&mut self, cx: &mut Context<Self>) {
-        let head = self.editor.read(cx).selections.newest_anchor().head();
-        let target = self.multibuffer.read(cx).point_to_buffer_point(head, cx);
-        let function_index = target.and_then(|(buffer, point)| {
-            self.functions
-                .iter()
-                .enumerate()
-                .filter(|(_, function)| {
-                    buffer_for(&self.files, &function.path) == Some(&buffer)
-                        && function.range.start <= point
-                        && point <= function.range.end
-                })
-                .max_by_key(|(_, function)| function.range.start)
-                .map(|(index, _)| index)
-        });
-        let function = function_index.and_then(|index| self.functions.get(index));
-        self.impact_function = function.map(|function| function.name.clone());
-        let context = function_index
-            .and_then(|index| self.contexts.get(index))
-            .and_then(Option::as_ref);
-        self.impact = match (function, context) {
-            (Some(function), Some(context)) => context
-                .callers
-                .iter()
-                .map(|call| {
-                    let path = buffer_path(&call.from.buffer, cx).unwrap_or_default();
-                    let snapshot = call.from.buffer.read(cx).snapshot();
-                    let row = call
-                        .from_ranges
-                        .iter()
-                        .map(|location| {
-                            language::ToPoint::to_point(
-                                &location.range.start,
-                                &location.buffer.read(cx).snapshot(),
-                            )
-                            .row
-                        })
-                        .min()
-                        .unwrap_or_else(|| {
-                            language::ToPoint::to_point(&call.from.range.start, &snapshot).row
-                        });
-                    ImpactRow {
-                        location: format!("{path}:{}", row + 1),
-                        mark: classify_caller(
-                            Some(function.change),
-                            caller_touched(call, &self.changed_rows, cx),
-                        ),
-                    }
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
-        cx.notify();
+    fn compute_callers(&mut self, cx: &App) {
+        self.callers = self
+            .functions
+            .iter()
+            .zip(&self.contexts)
+            .map(|(function, context)| {
+                let Some(context) = context else {
+                    return Vec::new();
+                };
+                context
+                    .callers
+                    .iter()
+                    .map(|call| {
+                        let path = buffer_path(&call.from.buffer, cx).unwrap_or_default();
+                        let snapshot = call.from.buffer.read(cx).snapshot();
+                        let row = call
+                            .from_ranges
+                            .iter()
+                            .map(|location| {
+                                language::ToPoint::to_point(
+                                    &location.range.start,
+                                    &location.buffer.read(cx).snapshot(),
+                                )
+                                .row
+                            })
+                            .min()
+                            .unwrap_or_else(|| {
+                                language::ToPoint::to_point(&call.from.range.start, &snapshot).row
+                            });
+                        ImpactRow {
+                            location: format!("{path}:{}", row + 1),
+                            mark: classify_caller(
+                                Some(function.change),
+                                caller_touched(call, &self.changed_rows, cx),
+                            ),
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+    }
+
+    /// Callers of the changed function at `function_index`; empty until the call data arrives.
+    pub fn callers(&self, function_index: usize) -> &[ImpactRow] {
+        self.callers
+            .get(function_index)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
     }
 
     fn progress_text(&self) -> String {
@@ -3582,12 +3686,7 @@ impl ReviewItem {
             .iter()
             .filter(|step| self.step_viewed(step))
             .count();
-        let mut text = format!("{viewed} of {} steps viewed", self.steps.len());
-        let checklist = self.checklist_progress();
-        if checklist.total > 0 {
-            text.push_str(&format!(" · checklist {}", checklist.text()));
-        }
-        text
+        format!("{viewed} of {} steps viewed", self.steps.len())
     }
 
     fn all_files(&self) -> &[LoadedFile] {
@@ -3704,6 +3803,16 @@ impl ReviewItem {
         cx: &mut Context<Self>,
     ) {
         let answer = (self.checklist_answers.get(item_key) != Some(&answer)).then_some(answer);
+        self.set_checklist_answer(item_key, answer, window, cx);
+    }
+
+    pub fn set_checklist_answer(
+        &mut self,
+        item_key: &str,
+        answer: Option<Answer>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match answer {
             Some(answer) => {
                 self.checklist_answers.insert(item_key.to_string(), answer);
@@ -3766,103 +3875,66 @@ impl ReviewItem {
     fn render_header(&self, cx: &Context<Self>) -> impl IntoElement {
         let summary = &self.detail.summary;
         let checks = match summary.checks {
-            ChecksState::Passing => Some(("checks passing", Color::Success)),
-            ChecksState::Failing => Some(("checks failing", Color::Error)),
-            ChecksState::Pending => Some(("checks pending", Color::Warning)),
+            ChecksState::Passing => Some((IconName::Check, Color::Success, "Checks passing")),
+            ChecksState::Failing => Some((IconName::XCircle, Color::Error, "Checks failing")),
+            ChecksState::Pending => Some((IconName::Circle, Color::Warning, "Checks pending")),
             ChecksState::Unknown => None,
         };
+        let files = self.all_files().len();
         h_flex()
             .gap_2()
             .px_2()
             .py_1()
             .border_b_1()
             .border_color(cx.theme().colors().border)
-            .child(Label::new(format!(
-                "#{} {}",
-                summary.key.number, summary.title
-            )))
             .child(
-                Label::new(format!("{} → {}", summary.author, summary.base_ref))
-                    .size(LabelSize::Small)
-                    .color(Color::Accent),
-            )
-            .children(
-                checks.map(|(text, color)| Label::new(text).size(LabelSize::Small).color(color)),
-            )
-            .child(
-                Label::new(format!(
-                    "{} files · +{} −{}",
-                    self.files.len(),
-                    self.detail.additions,
-                    self.detail.deletions
-                ))
-                .size(LabelSize::Small)
-                .color(Color::Muted),
-            )
-            .child(self.render_view_menu(cx))
-            .when(self.changes_since_review_offered(), |header| {
-                let showing = self.showing_changes_since_review();
-                header.child(
-                    crate::button(
-                        "since-review",
-                        if self.loading_since_review {
-                            "Loading changes… (click to cancel)"
-                        } else {
-                            "Changes since your review"
-                        },
-                    )
-                    .style(ButtonStyle::Outlined)
-                    .toggle_state(showing)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.toggle_changes_since_review(&ToggleChangesSinceReview, window, cx)
-                    })),
-                )
-            })
-            .children(self.since_review_note.clone().map(|note| {
-                Label::new(note)
-                    .size(LabelSize::Small)
-                    .color(Color::Warning)
-            }))
-            .when(review_agent(cx).is_some() && !self.is_own_pr(), |header| {
-                header.child(
-                    crate::button(
-                        "agent-review",
-                        if self.agent_reviewing {
-                            "Agent reviewing… (click to cancel)"
-                        } else {
-                            "Pre-review with agent"
-                        },
-                    )
-                    .style(ButtonStyle::Outlined)
-                    .tooltip(Tooltip::text(
-                        "Your agent reads the PR and leaves draft comments; nothing is posted",
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .child(div().min_w_0().child(
+                        Label::new(format!("#{} {}", summary.key.number, summary.title)).truncate(),
                     ))
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.start_agent_review(window, cx)),
+                    .child(
+                        div().flex_none().child(
+                            Label::new(format!("{} → {}", summary.author, summary.base_ref))
+                                .size(LabelSize::Small)
+                                .color(Color::Accent),
+                        ),
+                    )
+                    .children(checks.map(|(icon, color, text)| {
+                        div()
+                            .id("photon-review-checks")
+                            .flex_none()
+                            .tooltip(Tooltip::text(text))
+                            .child(Icon::new(icon).size(IconSize::Small).color(color))
+                    }))
+                    .child(
+                        ui::DiffStat::new(
+                            "photon-review-diff-stat",
+                            usize::try_from(self.detail.additions).unwrap_or(usize::MAX),
+                            usize::try_from(self.detail.deletions).unwrap_or(usize::MAX),
+                        )
+                        .tooltip(format!(
+                            "{files} file{} changed",
+                            if files == 1 { "" } else { "s" }
+                        )),
                     ),
-                )
-            })
-            .children(
-                self.agent_review_note
-                    .clone()
-                    .map(|(note, color)| Label::new(note).size(LabelSize::Small).color(color)),
             )
             .child(
-                div().ml_auto().child(
-                    Label::new(self.progress_text())
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                ),
+                h_flex()
+                    .flex_none()
+                    .gap_1()
+                    .child(self.render_view_menu(cx))
+                    .child(self.render_more_menu(cx))
+                    .child(self.render_submit_controls(cx)),
             )
     }
 
-    /// A manual item, or an auto check that didn't pass: answered Yes, No or N/A.
-    /// `place` is "list" for the sidebar list, which owns the note editor, or "step" for the
-    /// copy under a review-map step, which shows the note as text: one editor can't be drawn
-    /// twice. `choices` are the answers offered.
+    /// A manual item, or an auto check that didn't pass. Ticking means Yes; the other answers
+    /// `choices` allows sit in the item's menu.
     fn render_check_row(
         &self,
-        place: &'static str,
         item_key: &str,
         text: &str,
         evidence: Option<(&str, Color)>,
@@ -3874,85 +3946,161 @@ impl ReviewItem {
             .get(item_key)
             .copied()
             .filter(|answer| choices.contains(answer));
-        let choice = |label: &'static str, value: Answer| {
-            let item_key = item_key.to_string();
-            Button::new(
-                SharedString::from(format!("photon-check-{place}-{label}-{item_key}")),
-                label,
-            )
-            .size(ButtonSize::Compact)
-            .style(ButtonStyle::Outlined)
-            .label_size(LabelSize::XSmall)
-            .toggle_state(answer == Some(value))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.answer_checklist_item(&item_key, value, window, cx)
-            }))
-        };
         let text_color = match answer {
             Some(Answer::Yes | Answer::NotApplicable) => Color::Muted,
             Some(Answer::No) => Color::Error,
             None => Color::Default,
         };
-        v_flex()
+        let (allows_no, allows_not_applicable) = (
+            choices.contains(&Answer::No),
+            choices.contains(&Answer::NotApplicable),
+        );
+        let item = cx.weak_entity();
+        let menu_key = item_key.to_string();
+        let menu =
+            ui::PopoverMenu::new(SharedString::from(format!("photon-check-menu-{item_key}")))
+                .trigger_with_tooltip(
+                    IconButton::new(
+                        SharedString::from(format!("photon-check-more-{item_key}")),
+                        IconName::Ellipsis,
+                    )
+                    .icon_size(IconSize::Small),
+                    Tooltip::text("Other answers"),
+                )
+                .anchor(gpui::Anchor::TopRight)
+                .menu(move |window, cx| {
+                    let item = item.clone();
+                    let key = menu_key.clone();
+                    Some(ui::ContextMenu::build(window, cx, move |menu, _, _| {
+                        let set = |value: Option<Answer>| {
+                            let item = item.clone();
+                            let key = key.clone();
+                            move |window: &mut Window, cx: &mut App| {
+                                item.update(cx, |item, cx| {
+                                    item.set_checklist_answer(&key, value, window, cx)
+                                })
+                                .log_err();
+                            }
+                        };
+                        menu.when(allows_no, |menu| {
+                            menu.toggleable_entry(
+                                "No, add a note",
+                                answer == Some(Answer::No),
+                                IconPosition::Start,
+                                None,
+                                set(Some(Answer::No)),
+                            )
+                        })
+                        .when(allows_not_applicable, |menu| {
+                            menu.toggleable_entry(
+                                "Doesn't apply",
+                                answer == Some(Answer::NotApplicable),
+                                IconPosition::Start,
+                                None,
+                                set(Some(Answer::NotApplicable)),
+                            )
+                        })
+                        .when(answer.is_some(), |menu| {
+                            menu.separator().entry("Clear answer", None, set(None))
+                        })
+                    }))
+                });
+        let box_key = item_key.to_string();
+        let box_selector = format!("photon-check-box-{item_key}");
+        let menu_selector = format!("photon-check-menu-{item_key}");
+        h_flex()
+            .items_start()
+            .gap_1p5()
             .py_0p5()
-            .gap_0p5()
             .child(
-                Label::new(text.to_string())
-                    .size(LabelSize::Small)
-                    .color(text_color),
+                div().debug_selector(move || box_selector).child(
+                    Checkbox::new(
+                        SharedString::from(format!("photon-check-{item_key}")),
+                        (answer == Some(Answer::Yes)).into(),
+                    )
+                    .disabled(!choices.contains(&Answer::Yes))
+                    .on_click(cx.listener(
+                        move |this, _: &ToggleState, window, cx| {
+                            this.answer_checklist_item(&box_key, Answer::Yes, window, cx)
+                        },
+                    )),
+                ),
             )
-            .children(evidence.map(|(evidence, color)| {
-                Label::new(evidence.to_string())
-                    .size(LabelSize::XSmall)
-                    .color(color)
-            }))
-            .child(h_flex().gap_1().children(choices.iter().map(|value| {
-                let label = match value {
-                    Answer::Yes => "Yes",
-                    Answer::No => "No",
-                    Answer::NotApplicable => "N/A",
-                };
-                choice(label, *value)
-            })))
-            .when(answer == Some(Answer::No), |row| {
-                let editor = self.note_editors.get(item_key);
-                if place == "list" {
-                    row.children(editor.cloned())
-                } else {
-                    let note = editor
-                        .map(|editor| editor.read(cx).text(cx))
-                        .unwrap_or_default();
-                    row.when(!note.trim().is_empty(), |row| {
-                        row.child(Label::new(note).size(LabelSize::XSmall).color(Color::Muted))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(
+                        Label::new(text.to_string())
+                            .size(LabelSize::Small)
+                            .color(text_color),
+                    )
+                    .children(evidence.map(|(evidence, color)| {
+                        Label::new(evidence.to_string())
+                            .size(LabelSize::XSmall)
+                            .color(color)
+                    }))
+                    .when(answer == Some(Answer::NotApplicable), |row| {
+                        row.child(
+                            Label::new("Doesn't apply")
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        )
                     })
-                }
-            })
+                    .when(answer == Some(Answer::No), |row| {
+                        row.children(self.note_editors.get(item_key).cloned())
+                    }),
+            )
+            .child(div().debug_selector(move || menu_selector).child(menu))
             .into_any_element()
     }
 
-    /// What the diff hides. New view controls go in this menu rather than the header.
+    /// What the diff shows. New view controls go in this menu rather than the header.
     fn render_view_menu(&self, cx: &Context<Self>) -> impl IntoElement {
         let item = cx.weak_entity();
         let (hide_whitespace, hide_moves, hide_generated) =
             (self.hide_whitespace, self.hide_moves, self.hide_generated);
+        let since_offered = self.changes_since_review_offered();
+        let since_on = self.showing_changes_since_review() || self.loading_since_review;
+        let anything_hidden =
+            !self.moves.is_empty() || self.files.iter().any(|file| self.hidden_by_view(file));
+        let show_hidden = self.show_hidden;
         let hidden = [hide_whitespace, hide_moves, hide_generated]
             .into_iter()
             .filter(|hidden| *hidden)
             .count();
-        let label = match hidden {
-            0 => "View".to_string(),
-            count => format!("View · {count} hidden"),
+        let label = if self.showing_changes_since_review() {
+            "View · since review".to_string()
+        } else {
+            match hidden {
+                0 => "View".to_string(),
+                count => format!("View · {count} hidden"),
+            }
         };
+        let point_out_since = since_offered && !self.view_menu_seen;
         let menu = ui::PopoverMenu::new("photon-review-view")
             .trigger_with_tooltip(
                 crate::button("photon-review-view-trigger", label)
                     .style(ButtonStyle::Outlined)
-                    .toggle_state(hidden > 0)
+                    .toggle_state(hidden > 0 || since_on)
                     .end_icon(Icon::new(IconName::ChevronDown).size(IconSize::XSmall)),
-                Tooltip::text("Choose what the diff hides"),
+                Tooltip::text(if point_out_since {
+                    "New: show only the changes since your review"
+                } else {
+                    "Choose what the diff shows"
+                }),
             )
+            .anchor(gpui::Anchor::TopRight)
             .menu(move |window, cx| {
                 let item = item.clone();
+                item.update(cx, |item, cx| {
+                    if !item.view_menu_seen {
+                        item.view_menu_seen = true;
+                        cx.notify();
+                    }
+                })
+                .log_err();
                 Some(ui::ContextMenu::build(window, cx, move |menu, _, _| {
                     let toggle = |whitespace: bool| {
                         let item = item.clone();
@@ -3989,14 +4137,167 @@ impl ReviewItem {
                                 }
                             },
                         )
+                        .when(since_offered, |menu| {
+                            let item = item.clone();
+                            menu.separator().header("Show").toggleable_entry(
+                                "Only changes since your review",
+                                since_on,
+                                IconPosition::Start,
+                                Some(ToggleChangesSinceReview.boxed_clone()),
+                                move |window, cx| {
+                                    item.update(cx, |item, cx| {
+                                        item.toggle_changes_since_review(
+                                            &ToggleChangesSinceReview,
+                                            window,
+                                            cx,
+                                        )
+                                    })
+                                    .log_err();
+                                },
+                            )
+                        })
+                        .when(anything_hidden, |menu| {
+                            let item = item.clone();
+                            menu.separator().toggleable_entry(
+                                "Show what's hidden",
+                                show_hidden,
+                                IconPosition::Start,
+                                None,
+                                move |_, cx| {
+                                    item.update(cx, |item, cx| {
+                                        item.show_hidden = !item.show_hidden;
+                                        cx.notify();
+                                    })
+                                    .log_err();
+                                },
+                            )
+                        })
                 }))
             });
         div()
+            .relative()
             .debug_selector(|| "photon-review-view".into())
+            .child(menu)
+            .when(point_out_since, |this| {
+                this.child(
+                    div()
+                        .debug_selector(|| "photon-review-view-dot".into())
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .child(Indicator::dot().color(Color::Accent)),
+                )
+            })
+    }
+
+    /// Occasional actions, out of the header's way.
+    fn render_more_menu(&self, cx: &Context<Self>) -> impl IntoElement {
+        let item = cx.weak_entity();
+        let agent_offered = review_agent(cx).is_some() && !self.is_own_pr();
+        let agent_label = if self.agent_reviewing {
+            "Cancel agent pre-review"
+        } else {
+            "Pre-review with agent"
+        };
+        let url = self.detail.summary.url.clone();
+        let menu = ui::PopoverMenu::new("photon-review-more")
+            .trigger_with_tooltip(
+                IconButton::new("photon-review-more-trigger", IconName::Ellipsis)
+                    .size(ButtonSize::Medium)
+                    .icon_size(IconSize::Small),
+                Tooltip::text("More actions"),
+            )
+            .anchor(gpui::Anchor::TopRight)
+            .menu(move |window, cx| {
+                let item = item.clone();
+                let url = url.clone();
+                Some(ui::ContextMenu::build(window, cx, move |menu, _, _| {
+                    menu.when(agent_offered, |menu| {
+                        let item = item.clone();
+                        menu.entry(agent_label, None, move |window, cx| {
+                            item.update(cx, |item, cx| item.start_agent_review(window, cx))
+                                .log_err();
+                        })
+                    })
+                    .entry("Run locally", None, {
+                        let item = item.clone();
+                        move |window, cx| {
+                            item.update(cx, |item, cx| item.run_locally(window, cx))
+                                .log_err();
+                        }
+                    })
+                    .entry(
+                        "Add your own checklist…",
+                        Some(zed_actions::OpenSettingsFile.boxed_clone()),
+                        |window, cx| {
+                            window.dispatch_action(zed_actions::OpenSettingsFile.boxed_clone(), cx)
+                        },
+                    )
+                    .separator()
+                    .entry("Open on GitHub", None, move |_, cx| cx.open_url(&url))
+                }))
+            });
+        div()
+            .debug_selector(|| "photon-review-more".into())
             .child(menu)
     }
 
-    fn render_hidden_by_view(&self) -> Option<AnyElement> {
+    /// The one primary action: Submit review, or Push changes… on your own PR, where Submit
+    /// review stays as a quiet button since the author can still post comments.
+    fn render_submit_controls(&self, cx: &Context<Self>) -> impl IntoElement {
+        let item = cx.weak_entity();
+        let push = self.is_own_pr() && self.push_command().is_some();
+        let submit = ui::PopoverMenu::new("photon-review-submit")
+            .trigger(
+                crate::button("photon-review-submit-trigger", "Submit review").style(if push {
+                    ButtonStyle::Outlined
+                } else {
+                    ButtonStyle::Tinted(TintColor::Accent)
+                }),
+            )
+            .anchor(gpui::Anchor::TopRight)
+            .menu(move |window, cx| {
+                let item = item.upgrade()?;
+                Some(cx.new(|cx| SubmitPopover::new(item, window, cx)))
+            });
+        h_flex()
+            .gap_1()
+            .child(
+                div()
+                    .debug_selector(|| "photon-review-submit".into())
+                    .child(submit),
+            )
+            .when(push, |this| {
+                this.child(
+                    div().debug_selector(|| "photon-review-push".into()).child(
+                        crate::button("photon-review-push-button", "Push changes…")
+                            .style(ButtonStyle::Tinted(TintColor::Accent))
+                            .tooltip(Tooltip::text(
+                                "Opens a terminal with git add, commit and push typed in, for you to run",
+                            ))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_push_terminal(window, cx)
+                            })),
+                    ),
+                )
+            })
+    }
+
+    /// The verdict the Submit popover posts. Your own PR can only get comments.
+    fn verdict(&self) -> ReviewEvent {
+        if self.is_own_pr() {
+            ReviewEvent::Comment
+        } else {
+            self.verdict
+        }
+    }
+
+    /// The strip above the diff listing what the View menu hides, shown on request from that
+    /// menu: hidden files leave no step, so there is no place in the diff to fold them into.
+    fn render_hidden_by_view(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if !self.show_hidden {
+            return None;
+        }
         let hidden_files: Vec<&str> = self
             .files
             .iter()
@@ -4015,8 +4316,11 @@ impl ReviewItem {
         Some(
             v_flex()
                 .debug_selector(|| "photon-review-hidden".into())
-                .pt_4()
-                .gap_1()
+                .px_2()
+                .py_1()
+                .gap_0p5()
+                .border_b_1()
+                .border_color(cx.theme().colors().border_variant)
                 .child(
                     Label::new("Hidden from the diff")
                         .size(LabelSize::Small)
@@ -4039,6 +4343,32 @@ impl ReviewItem {
         )
     }
 
+    /// A one-line summary that unfolds what it sums up.
+    fn render_fold_line(
+        &self,
+        id: &'static str,
+        open: bool,
+        text: String,
+        flag: fn(&mut Self) -> &mut bool,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        h_flex()
+            .id(id)
+            .debug_selector(move || id.to_string())
+            .gap_1()
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let open = flag(this);
+                *open = !*open;
+                cx.notify();
+            }))
+            .child(Disclosure::new(
+                SharedString::from(format!("{id}-disclosure")),
+                open,
+            ))
+            .child(Label::new(text).size(LabelSize::Small).color(Color::Muted))
+    }
+
     fn render_checklist(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let auto = &self.auto_results;
         let boxes = parse_author_boxes(&self.detail.body);
@@ -4055,14 +4385,9 @@ impl ReviewItem {
             return None;
         }
         let progress = self.checklist_progress();
-        let group = |title: &'static str| {
-            Label::new(title)
-                .size(LabelSize::XSmall)
-                .color(Color::Muted)
-        };
-        let mut section = v_flex()
+        let section = v_flex()
             .id("photon-review-checklist")
-            .pt_4()
+            .pt_2()
             .gap_1()
             .child(
                 h_flex()
@@ -4091,105 +4416,194 @@ impl ReviewItem {
         if !self.checklist_open {
             return Some(section.into_any_element());
         }
+        let mut body = v_flex()
+            .debug_selector(|| "photon-review-checklist-body".into())
+            .pl_1()
+            .gap_1();
         let (passed, open): (Vec<_>, Vec<_>) = auto.iter().partition(|(_, result)| result.passed());
-        if !passed.is_empty() {
-            section = section.child(group("Photon checked"));
-            for (check, result) in passed {
-                section = section.child(
-                    v_flex()
-                        .child(
-                            h_flex()
-                                .gap_1()
-                                .child(Label::new("✓").size(LabelSize::Small).color(Color::Success))
-                                .child(Label::new(check.title()).size(LabelSize::Small)),
-                        )
-                        .child(
-                            Label::new(result.evidence().to_string())
-                                .size(LabelSize::XSmall)
-                                .color(Color::Muted),
-                        ),
-                );
-            }
+        for (check, result) in open {
+            // Against evidence of a failure, the reviewer can only say it doesn't apply.
+            let (color, choices): (Color, &[Answer]) = match result {
+                AutoResult::Failed(_) => (Color::Warning, &[Answer::NotApplicable]),
+                _ => (Color::Muted, &ALL_ANSWERS),
+            };
+            body = body.child(self.render_check_row(
+                &check.key(),
+                check.title(),
+                Some((result.evidence(), color)),
+                choices,
+                cx,
+            ));
         }
-        if !open.is_empty() || !self.checklist_items.is_empty() {
-            section = section.child(group("For you"));
-            for (check, result) in open {
-                // Against evidence of a failure, the reviewer can only say it doesn't apply.
-                let (color, choices): (Color, &[Answer]) = match result {
-                    AutoResult::Failed(_) => (Color::Warning, &[Answer::NotApplicable]),
-                    _ => (Color::Muted, &ALL_ANSWERS),
-                };
-                section = section.child(self.render_check_row(
-                    "list",
-                    &check.key(),
-                    check.title(),
-                    Some((result.evidence(), color)),
-                    choices,
-                    cx,
-                ));
-            }
-            for item in &self.checklist_items {
-                section = section.child(self.render_check_row(
-                    "list",
-                    &item.key,
-                    &item.text,
-                    Some((&item.checklist, Color::Muted)),
-                    &ALL_ANSWERS,
-                    cx,
-                ));
+        for item in &self.checklist_items {
+            body = body.child(self.render_check_row(
+                &item.key,
+                &item.text,
+                Some((&item.checklist, Color::Muted)),
+                &ALL_ANSWERS,
+                cx,
+            ));
+        }
+        if !passed.is_empty() {
+            body = body.child(self.render_fold_line(
+                "photon-review-photon-checked",
+                self.photon_checked_open,
+                format!("✓ {} checked by Photon", passed.len()),
+                |this| &mut this.photon_checked_open,
+                cx,
+            ));
+            if self.photon_checked_open {
+                for (check, result) in passed {
+                    body = body.child(
+                        v_flex()
+                            .pl_5()
+                            .child(Label::new(check.title()).size(LabelSize::Small))
+                            .child(
+                                Label::new(result.evidence().to_string())
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            ),
+                    );
+                }
             }
         }
         if !boxes.is_empty() {
-            section = section.child(group("The author says"));
-            for author_box in boxes {
-                section = section.child(
-                    Label::new(format!(
-                        "{} {}",
-                        if author_box.checked { "☑" } else { "☐" },
-                        author_box.text
-                    ))
-                    .size(LabelSize::Small)
-                    .color(if author_box.checked {
-                        Color::Default
-                    } else {
-                        Color::Muted
-                    }),
-                );
+            let ticked = boxes.iter().filter(|author_box| author_box.checked).count();
+            body = body.child(self.render_fold_line(
+                "photon-review-author-boxes",
+                self.author_boxes_open,
+                format!("The author ticked {ticked} of {}", boxes.len()),
+                |this| &mut this.author_boxes_open,
+                cx,
+            ));
+            if self.author_boxes_open {
+                for author_box in boxes {
+                    body = body.child(
+                        div().pl_5().child(
+                            Label::new(format!(
+                                "{} {}",
+                                if author_box.checked { "☑" } else { "☐" },
+                                author_box.text
+                            ))
+                            .size(LabelSize::Small)
+                            .color(if author_box.checked {
+                                Color::Default
+                            } else {
+                                Color::Muted
+                            }),
+                        ),
+                    );
+                }
             }
         }
-        section = section.child(
-            div()
-                .pt_1()
-                .debug_selector(|| "photon-review-own-checklist".into())
-                .child(
-                    crate::button("photon-review-own-checklist", "Add your own checklist…")
+        Some(section.child(body).into_any_element())
+    }
+
+    /// A changed function in the selected step. Once its callers are known, clicking it lists
+    /// them, and a caller that wasn't updated for its change is called out with a tag.
+    fn render_function_row(
+        &self,
+        function_index: usize,
+        name: &str,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let not_updated = self
+            .callers(function_index)
+            .iter()
+            .filter(|row| row.mark == CallerMark::NotUpdated)
+            .count();
+        let known = self
+            .contexts
+            .get(function_index)
+            .is_some_and(Option::is_some);
+        let label = format!("{name}()");
+        let trigger = if known {
+            let item = cx.weak_entity();
+            let title = label.clone();
+            ui::PopoverMenu::new(("photon-review-callers", function_index))
+                .trigger_with_tooltip(
+                    Button::new(("photon-review-function", function_index), label)
                         .style(ButtonStyle::Subtle)
-                        .tooltip(Tooltip::text(
-                            "Opens settings.json: add checklists under \"pr_review\"",
-                        ))
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(zed_actions::OpenSettingsFile.boxed_clone(), cx)
-                        }),
-                ),
-        );
-        Some(section.into_any_element())
+                        .size(ButtonSize::Compact)
+                        .label_size(LabelSize::Small)
+                        .color(Color::Accent),
+                    Tooltip::text("Changed in this PR. Click to see its callers"),
+                )
+                .menu(move |window, cx| {
+                    let rows = item
+                        .read_with(cx, |item, _| item.callers(function_index).to_vec())
+                        .ok()?;
+                    let title = title.clone();
+                    Some(ui::ContextMenu::build(window, cx, move |menu, _, _| {
+                        let mut menu = menu.header(format!("Callers of {title}"));
+                        if rows.is_empty() {
+                            return menu.custom_row(|_, _| {
+                                div()
+                                    .debug_selector(|| "photon-review-no-callers".into())
+                                    .child(
+                                        Label::new("No callers found")
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    )
+                                    .into_any_element()
+                            });
+                        }
+                        for (index, row) in rows.iter().enumerate() {
+                            let (tag, color) = mark_tag(row.mark);
+                            let location = row.location.clone();
+                            let explanation = mark_explanation(row.mark);
+                            menu = menu.custom_row(move |_, _| {
+                                let selector = format!("photon-review-caller-{location}-{tag}");
+                                h_flex()
+                                    .id(("photon-review-caller", index))
+                                    .debug_selector(move || selector)
+                                    .w_full()
+                                    .justify_between()
+                                    .gap_4()
+                                    .tooltip(Tooltip::text(explanation))
+                                    .child(Label::new(location.clone()).size(LabelSize::Small))
+                                    .child(Label::new(tag).size(LabelSize::XSmall).color(color))
+                                    .into_any_element()
+                            });
+                        }
+                        menu
+                    }))
+                })
+                .into_any_element()
+        } else {
+            Label::new(label)
+                .size(LabelSize::Small)
+                .color(Color::Accent)
+                .into_any_element()
+        };
+        let selector = format!("photon-review-function-{name}");
+        let tag_selector = format!("photon-review-not-updated-{name}");
+        h_flex()
+            .pl_6()
+            .gap_1p5()
+            .child(div().size_1p5().rounded_full().bg(Color::Accent.color(cx)))
+            .child(div().debug_selector(move || selector).child(trigger))
+            .when(not_updated > 0, |row| {
+                row.child(
+                    div()
+                        .id(("photon-review-not-updated", function_index))
+                        .debug_selector(move || tag_selector)
+                        .tooltip(Tooltip::text(mark_explanation(CallerMark::NotUpdated)))
+                        .child(
+                            Label::new(format!("{not_updated} not updated"))
+                                .size(LabelSize::XSmall)
+                                .color(Color::Error),
+                        ),
+                )
+            })
+            .into_any_element()
     }
 
     fn render_map(&self, cx: &Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
-        let function_row = |name: &str, color: Color| {
-            h_flex()
-                .pl_6()
-                .gap_1p5()
-                .child(div().size_1p5().rounded_full().bg(color.color(cx)))
-                .child(
-                    Label::new(format!("{name}()"))
-                        .size(LabelSize::Small)
-                        .color(color),
-                )
-        };
         let mut map = v_flex()
             .id("photon-review-map")
+            .track_scroll(&self.map_scroll)
             .w(px(320.))
             .flex_none()
             .h_full()
@@ -4199,11 +4613,16 @@ impl ReviewItem {
             .border_r_1()
             .border_color(colors.border)
             .child(
-                Label::new("Review map")
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            );
-        map = map.children(self.render_checklist(cx));
+                div()
+                    .debug_selector(|| "photon-review-progress".into())
+                    .child(
+                        Label::new(self.progress_text())
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
+            )
+            // Always the map's second child: a step's checklist link scrolls to it.
+            .child(div().children(self.render_checklist(cx)));
         map = map.children(self.render_feedback(cx));
         map = map.children(self.render_outdated_drafts(cx));
         for (index, step) in self.steps.iter().enumerate() {
@@ -4253,114 +4672,128 @@ impl ReviewItem {
                                     .truncate()
                                     .when(viewed, |label| label.color(Color::Muted)),
                             )
-                            .child(
-                                Label::new(step.subtitle.clone())
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted)
-                                    .truncate(),
-                            ),
+                            .when(selected, |this| {
+                                this.child(
+                                    Label::new(step.subtitle.clone())
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted)
+                                        .truncate(),
+                                )
+                            }),
                     ),
             );
-            if selected {
-                for path in &step.files {
-                    let Some(file) = self.files.iter().find(|file| file.diff.path == *path) else {
-                        continue;
-                    };
-                    let (added, removed) = file.diff.line_counts();
-                    let (icon, color) = match file.diff.status {
-                        FileStatus::Added => (IconName::SquarePlus, Color::VersionControlAdded),
-                        FileStatus::Deleted => {
-                            (IconName::SquareMinus, Color::VersionControlDeleted)
-                        }
-                        FileStatus::Modified | FileStatus::Renamed { .. } => {
-                            (IconName::SquareDot, Color::VersionControlModified)
-                        }
-                    };
-                    let selector = format!("photon-review-file-{icon:?}:{path}");
-                    map = map.child(
-                        v_flex()
-                            .pl_6()
-                            .child(
-                                h_flex()
-                                    .debug_selector(move || selector)
-                                    .gap_1p5()
-                                    .child(Icon::new(icon).size(IconSize::Small).color(color))
-                                    .child(div().min_w_0().flex_1().child(
-                                        Label::new(path.clone()).size(LabelSize::Small).truncate(),
-                                    ))
-                                    .child(
-                                        ui::DiffStat::new(
-                                            SharedString::from(format!(
-                                                "photon-review-stat-{path}"
-                                            )),
-                                            added,
-                                            removed,
-                                        )
-                                        .label_size(LabelSize::XSmall)
-                                        .tooltip(status_label(&file.diff)),
-                                    ),
-                            )
-                            .children(self.file_errors.get(path).map(|error| {
-                                Label::new(error.clone())
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Error)
-                            })),
-                    );
-                }
-                for function in step
-                    .functions
-                    .iter()
-                    .filter_map(|&index| self.functions.get(index))
-                {
-                    map = map.child(function_row(&function.name, Color::Accent));
-                }
-                let mut neighbours: Vec<&str> = Vec::new();
-                for excerpt in &self.shown_context {
-                    if !neighbours.contains(&excerpt.name.as_str()) {
-                        neighbours.push(&excerpt.name);
+            if !selected {
+                continue;
+            }
+            for path in &step.files {
+                let Some(file) = self.files.iter().find(|file| file.diff.path == *path) else {
+                    continue;
+                };
+                let (added, removed) = file.diff.line_counts();
+                let (icon, color) = match file.diff.status {
+                    FileStatus::Added => (IconName::SquarePlus, Color::VersionControlAdded),
+                    FileStatus::Deleted => (IconName::SquareMinus, Color::VersionControlDeleted),
+                    FileStatus::Modified | FileStatus::Renamed { .. } => {
+                        (IconName::SquareDot, Color::VersionControlModified)
                     }
-                }
-                for name in neighbours {
-                    map = map.child(function_row(name, Color::Disabled));
-                }
-                for item in self
-                    .checklist_items
-                    .iter()
-                    .filter(|item| item.matches_any(&step.files))
-                {
-                    map = map.child(div().pl_6().child(self.render_check_row(
-                        "step",
-                        &item.key,
-                        &item.text,
-                        None,
-                        &ALL_ANSWERS,
-                        cx,
-                    )));
+                };
+                let selector = format!("photon-review-file-{icon:?}:{path}");
+                map = map.child(
+                    v_flex()
+                        .pl_6()
+                        .child(
+                            h_flex()
+                                .debug_selector(move || selector)
+                                .gap_1p5()
+                                .child(Icon::new(icon).size(IconSize::Small).color(color))
+                                .child(div().min_w_0().flex_1().child(
+                                    Label::new(path.clone()).size(LabelSize::Small).truncate(),
+                                ))
+                                .child(
+                                    ui::DiffStat::new(
+                                        SharedString::from(format!("photon-review-stat-{path}")),
+                                        added,
+                                        removed,
+                                    )
+                                    .label_size(LabelSize::XSmall)
+                                    .tooltip(status_label(&file.diff)),
+                                ),
+                        )
+                        .children(self.file_errors.get(path).map(|error| {
+                            Label::new(error.clone())
+                                .size(LabelSize::XSmall)
+                                .color(Color::Error)
+                        })),
+                );
+            }
+            for &function_index in &step.functions {
+                if let Some(function) = self.functions.get(function_index) {
+                    map = map.child(self.render_function_row(function_index, &function.name, cx));
                 }
             }
+            let mut neighbours: Vec<&str> = Vec::new();
+            for excerpt in &self.shown_context {
+                if !neighbours.contains(&excerpt.name.as_str()) {
+                    neighbours.push(&excerpt.name);
+                }
+            }
+            for name in neighbours {
+                map = map.child(
+                    h_flex()
+                        .id(SharedString::from(format!(
+                            "photon-review-neighbour-{name}"
+                        )))
+                        .pl_6()
+                        .gap_1p5()
+                        .tooltip(Tooltip::text("Unchanged, pulled in by the call graph"))
+                        .child(
+                            div()
+                                .size_1p5()
+                                .rounded_full()
+                                .bg(Color::Disabled.color(cx)),
+                        )
+                        .child(
+                            Label::new(format!("{name}()"))
+                                .size(LabelSize::Small)
+                                .color(Color::Disabled),
+                        ),
+                );
+            }
+            let checklist_items = self
+                .checklist_items
+                .iter()
+                .filter(|item| item.matches_any(&step.files))
+                .count();
+            if checklist_items > 0 {
+                map = map.child(
+                    div()
+                        .pl_6()
+                        .debug_selector(|| "photon-review-step-checklist".into())
+                        .child(
+                            Button::new(
+                                "photon-review-step-checklist",
+                                if checklist_items == 1 {
+                                    "1 checklist item applies to these files".to_string()
+                                } else {
+                                    format!(
+                                        "{checklist_items} checklist items apply to these files"
+                                    )
+                                },
+                            )
+                            .style(ButtonStyle::Subtle)
+                            .size(ButtonSize::Compact)
+                            .label_size(LabelSize::XSmall)
+                            .color(Color::Accent)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.checklist_open = true;
+                                this.map_scroll.scroll_to_top_of_item(1);
+                                cx.notify();
+                            })),
+                        ),
+                );
+            }
         }
-        map = map.children(self.render_hidden_by_view());
-        let legend_row = |text: &'static str, color: Color| {
-            h_flex()
-                .gap_1p5()
-                .child(div().size_1p5().rounded_full().bg(color.color(cx)))
-                .child(Label::new(text).size(LabelSize::Small).color(color))
-        };
-        map.child(
-            v_flex()
-                .pt_4()
-                .gap_1()
-                .child(
-                    Label::new("Legend")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                )
-                .child(legend_row("changed in this PR", Color::Accent))
-                .child(legend_row(
-                    "unchanged, pulled in by the call graph",
-                    Color::Disabled,
-                )),
-        )
+        map
     }
 
     fn render_outdated_drafts(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
@@ -4374,29 +4807,102 @@ impl ReviewItem {
             return None;
         }
         let colors = cx.theme().colors();
+        let count = outdated.len();
         Some(
             v_flex()
                 .gap_1()
                 .pb_2()
                 .child(
-                    Label::new("Outdated drafts")
-                        .size(LabelSize::Small)
-                        .color(Color::Warning),
+                    Label::new(format!(
+                        "{count} outdated draft{}",
+                        if count == 1 { "" } else { "s" }
+                    ))
+                    .size(LabelSize::Small)
+                    .color(Color::Warning),
                 )
                 .children(outdated.into_iter().map(|(draft, view)| {
                     let local_id = view.local_id;
                     let posted_note = self.posted_note(draft);
+                    let (may_be_posted, general) = (posted_note.is_some(), draft.general);
+                    let item = cx.weak_entity();
+                    let menu = ui::PopoverMenu::new(("photon-review-outdated-menu", local_id))
+                        .trigger_with_tooltip(
+                            IconButton::new(
+                                ("photon-review-outdated-more", local_id),
+                                IconName::Ellipsis,
+                            )
+                            .icon_size(IconSize::Small),
+                            Tooltip::text("What to do with this draft"),
+                        )
+                        .anchor(gpui::Anchor::TopRight)
+                        .menu(move |window, cx| {
+                            let item = item.clone();
+                            Some(ui::ContextMenu::build(window, cx, move |menu, _, _| {
+                                let replace = item.clone();
+                                let include = item.clone();
+                                let general_item = item.clone();
+                                let delete = item.clone();
+                                menu.entry("Place on the selected lines", None, move |_, cx| {
+                                    replace
+                                        .update(cx, |item, cx| item.replace_draft(local_id, cx))
+                                        .log_err();
+                                })
+                                // A draft that may already be posted is included again before
+                                // anything else can send it.
+                                .when(may_be_posted, |menu| {
+                                    menu.entry("Include again", None, move |_, cx| {
+                                        include
+                                            .update(cx, |item, cx| item.include_again(local_id, cx))
+                                            .log_err();
+                                    })
+                                })
+                                .when(!may_be_posted && !general, |menu| {
+                                    menu.entry("Post as a general comment", None, move |_, cx| {
+                                        general_item
+                                            .update(cx, |item, cx| {
+                                                item.post_as_general(local_id, cx)
+                                            })
+                                            .log_err();
+                                    })
+                                })
+                                .separator()
+                                .entry(
+                                    "Delete draft",
+                                    None,
+                                    move |window, cx| {
+                                        delete
+                                            .update(cx, |item, cx| {
+                                                item.cancel_draft(local_id, window, cx)
+                                            })
+                                            .log_err();
+                                    },
+                                )
+                            }))
+                        });
                     v_flex()
                         .id(("photon-review-outdated", local_id))
-                        .gap_1()
+                        .gap_0p5()
                         .p_1()
                         .rounded_sm()
                         .border_1()
                         .border_color(colors.border_variant)
                         .child(
-                            Label::new(format!("{}:{}", draft.path, draft.start_line))
-                                .size(LabelSize::XSmall)
-                                .color(Color::Muted),
+                            h_flex()
+                                .justify_between()
+                                .gap_1()
+                                .child(
+                                    Label::new(format!("{}:{}", draft.path, draft.start_line))
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted)
+                                        .truncate(),
+                                )
+                                .child(
+                                    div()
+                                        .debug_selector(move || {
+                                            format!("photon-review-outdated-menu-{local_id}")
+                                        })
+                                        .child(menu),
+                                ),
                         )
                         .child(
                             Label::new(draft.anchor_text.clone())
@@ -4404,48 +4910,13 @@ impl ReviewItem {
                                 .buffer_font(cx),
                         )
                         .child(Label::new(draft.body.clone()).size(LabelSize::Small))
-                        .child(
-                            h_flex()
-                                .gap_1()
-                                .flex_wrap()
-                                .child(
-                                    crate::button("replace", "Re-place here")
-                                        .style(ButtonStyle::Outlined)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.replace_draft(local_id, cx)
-                                        })),
-                                )
-                                // A draft that may already be posted is included again
-                                // before anything else can send it.
-                                .map(|this| match posted_note {
-                                    Some(_) => this.child(
-                                        crate::button("include", "Include again")
-                                            .style(ButtonStyle::Outlined)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.include_again(local_id, cx)
-                                            })),
-                                    ),
-                                    None if draft.general => this.child(
-                                        Label::new("posts as a general comment")
-                                            .size(LabelSize::XSmall)
-                                            .color(Color::Muted),
-                                    ),
-                                    None => this.child(
-                                        crate::button("general", "Post as general comment")
-                                            .style(ButtonStyle::Outlined)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.post_as_general(local_id, cx)
-                                            })),
-                                    ),
-                                })
-                                .child(
-                                    crate::button("delete", "Delete")
-                                        .style(ButtonStyle::Outlined)
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.cancel_draft(local_id, window, cx)
-                                        })),
-                                ),
-                        )
+                        .when(general && !may_be_posted, |this| {
+                            this.child(
+                                Label::new("posts as a general comment")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                        })
                         .children(posted_note.map(|note| {
                             Label::new(note)
                                 .size(LabelSize::XSmall)
@@ -4456,16 +4927,9 @@ impl ReviewItem {
         )
     }
 
-    fn render_code(&self) -> impl IntoElement {
+    fn render_code(&self, cx: &Context<Self>) -> impl IntoElement {
         let status = match &self.context_state {
-            ContextState::Finding => Some(
-                h_flex().px_2().py_1().child(
-                    Label::new("finding callers…")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                ),
-            ),
-            ContextState::Ready => None,
+            ContextState::Finding | ContextState::Ready => None,
             ContextState::Unavailable(reason) => Some(
                 h_flex()
                     .px_2()
@@ -4497,6 +4961,7 @@ impl ReviewItem {
             .min_w_0()
             .h_full()
             .children(status)
+            .children(self.render_hidden_by_view(cx))
             .child(div().flex_1().min_h_0().child(self.editor.clone()))
     }
 
@@ -4508,6 +4973,7 @@ impl ReviewItem {
         if open.is_empty() {
             return None;
         }
+        let colors = cx.theme().colors();
         let mut section = v_flex().id("photon-review-feedback").pb_2().gap_1().child(
             Label::new(format!("Feedback · {} open", open.len()))
                 .size(LabelSize::Small)
@@ -4528,194 +4994,76 @@ impl ReviewItem {
             let (show_id, edit_id, done_id) =
                 (thread.id.clone(), thread.id.clone(), thread.id.clone());
             let finishing = self.finishing_threads.contains(&thread.id);
-            let button_id =
+            let element_id =
                 |name: &str| SharedString::from(format!("photon-feedback-{name}-{}", thread.id));
+            let group = element_id("group");
+            let (row_selector, edit_selector, done_selector) = (
+                element_id("row").to_string(),
+                element_id("edit").to_string(),
+                element_id("done").to_string(),
+            );
             section = section.child(
-                v_flex()
+                h_flex()
+                    .id(element_id("row"))
+                    .group(group.clone())
+                    .debug_selector(move || row_selector)
+                    .gap_1()
+                    .px_1()
                     .py_0p5()
-                    .child(Label::new(summary).size(LabelSize::Small).truncate())
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(colors.element_hover))
+                    .tooltip(Tooltip::text("Show it in the diff"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.show_thread(&show_id, window, cx)
+                    }))
                     .child(
-                        Label::new(place)
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted)
-                            .truncate(),
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Label::new(summary).size(LabelSize::Small).truncate())
+                            .child(
+                                Label::new(place)
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted)
+                                    .truncate(),
+                            ),
                     )
                     .child(
-                        h_flex()
-                            .gap_1()
-                            .child(
-                                Button::new(button_id("show"), "Show")
-                                    .size(ButtonSize::Compact)
-                                    .style(ButtonStyle::Outlined)
-                                    .label_size(LabelSize::XSmall)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.show_thread(&show_id, window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new(button_id("edit"), "Edit")
-                                    .size(ButtonSize::Compact)
-                                    .style(ButtonStyle::Outlined)
-                                    .label_size(LabelSize::XSmall)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.edit_thread_file(&edit_id, window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new(button_id("done"), "Done")
-                                    .size(ButtonSize::Compact)
-                                    .style(ButtonStyle::Outlined)
-                                    .label_size(LabelSize::XSmall)
-                                    .disabled(finishing)
-                                    .tooltip(Tooltip::text(
-                                        "Replies \"Done\" and resolves the thread",
-                                    ))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.mark_thread_done(&done_id, cx).detach_and_log_err(cx)
-                                    })),
-                            ),
+                        div().debug_selector(move || edit_selector).child(
+                            IconButton::new(element_id("edit"), IconName::Pencil)
+                                .icon_size(IconSize::Small)
+                                .visible_on_hover(group.clone())
+                                .tooltip(Tooltip::text("Edit the file"))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.edit_thread_file(&edit_id, window, cx)
+                                })),
+                        ),
+                    )
+                    .child(
+                        div().debug_selector(move || done_selector).child(
+                            IconButton::new(element_id("done"), IconName::Check)
+                                .icon_size(IconSize::Small)
+                                .visible_on_hover(group)
+                                .disabled(finishing)
+                                .tooltip(Tooltip::text("Reply \"Done\" and resolve the thread"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.mark_thread_done(&done_id, cx).detach_and_log_err(cx)
+                                })),
+                        ),
                     ),
             );
         }
         Some(section.into_any_element())
     }
+}
 
-    fn render_impact(&self, cx: &Context<Self>) -> impl IntoElement {
-        let title = match &self.impact_function {
-            Some(name) => format!("Impact of {name}()"),
-            None => "Impact".to_string(),
-        };
-        let highlight = |word: &str, color: Color| {
-            IMPACT_LEGEND.find(word).map(|start| {
-                (
-                    start..start + word.len(),
-                    HighlightStyle {
-                        color: Some(color.color(cx)),
-                        ..HighlightStyle::default()
-                    },
-                )
-            })
-        };
-        let own_pr = self.is_own_pr();
-        let submit = |event: ReviewEvent| {
-            cx.listener(move |this: &mut Self, _: &ClickEvent, window, cx| {
-                this.submit(event, window, cx).detach_and_log_err(cx)
-            })
-        };
-        let left_out = self.left_out_note();
-        let legend_highlights: Vec<_> = [
-            highlight("Red", Color::Error),
-            highlight("Amber", Color::Warning),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        v_flex()
-            .w(px(260.))
-            .flex_none()
-            .h_full()
-            .p_2()
-            .gap_1()
-            .border_l_1()
-            .border_color(cx.theme().colors().border)
-            .child(Label::new(title).size(LabelSize::Small).color(Color::Muted))
-            .children(self.impact.iter().map(|row| {
-                let (tag, color) = mark_tag(row.mark);
-                h_flex()
-                    .justify_between()
-                    .gap_2()
-                    .child(Label::new(row.location.clone()).size(LabelSize::Small))
-                    .child(Label::new(tag).size(LabelSize::XSmall).color(color))
-            }))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(Color::Muted.color(cx))
-                    .child(StyledText::new(IMPACT_LEGEND).with_highlights(legend_highlights)),
-            )
-            .child(
-                v_flex()
-                    .pt_4()
-                    .gap_1()
-                    .child(
-                        Label::new("Your review")
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    )
-                    .child(
-                        Label::new(format!(
-                            "{} draft comment{} · {}",
-                            self.drafts.len(),
-                            if self.drafts.len() == 1 { "" } else { "s" },
-                            self.progress_text()
-                        ))
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                    )
-                    .when(self.checklist_progress().total > 0, |this| {
-                        this.child(
-                            Label::new(format!("Checklist {}", self.checklist_progress().text()))
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
-                        )
-                    })
-                    .child(self.summary_editor.clone())
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .flex_wrap()
-                            .child(
-                                crate::button("photon-review-comment", "Comment")
-                                    .style(ButtonStyle::Outlined)
-                                    .disabled(self.submitting || !self.can_comment(cx))
-                                    .on_click(submit(ReviewEvent::Comment)),
-                            )
-                            .when(!own_pr, |this| {
-                                this.child(
-                                    crate::button("photon-review-approve", "Approve")
-                                        .style(ButtonStyle::Tinted(TintColor::Success))
-                                        .disabled(self.submitting)
-                                        .on_click(submit(ReviewEvent::Approve)),
-                                )
-                                .child(
-                                    crate::button(
-                                        "photon-review-request-changes",
-                                        "Request changes",
-                                    )
-                                    .style(ButtonStyle::Tinted(TintColor::Error))
-                                    .disabled(self.submitting)
-                                    .on_click(submit(ReviewEvent::RequestChanges)),
-                                )
-                            })
-                            .when(own_pr && self.push_command().is_some(), |this| {
-                                this.child(
-                                    crate::button("photon-review-push", "Push changes…")
-                                        .style(ButtonStyle::Tinted(TintColor::Accent))
-                                        .tooltip(Tooltip::text(
-                                            "Opens a terminal with git add, commit and push typed in, for you to run",
-                                        ))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.open_push_terminal(window, cx)
-                                        })),
-                                )
-                            }),
-                    )
-                    .children(left_out.map(|note| {
-                        Label::new(note)
-                            .size(LabelSize::Small)
-                            .color(Color::Warning)
-                    }))
-                    .children(
-                        self.submit_note.clone().map(|note| {
-                            Label::new(note).size(LabelSize::Small).color(Color::Muted)
-                        }),
-                    )
-                    .children(
-                        self.submit_error.clone().map(|error| {
-                            Label::new(error).size(LabelSize::Small).color(Color::Error)
-                        }),
-                    ),
-            )
+fn mark_explanation(mark: CallerMark) -> &'static str {
+    match mark {
+        CallerMark::InThisPr => "This caller changed in this PR too",
+        CallerMark::Unchanged => "This caller didn't change, and the change doesn't affect it",
+        CallerMark::NotUpdated => "The signature changed and this caller wasn't updated",
+        CallerMark::Check => "The body changed and this caller wasn't touched, so check it",
     }
 }
 
@@ -4740,9 +5088,185 @@ impl Render for ReviewItem {
                     .min_h_0()
                     .items_start()
                     .child(self.render_map(cx))
-                    .child(self.render_code())
-                    .child(self.render_impact(cx)),
+                    .child(self.render_code(cx)),
             )
+    }
+}
+
+/// The Submit review popover: verdict, summary, and what will and won't be sent.
+struct SubmitPopover {
+    item: WeakEntity<ReviewItem>,
+    focus_handle: FocusHandle,
+    _observe_item: Subscription,
+}
+
+impl SubmitPopover {
+    fn new(item: Entity<ReviewItem>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus_handle = item.read(cx).summary_editor.focus_handle(cx);
+        Self {
+            _observe_item: cx.observe_in(&item, window, |_, _, _, cx| cx.notify()),
+            item: item.downgrade(),
+            focus_handle,
+        }
+    }
+
+    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let item = self.item.clone();
+        let Ok(submitting) = item.update(cx, |item, cx| {
+            let verdict = item.verdict();
+            item.submit(verdict, window, cx)
+        }) else {
+            return;
+        };
+        // Detached, so closing the popover never cancels a submit under way. A failure stays in
+        // the popover, which stays open.
+        cx.spawn_in(window, async move |this, cx| {
+            submitting.await?;
+            item.update(cx, |item, cx| item.report_submitted(cx))?;
+            this.update(cx, |_, cx| cx.emit(DismissEvent)).ok();
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+}
+
+impl EventEmitter<DismissEvent> for SubmitPopover {}
+
+impl Focusable for SubmitPopover {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Render for SubmitPopover {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(item) = self.item.upgrade() else {
+            return div().into_any_element();
+        };
+        let item = item.read(cx);
+        let verdict = item.verdict();
+        let choices: &[(ReviewEvent, &'static str, &'static str)] = if item.is_own_pr() {
+            &[]
+        } else {
+            &[
+                (
+                    ReviewEvent::Comment,
+                    "Comment",
+                    "Post your comments without a verdict",
+                ),
+                (ReviewEvent::Approve, "Approve", "Lets the author merge"),
+                (
+                    ReviewEvent::RequestChanges,
+                    "Request changes",
+                    "Blocks merging until you approve",
+                ),
+            ]
+        };
+        let submit_label = match verdict {
+            ReviewEvent::Comment => "Comment",
+            ReviewEvent::Approve => "Approve",
+            ReviewEvent::RequestChanges => "Request changes",
+        };
+        let can_submit =
+            !item.submitting && (verdict != ReviewEvent::Comment || item.can_comment(cx));
+        let drafts = item.drafts.len();
+        let checklist = item.checklist_progress();
+        v_flex()
+            .w(px(380.))
+            .p_2()
+            .gap_2()
+            .elevation_2(cx)
+            .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(DismissEvent)))
+            .child(
+                div()
+                    .p_1()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(cx.theme().colors().border)
+                    .child(item.summary_editor.clone()),
+            )
+            .when(!choices.is_empty(), |this| {
+                this.child(v_flex().gap_1().children(choices.iter().map(
+                    |&(event, label, description)| {
+                        div()
+                            .debug_selector(move || format!("photon-review-verdict-{label}"))
+                            .child(
+                                ui::ChoiceCard::radio(
+                                    SharedString::from(format!(
+                                        "photon-review-verdict-{}",
+                                        event.as_str()
+                                    )),
+                                    label,
+                                    verdict == event,
+                                )
+                                .description(description)
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.item
+                                            .update(cx, |item, cx| {
+                                                item.verdict = event;
+                                                cx.notify();
+                                            })
+                                            .log_err();
+                                    },
+                                )),
+                            )
+                    },
+                )))
+            })
+            .child(
+                v_flex()
+                    .gap_0p5()
+                    .child(
+                        Label::new(format!(
+                            "{drafts} draft comment{} · {}",
+                            if drafts == 1 { "" } else { "s" },
+                            item.progress_text()
+                        ))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                    )
+                    .when(checklist.total > 0, |this| {
+                        this.child(
+                            Label::new(format!("Checklist {}", checklist.text()))
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        )
+                    })
+                    .children(item.left_out_note().map(|note| {
+                        Label::new(note)
+                            .size(LabelSize::Small)
+                            .color(Color::Warning)
+                    }))
+                    .children(
+                        item.submit_error.clone().map(|error| {
+                            Label::new(error).size(LabelSize::Small).color(Color::Error)
+                        }),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_1()
+                    .child(
+                        crate::button("photon-review-submit-cancel", "Cancel")
+                            .style(ButtonStyle::Subtle)
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "photon-review-submit-confirm".into())
+                            .child(
+                                crate::button("photon-review-submit-confirm", submit_label)
+                                    .style(ButtonStyle::Tinted(TintColor::Accent))
+                                    .disabled(!can_submit)
+                                    .on_click(
+                                        cx.listener(|this, _, window, cx| this.submit(window, cx)),
+                                    ),
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
 }
 
@@ -5370,21 +5894,14 @@ fn verify_password(user: &str, password: &str) -> bool {
         );
         // The selected step keeps its key when edges arrive, so it moved to the second step.
         item.update_in(&mut cx, |item, window, cx| item.select_step(0, window, cx));
-        let offset = text(&item, &mut cx)
-            .find("fn target(a: u32, b")
-            .expect("target shown");
-        item.update_in(&mut cx, |item, window, cx| {
-            item.editor().update(cx, |editor, cx| {
-                editor.change_selections(Default::default(), window, cx, |selections| {
-                    selections.select_ranges([MultiBufferOffset(offset)..MultiBufferOffset(offset)])
-                })
-            })
-        });
-        cx.run_until_parked();
         item.read_with(&cx, |item, _| {
-            assert_eq!(item.impact_function.as_deref(), Some("target"));
+            let target = item
+                .functions
+                .iter()
+                .position(|function| function.name == "target")
+                .expect("target");
             assert_eq!(
-                item.impact(),
+                item.callers(target),
                 &[
                     ImpactRow {
                         location: "src/a.rs:2".into(),
@@ -5397,6 +5914,42 @@ fn verify_password(user: &str, password: &str) -> bool {
                 ]
             );
         });
+        assert!(drawn("photon-review-not-updated-target", &mut cx));
+        assert!(!drawn(
+            "photon-review-caller-src/c.rs:2-not updated",
+            &mut cx
+        ));
+        click("photon-review-function-target", &mut cx);
+        assert!(drawn("photon-review-caller-src/a.rs:2-in this PR", &mut cx));
+        assert!(drawn(
+            "photon-review-caller-src/c.rs:2-not updated",
+            &mut cx
+        ));
+    }
+
+    #[gpui::test]
+    async fn function_rows_wait_for_callers_without_a_note(cx: &mut TestAppContext) {
+        let (release, gate) = futures::channel::oneshot::channel();
+        let (item, mut cx) = open_item(
+            cx,
+            login_tree(),
+            vec![login_with_hunk()],
+            login_graph(),
+            true,
+            Some(gate.shared()),
+        )
+        .await;
+        settle(&mut cx);
+        item.read_with(&cx, |item, _| {
+            assert_eq!(item.context_state(), &ContextState::Finding)
+        });
+        assert!(drawn("photon-review-function-login", &mut cx));
+        click("photon-review-function-login", &mut cx);
+        assert!(!drawn("photon-review-no-callers", &mut cx));
+        release.send(()).expect("release");
+        settle(&mut cx);
+        click("photon-review-function-login", &mut cx);
+        assert!(drawn("photon-review-no-callers", &mut cx));
     }
 
     #[gpui::test]
@@ -6324,6 +6877,9 @@ fn verify_password(user: &str, password: &str) -> bool {
         settle(&mut cx);
         item.read_with(&cx, |item, _| assert!(item.hide_whitespace));
         assert_eq!(step_files(&item, &mut cx), ["src/b.rs"]);
+        assert!(!drawn("photon-review-hidden", &mut cx));
+        click("photon-review-view", &mut cx);
+        click("MENU_ITEM-Show what's hidden", &mut cx);
         assert!(drawn("photon-review-hidden", &mut cx));
 
         click("photon-review-view", &mut cx);
@@ -6341,14 +6897,27 @@ fn verify_password(user: &str, password: &str) -> bool {
     }
 
     #[gpui::test]
+    async fn show_whats_hidden_is_offered_only_while_something_is_hidden(cx: &mut TestAppContext) {
+        let (_item, mut cx) = open_reformatted(cx).await;
+        click("photon-review-view", &mut cx);
+        assert!(drawn("MENU_ITEM-Whitespace changes", &mut cx));
+        assert!(!drawn("MENU_ITEM-Show what's hidden", &mut cx));
+        click("MENU_ITEM-Whitespace changes", &mut cx);
+        settle(&mut cx);
+        click("photon-review-view", &mut cx);
+        assert!(drawn("MENU_ITEM-Show what's hidden", &mut cx));
+    }
+
+    #[gpui::test]
     async fn clicking_the_checklist_heading_folds_and_unfolds_it(cx: &mut TestAppContext) {
         let (_item, mut cx) = open_reformatted(cx).await;
-        assert!(drawn("photon-review-own-checklist", &mut cx));
-        click("photon-review-checklist-toggle", &mut cx);
-        assert!(!drawn("photon-review-own-checklist", &mut cx));
         assert!(drawn("photon-review-checklist-toggle", &mut cx));
+        assert!(!drawn("photon-review-checklist-body", &mut cx));
         click("photon-review-checklist-toggle", &mut cx);
-        assert!(drawn("photon-review-own-checklist", &mut cx));
+        assert!(drawn("photon-review-checklist-body", &mut cx));
+        click("photon-review-checklist-toggle", &mut cx);
+        assert!(!drawn("photon-review-checklist-body", &mut cx));
+        assert!(drawn("photon-review-checklist-toggle", &mut cx));
     }
 
     #[gpui::test]
@@ -6359,7 +6928,8 @@ fn verify_password(user: &str, password: &str) -> bool {
             let opened = opened.clone();
             cx.on_action(move |_: &zed_actions::OpenSettingsFile, _| opened.set(opened.get() + 1));
         });
-        click("photon-review-own-checklist", &mut cx);
+        click("photon-review-more", &mut cx);
+        click("MENU_ITEM-Add your own checklist…", &mut cx);
         assert_eq!(opened.get(), 1);
     }
 
@@ -8250,5 +8820,334 @@ fn verify_password(user: &str, password: &str) -> bool {
                 "github {on_github:?}, database {last_review:?}"
             );
         }
+    }
+
+    fn hover(selector: &'static str, cx: &mut VisualTestContext) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is drawn"));
+        cx.simulate_mouse_move(bounds.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    fn set_login(item: &Entity<ReviewItem>, own_pr: bool, cx: &mut VisualTestContext) {
+        item.update(cx, |item, cx| {
+            item.login = if own_pr {
+                item.detail.summary.author.clone()
+            } else {
+                "someone-else".into()
+            };
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn the_header_has_one_primary_action(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        set_login(&item, false, &mut cx);
+        assert!(drawn("photon-review-view", &mut cx));
+        assert!(drawn("photon-review-more", &mut cx));
+        assert!(drawn("photon-review-submit", &mut cx));
+        assert!(!drawn("photon-review-push", &mut cx));
+
+        // The author can still post comments, so Submit review stays beside Push changes….
+        set_login(&item, true, &mut cx);
+        assert!(drawn("photon-review-push", &mut cx));
+        assert!(drawn("photon-review-submit", &mut cx));
+    }
+
+    #[gpui::test]
+    async fn changes_since_review_is_a_view_menu_entry_with_a_dot_until_seen(
+        cx: &mut TestAppContext,
+    ) {
+        let (item, mut not_offered) = open_reformatted(cx).await;
+        item.update(&mut not_offered, |item, cx| {
+            item.last_review = None;
+            cx.notify();
+        });
+        assert!(!drawn("photon-review-view-dot", &mut not_offered));
+        click("photon-review-view", &mut not_offered);
+        assert!(drawn("MENU_ITEM-Whitespace changes", &mut not_offered));
+        assert!(!drawn(
+            "MENU_ITEM-Only changes since your review",
+            &mut not_offered
+        ));
+
+        let mut detail = parse_detail(&key(), DETAIL).expect("detail");
+        detail.summary.last_review_commit = Some("older".into());
+        let (item, mut cx, _) = open_item_with_detail(
+            cx,
+            login_tree(),
+            vec![login_with_hunk()],
+            login_graph(),
+            true,
+            None,
+            false,
+            None,
+            detail,
+        )
+        .await;
+        assert!(drawn("photon-review-view-dot", &mut cx));
+        click("photon-review-view", &mut cx);
+        assert!(!drawn("photon-review-view-dot", &mut cx));
+        click("MENU_ITEM-Only changes since your review", &mut cx);
+        item.read_with(&cx, |item, _| {
+            assert!(!item.loading_since_review);
+            assert!(
+                item.since_review_note
+                    .as_deref()
+                    .is_some_and(|note| note.starts_with("Couldn't fetch")),
+                "{:?}",
+                item.since_review_note
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn the_more_menu_holds_the_occasional_actions(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        set_login(&item, false, &mut cx);
+        item.update(&mut cx, |item, _| {
+            item.workspace = Some(WeakEntity::new_invalid())
+        });
+        install_agent(Ok("Nothing:\n```json\n[]\n```".into()), &mut cx);
+        click("photon-review-more", &mut cx);
+        assert!(drawn("MENU_ITEM-Run locally", &mut cx));
+        assert!(drawn("MENU_ITEM-Add your own checklist…", &mut cx));
+        click("MENU_ITEM-Pre-review with agent", &mut cx);
+        item.read_with(&cx, |item, _| {
+            assert!(!item.agent_reviewing);
+            assert!(
+                item.agent_review_note()
+                    .is_some_and(|(note, _)| note.contains("found nothing")),
+                "{:?}",
+                item.agent_review_note()
+            );
+        });
+
+        click("photon-review-more", &mut cx);
+        click("MENU_ITEM-Open on GitHub", &mut cx);
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some("https://github.com/acme/web/pull/482")
+        );
+
+        set_login(&item, true, &mut cx);
+        click("photon-review-more", &mut cx);
+        assert!(drawn("MENU_ITEM-Run locally", &mut cx));
+        assert!(!drawn("MENU_ITEM-Pre-review with agent", &mut cx));
+    }
+
+    #[gpui::test]
+    async fn progress_is_steps_only_at_the_top_of_the_map(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        set_checklists(
+            &mut cx,
+            json!([{"name": "Login", "items": ["Audited"]}]),
+            &[],
+        );
+        assert!(drawn("photon-review-progress", &mut cx));
+        item.read_with(&cx, |item, _| {
+            let progress = item.progress_text();
+            assert!(progress.ends_with("steps viewed"), "{progress}");
+        });
+    }
+
+    #[gpui::test]
+    async fn a_checklist_item_is_one_checkbox_and_a_menu(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        set_checklists(
+            &mut cx,
+            json!([{"name": "Login", "items": ["Audited"]}]),
+            &["tests_changed"],
+        );
+        let key = "settings:Login:Audited";
+        let answer =
+            |cx: &mut VisualTestContext| item.read_with(cx, |item, _| item.checklist_answer(key));
+        click("photon-review-checklist-toggle", &mut cx);
+
+        click("photon-check-box-settings:Login:Audited", &mut cx);
+        assert_eq!(answer(&mut cx), Some(Answer::Yes));
+        click("photon-check-box-settings:Login:Audited", &mut cx);
+        assert_eq!(answer(&mut cx), None);
+
+        click("photon-check-menu-settings:Login:Audited", &mut cx);
+        assert!(!drawn("MENU_ITEM-Clear answer", &mut cx));
+        click("MENU_ITEM-No, add a note", &mut cx);
+        assert_eq!(answer(&mut cx), Some(Answer::No));
+        item.read_with(&cx, |item, _| assert!(item.note_editors.contains_key(key)));
+        click("photon-check-menu-settings:Login:Audited", &mut cx);
+        click("MENU_ITEM-Doesn't apply", &mut cx);
+        assert_eq!(answer(&mut cx), Some(Answer::NotApplicable));
+        click("photon-check-menu-settings:Login:Audited", &mut cx);
+        click("MENU_ITEM-Clear answer", &mut cx);
+        assert_eq!(answer(&mut cx), None);
+
+        // Against a failed auto check, the reviewer can only say it doesn't apply.
+        let auto_key = "auto:tests_changed";
+        click("photon-check-box-auto:tests_changed", &mut cx);
+        item.read_with(&cx, |item, _| {
+            assert_eq!(item.checklist_answer(auto_key), None)
+        });
+        click("photon-check-menu-auto:tests_changed", &mut cx);
+        assert!(!drawn("MENU_ITEM-No, add a note", &mut cx));
+        click("MENU_ITEM-Doesn't apply", &mut cx);
+        item.read_with(&cx, |item, _| {
+            assert_eq!(item.checklist_answer(auto_key), Some(Answer::NotApplicable))
+        });
+    }
+
+    #[gpui::test]
+    async fn photon_checks_and_author_boxes_fold_to_one_line(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        set_checklists(&mut cx, json!([]), &["checks_pass"]);
+        click("photon-review-checklist-toggle", &mut cx);
+        assert!(drawn("photon-review-photon-checked", &mut cx));
+        assert!(drawn("photon-review-author-boxes", &mut cx));
+        item.read_with(&cx, |item, _| {
+            assert!(!item.photon_checked_open && !item.author_boxes_open)
+        });
+        click("photon-review-photon-checked", &mut cx);
+        click("photon-review-author-boxes", &mut cx);
+        item.read_with(&cx, |item, _| {
+            assert!(item.photon_checked_open && item.author_boxes_open)
+        });
+    }
+
+    #[gpui::test]
+    async fn path_checklist_items_are_one_link_under_their_step(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        set_checklists(
+            &mut cx,
+            json!([{"name": "Login", "when": {"paths": ["src/login.rs"]}, "items": ["Rate limited", "Audited"]}]),
+            &[],
+        );
+        assert!(!drawn("photon-review-checklist-body", &mut cx));
+        assert!(!drawn("photon-check-box-settings:Login:Audited", &mut cx));
+        click("photon-review-step-checklist", &mut cx);
+        item.read_with(&cx, |item, _| assert!(item.checklist_open));
+        assert!(drawn("photon-check-box-settings:Login:Audited", &mut cx));
+    }
+
+    #[gpui::test]
+    async fn feedback_rows_keep_edit_and_done_behind_hover(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        set_login(&item, true, &mut cx);
+        let fake = install_fake(&mut cx);
+        fake.respond(
+            |request| {
+                request
+                    .args
+                    .iter()
+                    .any(|argument| argument.ends_with("/replies"))
+            },
+            Ok(r#"{"id":2002,"user":{"login":"maya"},"body":"Done","created_at":"t"}"#.into()),
+        );
+        fake.respond(
+            |request| {
+                request
+                    .stdin
+                    .as_deref()
+                    .is_some_and(|stdin| stdin.contains("resolveReviewThread("))
+            },
+            Ok(r#"{"data":{"x":{}}}"#.to_string()),
+        );
+        assert!(drawn("photon-feedback-row-PRRT_1", &mut cx));
+        hover("photon-feedback-row-PRRT_1", &mut cx);
+        click("photon-feedback-done-PRRT_1", &mut cx);
+        assert_eq!(fake.requests().len(), 2);
+        item.read_with(&cx, |item, _| assert!(item.detail.threads[0].is_resolved));
+    }
+
+    #[gpui::test]
+    async fn saved_drafts_show_edit_and_delete_on_hover(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(
+            cx,
+            vec![Draft {
+                body: "Why audit here?".into(),
+                ..current_draft("src/login.rs", 3, "    audit(user);")
+            }],
+        )
+        .await;
+        hover("photon-review-draft-edit-0", &mut cx);
+        click("photon-review-draft-edit-0", &mut cx);
+        item.read_with(&cx, |item, _| {
+            assert!(item.draft_views[0].composer.is_some())
+        });
+    }
+
+    #[gpui::test]
+    async fn an_outdated_draft_has_one_menu(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(
+            cx,
+            vec![Draft {
+                body: "Why audit here?".into(),
+                ..current_draft("src/login.rs", 3, "    audit(user);")
+            }],
+        )
+        .await;
+        item.update(&mut cx, |item, cx| {
+            item.drafts[0].outdated = true;
+            cx.notify();
+        });
+        click("photon-review-outdated-menu-0", &mut cx);
+        assert!(drawn("MENU_ITEM-Place on the selected lines", &mut cx));
+        assert!(drawn("MENU_ITEM-Delete draft", &mut cx));
+        click("MENU_ITEM-Post as a general comment", &mut cx);
+        item.read_with(&cx, |item, _| assert!(item.drafts[0].general));
+    }
+
+    #[gpui::test]
+    async fn the_submit_popover_posts_the_chosen_verdict(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, submit_drafts()).await;
+        set_login(&item, false, &mut cx);
+        let fake = install_fake(&mut cx);
+        fake.respond(is_review_post, Ok("{}".into()));
+        fake.respond(is_detail, Ok(DETAIL.into()));
+        click("photon-review-submit", &mut cx);
+        assert!(drawn("photon-review-verdict-Comment", &mut cx));
+        assert!(drawn("photon-review-verdict-Request changes", &mut cx));
+        click("photon-review-verdict-Approve", &mut cx);
+        item.read_with(&cx, |item, _| {
+            assert_eq!(item.verdict(), ReviewEvent::Approve)
+        });
+        click("photon-review-submit-confirm", &mut cx);
+        let posts: Vec<_> = fake.requests().into_iter().filter(is_review_post).collect();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(request_json(&posts[0])["event"], "APPROVE");
+        assert!(!drawn("photon-review-submit-confirm", &mut cx));
+    }
+
+    #[gpui::test]
+    async fn the_submit_popover_offers_only_comment_on_your_own_pr(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, submit_drafts()).await;
+        set_login(&item, true, &mut cx);
+        item.update(&mut cx, |item, _| item.verdict = ReviewEvent::Approve);
+        click("photon-review-submit", &mut cx);
+        assert!(drawn("photon-review-submit-confirm", &mut cx));
+        assert!(!drawn("photon-review-verdict-Approve", &mut cx));
+        item.read_with(&cx, |item, _| {
+            assert_eq!(item.verdict(), ReviewEvent::Comment)
+        });
+    }
+
+    #[gpui::test]
+    async fn a_failed_submit_keeps_the_popover_open(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, submit_drafts()).await;
+        set_login(&item, false, &mut cx);
+        let fake = install_fake(&mut cx);
+        fake.respond(
+            is_review_post,
+            Err(GhError::Failed {
+                message: "gh: HTTP 422".into(),
+            }),
+        );
+        click("photon-review-submit", &mut cx);
+        click("photon-review-submit-confirm", &mut cx);
+        assert!(drawn("photon-review-submit-confirm", &mut cx));
+        item.read_with(&cx, |item, _| {
+            assert_eq!(item.submit_error.as_deref(), Some("gh: HTTP 422"))
+        });
     }
 }
