@@ -29,6 +29,19 @@ impl Global for WebEditorRegistry {}
 
 impl WebEditorRegistry {
     pub fn register(&mut self, editor: WebEditor) {
+        // The id is the page's URL host, which WebKit lowercases; it also names a data directory.
+        let valid_id = !editor.id.is_empty()
+            && editor.id.chars().all(|character| {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+            });
+        if !valid_id {
+            log::warn!(
+                "web editor {:?} from {} is not registered: ids may only use a-z, 0-9 and -",
+                editor.id,
+                editor.extension_id
+            );
+            return;
+        }
         self.editors.retain(|existing| existing.id != editor.id);
         self.editors.push(editor);
     }
@@ -131,5 +144,17 @@ mod tests {
         assert!(registry.editor("a").is_none());
         assert!(registry.editor_for_path(Path::new("x.aaa")).is_none());
         assert!(registry.editor("b").is_some());
+    }
+
+    #[test]
+    fn editor_ids_must_be_valid_url_hosts() {
+        let mut registry = WebEditorRegistry::default();
+        for id in ["Draw", "a.b", "a_b", "", "../x", "a/b", "drāw", "a b"] {
+            registry.register(editor(id, "ext", &["aaa"], false));
+            assert!(registry.editor(id).is_none(), "{id:?} was registered");
+        }
+        assert!(registry.editor_for_path(Path::new("x.aaa")).is_none());
+        registry.register(editor("excalidraw-2", "ext", &["aaa"], false));
+        assert!(registry.editor("excalidraw-2").is_some());
     }
 }
