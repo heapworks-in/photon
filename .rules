@@ -145,3 +145,17 @@ Photon is a fork of Zed. Keep upstream merges cheap:
 * Prefer changing defaults in `assets/settings/default.json` over changing code.
 * Never delete upstream crates or files; switch features off instead.
 * Specs live in `docs/photon/specs/`, plans in `docs/photon/plans/`.
+
+# Photon product rules
+
+* **Look and behave like Zed.** A Photon feature should look as if Zed shipped it. Build it from Zed's
+  existing components and patterns (`ContextMenu`, `PopoverMenu`, toggleable menu entries, `Checkbox`,
+  `Label` sizes and colours, notifications, settings) before inventing new UI.
+* **Keep controls few.** Group related options in one menu instead of adding buttons. Configure through
+  `settings.json`, like Zed does.
+* **No Zed in anything a user sees**: UI text, tooltips, settings descriptions, menus, errors, docs.
+  Say Photon. The exceptions:
+  * Identifiers that would break saved data or keymaps: action names (`zed: …`), settings keys, IDs, paths.
+  * Zed's own services, which Photon keeps off: zed.dev, Zed accounts and plans, hosted models,
+    collaboration.
+  * Attribution: "Based on Zed", licences.
