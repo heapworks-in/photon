@@ -24,11 +24,17 @@ enum State {
 pub struct Lifecycle {
     state: State,
     not_native_since: Option<Instant>,
+    visible: bool,
 }
 
 impl Lifecycle {
-    pub fn on_frame(&mut self, visible: bool, focused: bool, now: Instant) -> Action {
-        let wants_native = visible && focused;
+    /// `visible` is `None` for calls that aren't frames (focus loss, the drop timer), where the tab
+    /// is still where it was last seen.
+    pub fn on_frame(&mut self, visible: Option<bool>, focused: bool, now: Instant) -> Action {
+        if let Some(visible) = visible {
+            self.visible = visible;
+        }
+        let wants_native = self.visible && focused;
         match self.state {
             // Unfocused tabs paint their last snapshot (or a placeholder), so nothing is created.
             State::Absent if !wants_native => Action::None,
@@ -58,6 +64,12 @@ impl Lifecycle {
         self.state == State::Native
     }
 
+    /// A snapshot is a full-size image in memory and in the GPU atlas, so only a tab on screen
+    /// keeps one.
+    pub fn keeps_snapshot(&self) -> bool {
+        self.visible
+    }
+
     fn transition(&mut self, state: State) -> Action {
         if self.state == state {
             return Action::None;
@@ -83,7 +95,11 @@ mod tests {
         steps
             .iter()
             .map(|(seconds, visible, focused)| {
-                lifecycle.on_frame(*visible, *focused, start + Duration::from_secs(*seconds))
+                lifecycle.on_frame(
+                    Some(*visible),
+                    *focused,
+                    start + Duration::from_secs(*seconds),
+                )
             })
             .collect()
     }
@@ -308,5 +324,40 @@ mod tests {
                 Action::Drop
             ]
         );
+    }
+
+    #[test]
+    fn only_a_visible_tab_keeps_its_snapshot() {
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+
+        // A split that lost focus stays on screen: its snapshot is what it shows.
+        let mut split = Lifecycle::default();
+        split.on_frame(Some(true), true, at(0));
+        split.on_frame(Some(true), true, at(0));
+        assert_eq!(split.on_frame(None, false, at(1)), Action::ShowSnapshot);
+        assert!(split.keeps_snapshot());
+        // The drop check isn't a frame: it doesn't know the tab is still on screen.
+        assert_eq!(split.on_frame(None, false, at(61)), Action::Drop);
+        assert!(
+            split.keeps_snapshot(),
+            "a dropped page still shows its snapshot"
+        );
+
+        // A tab another one replaced holds nothing.
+        let mut hidden = Lifecycle::default();
+        hidden.on_frame(Some(true), true, at(0));
+        hidden.on_frame(Some(true), true, at(0));
+        hidden.on_frame(None, false, at(1));
+        assert_eq!(hidden.on_frame(Some(false), false, at(1)), Action::None);
+        assert!(!hidden.keeps_snapshot());
+        assert_eq!(hidden.on_frame(None, false, at(61)), Action::Drop);
+        assert!(!hidden.keeps_snapshot());
+
+        // Shown again unfocused, it may keep the next snapshot.
+        hidden.on_frame(Some(true), false, at(62));
+        assert!(hidden.keeps_snapshot());
+
+        assert!(!Lifecycle::default().keeps_snapshot());
     }
 }

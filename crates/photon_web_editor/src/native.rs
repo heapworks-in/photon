@@ -182,8 +182,10 @@ impl NativePage {
         self.webview.focus().log_err();
     }
 
-    fn hide(&self) {
-        self.take_snapshot();
+    fn hide(&self, take_snapshot: bool) {
+        if take_snapshot {
+            self.take_snapshot();
+        }
         self.webview.set_visible(false).log_err();
         self.webview.focus_parent().log_err();
     }
@@ -292,6 +294,12 @@ impl NativeHost {
             drop_check: None,
         }
     }
+
+    fn drop_snapshot(&mut self, window: &mut Window) {
+        if let Some(snapshot) = self.snapshot.take() {
+            window.drop_image(snapshot).log_err();
+        }
+    }
 }
 
 pub(crate) fn subscribe(
@@ -304,13 +312,9 @@ pub(crate) fn subscribe(
         // Handled here rather than at the next prepaint: when another tab takes focus this view is
         // not drawn again, but its native view must not stay on top.
         cx.on_focus_out(focus_handle, window, |view, _, window, cx| {
-            on_frame(view, false, None, window, cx);
+            on_frame(view, None, None, window, cx);
         }),
-        cx.on_release_in(window, |view, window, _| {
-            if let Some(snapshot) = view.native.snapshot.take() {
-                window.drop_image(snapshot).log_err();
-            }
-        }),
+        cx.on_release_in(window, |view, window, _| view.native.drop_snapshot(window)),
     ]
 }
 
@@ -320,9 +324,7 @@ pub(crate) fn uninstalled(view: &mut WebEditorView, window: &mut Window) {
     view.native.drop_check = None;
     view.native.error = None;
     view.native.lifecycle = Lifecycle::default();
-    if let Some(snapshot) = view.native.snapshot.take() {
-        window.drop_image(snapshot).log_err();
-    }
+    view.native.drop_snapshot(window);
 }
 
 /// Called when the tab is no longer the active one in its pane.
@@ -331,7 +333,7 @@ pub(crate) fn hidden(
     window: &mut Window,
     cx: &mut Context<WebEditorView>,
 ) {
-    on_frame(view, false, None, window, cx);
+    on_frame(view, Some(false), None, window, cx);
 }
 
 /// The native view draws above everything in the window, so it is shown only while the tab has
@@ -379,7 +381,7 @@ pub(crate) fn element(view: &WebEditorView, cx: &mut Context<WebEditorView>) -> 
                     canvas(
                         move |bounds, window, cx| {
                             this.update(cx, |view, cx| {
-                                on_frame(view, true, Some(bounds), window, cx)
+                                on_frame(view, Some(true), Some(bounds), window, cx)
                             })
                             .log_err();
                         },
@@ -393,7 +395,7 @@ pub(crate) fn element(view: &WebEditorView, cx: &mut Context<WebEditorView>) -> 
 
 fn on_frame(
     view: &mut WebEditorView,
-    visible: bool,
+    visible: Option<bool>,
     bounds: Option<Bounds<Pixels>>,
     window: &mut Window,
     cx: &mut Context<WebEditorView>,
@@ -423,7 +425,7 @@ fn on_frame(
         }
         Action::ShowSnapshot => {
             if let Some(live) = &view.native.page {
-                live.page.hide();
+                live.page.hide(view.native.lifecycle.keeps_snapshot());
             }
         }
         Action::Drop => {
@@ -431,6 +433,9 @@ fn on_frame(
             view.set_page(None);
         }
         Action::None | Action::Create => {}
+    }
+    if !view.native.lifecycle.keeps_snapshot() {
+        view.native.drop_snapshot(window);
     }
 
     // One timer while the page exists but isn't shown live; showing it cancels the timer.
@@ -442,7 +447,7 @@ fn on_frame(
             cx.background_executor().timer(DROP_AFTER).await;
             this.update_in(cx, |view, window, cx| {
                 view.native.drop_check = None;
-                on_frame(view, false, None, window, cx);
+                on_frame(view, None, None, window, cx);
             })
             .log_err();
         }));
@@ -568,6 +573,10 @@ fn handle_event(
                     .spawn(async move { decode_snapshot(&image) })
                     .await?;
                 this.update_in(cx, |view, window, cx| {
+                    // The tab may have been hidden while the snapshot was taken.
+                    if !view.native.lifecycle.keeps_snapshot() {
+                        return;
+                    }
                     if let Some(previous) = view.native.snapshot.replace(snapshot) {
                         window.drop_image(previous).log_err();
                     }
