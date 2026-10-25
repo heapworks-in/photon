@@ -255,6 +255,17 @@ pub(crate) fn subscribe(
     ]
 }
 
+/// Called when the tab's editor is uninstalled: the page goes until the editor comes back.
+pub(crate) fn uninstalled(view: &mut WebEditorView, window: &mut Window) {
+    view.native.page = None;
+    view.native.drop_check = None;
+    view.native.error = None;
+    view.native.lifecycle = Lifecycle::default();
+    if let Some(snapshot) = view.native.snapshot.take() {
+        window.drop_image(snapshot).log_err();
+    }
+}
+
 /// Called when the tab is no longer the active one in its pane.
 pub(crate) fn hidden(
     view: &mut WebEditorView,

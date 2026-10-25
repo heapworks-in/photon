@@ -1,5 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -23,13 +24,17 @@ use workspace::{
     item::{Item, ItemBufferKind, ItemEvent, ProjectItem, SaveOptions, SerializableItem},
 };
 
-use crate::{Appearance, FromPage, ToPage, WebDocument, forwarded_shortcuts};
+use crate::{
+    Appearance, FromPage, PROTOCOL_VERSION, ToPage, WebDocument, WebEditorRegistry,
+    forwarded_shortcuts,
+};
 
 const FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Serialize, Deserialize)]
 struct SerializedTab {
     path: PathBuf,
+    editor_id: Arc<str>,
     unsaved_text: Option<String>,
     saved_mtime: Option<MTime>,
 }
@@ -76,6 +81,18 @@ impl WebEditorView {
                     appearance: appearance(cx),
                 })
             }),
+            cx.observe_global_in::<WebEditorRegistry>(
+                window,
+                #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+                |this, window, cx| {
+                    if this.editor_missing(cx) {
+                        #[cfg(target_os = "macos")]
+                        crate::native::uninstalled(this, window);
+                        this.set_page(None);
+                    }
+                    cx.notify();
+                },
+            ),
         ];
         #[cfg(target_os = "macos")]
         subscriptions.extend(crate::native::subscribe(&focus_handle, window, cx));
@@ -98,6 +115,13 @@ impl WebEditorView {
         &self.document
     }
 
+    pub fn editor_missing(&self, cx: &App) -> bool {
+        let editor_id = self.document.read(cx).editor_id();
+        cx.try_global::<WebEditorRegistry>()
+            .and_then(|registry| registry.editor(editor_id))
+            .is_none()
+    }
+
     pub fn set_page(&mut self, page: Option<Rc<dyn PageConnection>>) {
         self.page = page;
         self.page_text = None;
@@ -112,6 +136,13 @@ impl WebEditorView {
         cx: &mut Context<Self>,
     ) {
         match message {
+            FromPage::Ready { version } if version != PROTOCOL_VERSION => {
+                log::warn!(
+                    "web editor page speaks protocol {version}, Photon speaks {PROTOCOL_VERSION}"
+                );
+                self.error = Some("This editor needs a different version of Photon".into());
+                cx.notify();
+            }
             FromPage::Ready { .. } => self.load_page(cx),
             FromPage::Changed { text } => {
                 // After an error the page may hold a half-read scene; writing it back could destroy the file.
@@ -331,6 +362,11 @@ impl Render for WebEditorView {
             .relative()
             .bg(cx.theme().colors().editor_background)
             .map(|this| {
+                if self.editor_missing(cx) {
+                    return this.p_4().child(
+                        Label::new("This editor is no longer installed").color(Color::Muted),
+                    );
+                }
                 #[cfg(target_os = "macos")]
                 return this.child(crate::native::element(self, cx));
                 #[cfg(not(target_os = "macos"))]
@@ -546,9 +582,10 @@ impl SerializableItem for WebEditorView {
                 worktree_id: worktree.read_with(cx, |worktree, _| worktree.id()),
                 path,
             };
+            // A tab whose editor was uninstalled still restores, so its unsaved text is not lost.
             let editor_id = cx
                 .update(|_, cx| WebDocument::editor_id_for_path(&project, &project_path, cx))?
-                .with_context(|| format!("no web editor is installed for {abs_path:?}"))?;
+                .unwrap_or(tab.editor_id);
             let document = cx
                 .update(|_, cx| WebDocument::open(project.clone(), project_path, editor_id, cx))?
                 .await?;
@@ -584,6 +621,7 @@ impl SerializableItem for WebEditorView {
     ) -> Option<Task<Result<()>>> {
         let workspace_id = workspace.database_id()?;
         let path = self.abs_path(cx)?;
+        let editor_id = self.document.read(cx).editor_id().clone();
         let buffer = self.buffer(cx);
         let buffer = buffer.read(cx);
         let unsaved_text = buffer.is_dirty().then(|| buffer.text());
@@ -592,6 +630,7 @@ impl SerializableItem for WebEditorView {
         Some(cx.background_spawn(async move {
             let tab = serde_json::to_string(&SerializedTab {
                 path,
+                editor_id,
                 unsaved_text,
                 saved_mtime,
             })?;
@@ -1224,5 +1263,79 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[gpui::test]
+    async fn ready_with_another_protocol_version_shows_an_error(cx: &mut TestAppContext) {
+        let (_fs, _project, view, page, cx) = open_view("{}", cx).await;
+        send(&view, FromPage::Ready { version: 2 }, cx);
+        assert_eq!(
+            page.take(),
+            vec![],
+            "nothing is loaded into a mismatched page"
+        );
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.error.as_deref(),
+                Some("This editor needs a different version of Photon")
+            );
+        });
+        send(&view, changed("from a mismatched page"), cx);
+        assert!(!view.read_with(cx, |view, cx| view.is_dirty(cx)));
+    }
+
+    fn uninstall_built_in(cx: &mut VisualTestContext) {
+        cx.update(|_, cx| {
+            cx.update_global::<WebEditorRegistry, _>(|registry, _| {
+                registry.unregister_extension("photon")
+            })
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn open_tab_survives_its_editor_being_uninstalled(cx: &mut TestAppContext) {
+        let (fs, project, view, page, cx) = open_view("{}", cx).await;
+        send(&view, ready(), cx);
+        send(&view, changed("unsaved"), cx);
+        page.take();
+
+        uninstall_built_in(cx);
+        view.read_with(cx, |view, cx| {
+            assert!(view.editor_missing(cx));
+            assert!(view.page.is_none(), "the page is dropped");
+            assert!(view.is_dirty(cx));
+            assert_eq!(view.document.read(cx).buffer().read(cx).text(), "unsaved");
+        });
+
+        view.update(cx, |view, cx| {
+            view.buffer(cx)
+                .update(cx, |buffer, cx| buffer.set_text("edited elsewhere", cx))
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            page.take(),
+            vec![],
+            "nothing is sent once the editor is gone"
+        );
+
+        save(&view, &project, cx).await;
+        assert_eq!(file_text(&fs, FILE).await, "edited elsewhere");
+    }
+
+    #[gpui::test]
+    async fn restore_with_a_missing_editor_keeps_the_tab(cx: &mut TestAppContext) {
+        let (fs, project) = project_with("{}", cx).await;
+        let (workspace, workspace_id, cx) = workspace_with_id(&project, cx).await;
+        dirty_view_serialized("unsaved", &project, &workspace, 42, cx).await;
+        uninstall_built_in(cx);
+
+        let project = Project::test(fs.clone(), [Path::new("/root")], cx).await;
+        let restored = restore_view(&workspace, &project, workspace_id, 42, cx).await;
+        restored.read_with(cx, |view, cx| {
+            assert!(view.editor_missing(cx));
+            assert!(view.is_dirty(cx));
+            assert_eq!(view.document.read(cx).buffer().read(cx).text(), "unsaved");
+        });
     }
 }
