@@ -40,7 +40,7 @@ every capability and moves most of them one click away.
 7. **One visible action per card.** Feedback rows: click the row to show the thread; Edit and Done
    are icon buttons that appear on hover. Saved drafts: Edit and Delete appear as icon buttons on
    hover. Composers: Add to review stands out; Suggest change and Cancel are quiet. Threads:
-   Reply stands out; Resolve is quiet. Outdated drafts: one ⋯ menu each (Place it here again,
+   Reply stands out; Resolve is quiet. Outdated drafts: one ⋯ menu each (Place on the selected lines,
    Include again, Post as a general comment, Delete draft).
 8. **Submit popover**: verdict radio (Comment / Approve / Request changes; only Comment on your own
    PR), the summary editor, draft count, steps viewed, checklist status, the left-out and
