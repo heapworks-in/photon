@@ -155,6 +155,9 @@ Photon is a fork of Zed. Keep upstream merges cheap:
   polling where an event exists, nothing loaded or spawned until it's used, and nothing kept alive
   after it's closed. Prefer one shared process or cache over one per tab. Measure memory and CPU for
   anything that runs in the background, and keep the lean baseline (`tooling/photon-perf`) green.
+* **Simple UX, never convoluted.** Every screen should be obvious at a glance: one clear primary
+  action, plain words, no modes or steps the user has to learn. If a flow needs explaining, simplify
+  the flow instead of adding help text.
 * **Keep controls few.** Group related options in one menu instead of adding buttons. Configure through
   `settings.json`, like Zed does.
 * **No Zed in anything a user sees**: UI text, tooltips, settings descriptions, menus, errors, docs.
