@@ -28,6 +28,15 @@ use util::{ResultExt, paths::PathExt};
 use workspace::{DismissDecision, ModalView, Workspace};
 pub use zed_actions::{ShowIncomingCalls, ShowOutgoingCalls, ToggleDirection};
 
+// photon: the popup's "Keep Open" button hands its hierarchy to Photon's call hierarchy panel.
+gpui::actions!(
+    call_hierarchy,
+    [
+        /// Keeps the call hierarchy open in a panel.
+        KeepOpen
+    ]
+);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CallHierarchyMode {
     #[default]
@@ -153,6 +162,26 @@ pub async fn fetch_calls(
     calls
 }
 
+// photon: the call hierarchy panel labels its root like the popup labels calls.
+pub async fn call_for_item(
+    item: CallHierarchyItem,
+    project: &Entity<Project>,
+    cx: &mut AsyncWindowContext,
+) -> Call {
+    let mut calls = [Call {
+        target: item_location(&item),
+        item,
+        site_count: 1,
+        label: None,
+        display: CallDisplay::default(),
+    }];
+    attach_labels(&mut calls, project, cx).await;
+    let [mut call] = calls;
+    cx.update(|_, cx| call.display = compute_call_display(&call, cx))
+        .ok();
+    call
+}
+
 pub fn init(cx: &mut App) {
     cx.observe_new(CallHierarchyView::register).detach();
 }
@@ -265,6 +294,12 @@ impl CallHierarchyView {
             mode,
             _subscriptions: [project_subscription, lsp_store_subscription],
         }
+    }
+
+    // photon: read by the call hierarchy panel's Keep Open.
+    pub fn root_and_mode(&self, cx: &App) -> Option<(CallHierarchyItem, CallHierarchyMode)> {
+        let delegate = &self.picker.read(cx).delegate;
+        Some((delegate.root_item.clone()?, delegate.mode))
     }
 
     fn retry_empty_hierarchy(
@@ -709,6 +744,16 @@ impl PickerDelegate for CallHierarchyDelegate {
                 .flex_wrap()
                 .border_t_1()
                 .border_color(cx.theme().colors().border_variant)
+                // photon: keep the hierarchy open in Photon's call hierarchy panel.
+                .child(
+                    div()
+                        .debug_selector(|| "call-hierarchy-keep-open".into())
+                        .child(
+                            Button::new("keep-open", "Keep Open").on_click(|_, window, cx| {
+                                window.dispatch_action(KeepOpen.boxed_clone(), cx);
+                            }),
+                        ),
+                )
                 .when(!self.root_stack.is_empty(), |this| {
                     this.child(
                         Button::new("collapse-call", "Back")
@@ -1181,7 +1226,8 @@ fn shaped_width(
         .width
 }
 
-fn render_item(
+// photon: public so the call hierarchy panel draws labels like the popup.
+pub fn render_item(
     call_item: &Call,
     match_ranges: impl IntoIterator<Item = Range<usize>>,
     cx: &App,
