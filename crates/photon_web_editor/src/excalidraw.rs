@@ -335,12 +335,27 @@ fn excalidraw_ships_its_licence() {
 const SESSION_HARNESS: &str = r##"
 const session = await import("data:text/javascript," + encodeURIComponent(process.env.SESSION));
 const sent = [];
-const timers = [];
+// A fake clock: `advance` runs the timers that fall due, in order.
+let now = 0;
+let nextTimer = 0;
+const timers = new Map();
 const fakeTimers = {
-  setTimeout: (callback) => { timers.push(callback); return timers.length - 1; },
-  clearTimeout: (id) => { timers[id] = null; },
+  setTimeout: (callback, ms) => { timers.set(nextTimer, { callback, due: now + ms }); return nextTimer++; },
+  clearTimeout: (id) => { timers.delete(id); },
 };
-const runTimers = () => { for (let i = 0; i < timers.length; i++) { const t = timers[i]; timers[i] = null; if (t) t(); } };
+const advance = (ms) => {
+  const end = now + ms;
+  for (;;) {
+    let next = null;
+    for (const [id, timer] of timers) if (timer.due <= end && (!next || timer.due < next[1].due)) next = [id, timer];
+    if (!next) break;
+    timers.delete(next[0]);
+    now = next[1].due;
+    next[1].callback();
+  }
+  now = end;
+};
+const runTimers = () => advance(1e9);
 // Stand-ins for Excalidraw: a scene version is the sum of element versions.
 const sceneVersion = (elements) => elements.reduce((sum, element) => sum + element.version, 0);
 const restore = (data) => {
@@ -361,9 +376,9 @@ runTimers();
 expect("load sends nothing", sent.length === 0);
 
 s.change([{ id: "a", version: 4 }], scene.appState, {});
-expect("changes are debounced", sent.length === 0);
+expect("the first change is sent at once", sent.length === 1 && sent[0].type === "changed" && JSON.parse(sent[0].text).elements[0].version === 4);
 runTimers();
-expect("edit sends changed", sent.length === 1 && sent[0].type === "changed" && JSON.parse(sent[0].text).elements[0].version === 4);
+expect("a sent change is not sent again", sent.length === 1);
 s.change([{ id: "a", version: 4 }], scene.appState, {});
 runTimers();
 expect("an unchanged scene is not resent", sent.length === 1);
@@ -384,10 +399,44 @@ for (const [field, value] of [["gridModeEnabled", true], ["gridSize", 40], ["gri
 
 sent.length = 0;
 s.change([{ id: "a", version: 9 }], scene.appState, {});
+s.change([{ id: "a", version: 10 }], scene.appState, {});
 s.flush(7);
-expect("flush sends the pending change then flushed", sent.length === 2 && sent[0].type === "changed" && sent[1].type === "flushed" && sent[1].request === 7);
+expect("flush sends the pending change then flushed", sent.length === 3 && sent[1].type === "changed" && JSON.parse(sent[1].text).elements[0].version === 10 && sent[2].type === "flushed" && sent[2].request === 7);
 runTimers();
-expect("a flushed change is not sent twice", sent.length === 2);
+expect("a flushed change is not sent twice", sent.length === 3);
+
+// A burst: the first change at once, the rest as one more send once the edits pause.
+sent.length = 0;
+let version = 20;
+s.change([{ id: "a", version: version++ }], scene.appState, {});
+expect("a burst's first change is sent at once", sent.length === 1);
+for (let step = 0; step < 6; step++) {
+  advance(50);
+  s.change([{ id: "a", version: version++ }], scene.appState, {});
+}
+expect("the rest of a burst waits for a pause", sent.length === 1);
+advance(299);
+expect("the pause is the debounce", sent.length === 1);
+advance(1);
+expect("a burst sends at most one more", sent.length === 2 && JSON.parse(sent[1].text).elements[0].version === version - 1);
+runTimers();
+expect("nothing more after a burst", sent.length === 2);
+
+// Continuous edits: none waits longer than the max wait to be sent.
+sent.length = 0;
+const sentAt = [];
+const changedAt = [];
+const continuous = session.createSession({ restore, serialize, sceneVersion, send: (m) => { sent.push(m); sentAt.push(now); }, timers: fakeTimers });
+scene = continuous.load(file);
+for (let step = 0; step < 50; step++) {
+  changedAt.push(now);
+  continuous.change([{ id: "a", version: 100 + step }], scene.appState, {});
+  advance(100);
+}
+runTimers();
+const late = changedAt.filter((at) => !sentAt.some((sentTime) => sentTime >= at && sentTime <= at + 1000));
+expect("continuous changes are sent within the max wait (late: " + late.join(",") + ")", late.length === 0);
+expect("continuous changes are still debounced", sent.length <= 8);
 
 sent.length = 0;
 s = make();
@@ -413,7 +462,7 @@ if (failures.length) { console.error(failures.join("\n")); process.exit(1); }
 "##;
 
 #[test]
-fn excalidraw_adapter_never_dirties_a_file_on_open() {
+fn excalidraw_adapter_sends_changes_at_once_then_debounced() {
     let output = smol::block_on(
         smol::process::Command::new("node")
             .args(["--input-type=module", "-e", SESSION_HARNESS])

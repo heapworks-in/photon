@@ -23,12 +23,16 @@ export function createSession({
   sceneVersion,
   send,
   debounceMs = 300,
+  maxWaitMs = 1000,
   timers = globalThis,
 }) {
   // Key of the scene as loaded or last sent; null while nothing editable is loaded, so changes are ignored.
   let saved = null;
   let pending = null;
-  let timer = null;
+  // Set while edits are coming in; the first change of a burst is sent at once so the tab turns
+  // dirty before a quick close, and the rest wait for a pause (or the max wait).
+  let quietTimer = null;
+  let maxWaitTimer = null;
 
   // These are saved in the file but changing them does not bump the scene version.
   const keyOf = (elements, appState) =>
@@ -40,16 +44,22 @@ export function createSession({
       appState?.gridStep,
     ]);
 
-  const cancel = () => {
+  const clear = (timer) => {
     if (timer !== null) timers.clearTimeout(timer);
-    timer = null;
+    return null;
+  };
+
+  const cancel = () => {
+    quietTimer = clear(quietTimer);
+    maxWaitTimer = clear(maxWaitTimer);
     pending = null;
   };
 
   const sendPending = () => {
+    maxWaitTimer = clear(maxWaitTimer);
     if (!pending) return;
     const { elements, appState, files, key } = pending;
-    cancel();
+    pending = null;
     send({ type: "changed", text: serialize(elements, appState, files) });
     saved = key;
   };
@@ -95,8 +105,17 @@ export function createSession({
         return;
       }
       pending = { elements, appState, files, key };
-      if (timer !== null) timers.clearTimeout(timer);
-      timer = timers.setTimeout(sendPending, debounceMs);
+      const inBurst = quietTimer !== null;
+      clear(quietTimer);
+      quietTimer = timers.setTimeout(() => {
+        quietTimer = null;
+        sendPending();
+      }, debounceMs);
+      if (!inBurst) {
+        sendPending();
+      } else if (maxWaitTimer === null) {
+        maxWaitTimer = timers.setTimeout(sendPending, maxWaitMs);
+      }
     },
 
     flush(request) {
