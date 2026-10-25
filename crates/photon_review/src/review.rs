@@ -6450,6 +6450,29 @@ fn verify_password(user: &str, password: &str) -> bool {
         );
     }
 
+    // A file no language server handles (YAML here) still shows its diff.
+    #[gpui::test]
+    async fn files_without_a_language_server_still_show_their_diff(cx: &mut TestAppContext) {
+        const CI_BASE: &str = "name: ci\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n";
+        const CI_HEAD: &str = "name: ci\non: push\njobs:\n  test:\n    runs-on: macos-15\n";
+        let (item, mut cx) = open_item(
+            cx,
+            json!({ ".github": { "workflows": { "ci.yml": CI_HEAD } } }),
+            vec![modified(".github/workflows/ci.yml", CI_BASE)],
+            Graph {
+                functions: Vec::new(),
+                calls: Vec::new(),
+            },
+            false,
+            None,
+        )
+        .await;
+        settle(&mut cx);
+        item.read_with(&cx, |item, _| assert!(!item.steps().is_empty(), "the file gets a step"));
+        let shown = text(&item, &mut cx);
+        assert!(shown.contains("runs-on: macos-15"), "diff shown: {shown:?}");
+    }
+
     #[gpui::test]
     async fn untrusted_worktree_waits_for_trust(cx: &mut TestAppContext) {
         let (item, mut cx, prepares) = open_item_with(
