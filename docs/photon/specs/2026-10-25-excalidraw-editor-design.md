@@ -47,6 +47,10 @@ Others (draw.io, a Mermaid editor, a CSV grid) can follow without changing Photo
   Liberation Sans and Assistant. Xiaolai (the large CJK handwriting font) doesn't; CJK text falls
   back to system fonts with no request made.
 - Theme follows Photon's light or dark appearance.
+- **Popular community libraries ship with it**, preloaded in Excalidraw's own library sidebar and
+  grouped by library: the ~30 most-downloaded from Excalidraw's open-source `excalidraw-libraries`
+  repository (MIT), taken at a pinned commit when the bundle is built, each licence checked. They
+  have their own budget of ≤3 MB and load only when a diagram opens.
 - Imported `.excalidrawlib` shape libraries persist between sessions (stored by Photon on the
   page's behalf; the protocol grows a `library` message for this).
 - An empty (0-byte) file opens as a blank diagram. Any other file that isn't valid Excalidraw JSON
