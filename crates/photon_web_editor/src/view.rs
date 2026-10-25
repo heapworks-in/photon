@@ -357,6 +357,7 @@ impl Focusable for WebEditorView {
 impl Render for WebEditorView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .debug_selector(|| "web-editor-body".into())
             .track_focus(&self.focus_handle)
             .size_full()
             .relative()
@@ -820,6 +821,21 @@ mod tests {
 
     async fn file_text(fs: &FakeFs, path: &str) -> String {
         fs.load(Path::new(path)).await.expect("file exists")
+    }
+
+    // The native web view is placed where this host is laid out, so it must cover the tab exactly.
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    async fn the_web_view_host_covers_the_whole_tab(cx: &mut TestAppContext) {
+        let (_fs, _project, _view, _page, cx) = open_view("{}", cx).await;
+        cx.run_until_parked();
+        let body = cx
+            .debug_bounds("web-editor-body")
+            .expect("tab body is drawn");
+        let host = cx
+            .debug_bounds("web-editor-host")
+            .expect("web view host is drawn");
+        assert_eq!(host, body);
     }
 
     #[gpui::test]

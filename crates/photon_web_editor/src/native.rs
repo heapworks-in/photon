@@ -11,9 +11,9 @@ use anyhow::{Context as _, Result};
 use futures::{StreamExt as _, channel::mpsc};
 use gpui::{
     AnyElement, App, AssetSource, Bounds, Context, FocusHandle, Focusable as _, Global,
-    ImageSource, IntoElement as _, ObjectFit, ParentElement as _, Pixels, RenderImage,
-    SharedString, Styled as _, StyledImage as _, Subscription, Task, TaskExt as _, Window, canvas,
-    div, img,
+    ImageSource, InteractiveElement as _, IntoElement as _, ObjectFit, ParentElement as _, Pixels,
+    RenderImage, SharedString, Styled as _, StyledImage as _, Subscription, Task, TaskExt as _,
+    Window, canvas, div, img,
 };
 use objc2::rc::Retained;
 use objc2_app_kit::NSImage;
@@ -355,8 +355,11 @@ pub(crate) fn element(view: &WebEditorView, cx: &mut Context<WebEditorView>) -> 
             )
             .into_any_element(),
     };
+    // Absolute layers without an inset sit after their siblings, so each is pinned to the corner.
     div()
         .absolute()
+        .top_0()
+        .left_0()
         .size_full()
         .child(backdrop)
         .children(
@@ -366,17 +369,24 @@ pub(crate) fn element(view: &WebEditorView, cx: &mut Context<WebEditorView>) -> 
                 .map(|error| div().p_4().child(Label::new(error).color(Color::Error))),
         )
         .child(
-            canvas(
-                move |bounds, window, cx| {
-                    this.update(cx, |view, cx| {
-                        on_frame(view, true, Some(bounds), window, cx)
-                    })
-                    .log_err();
-                },
-                |_, _, _, _| {},
-            )
-            .absolute()
-            .size_full(),
+            div()
+                .debug_selector(|| "web-editor-host".into())
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .child(
+                    canvas(
+                        move |bounds, window, cx| {
+                            this.update(cx, |view, cx| {
+                                on_frame(view, true, Some(bounds), window, cx)
+                            })
+                            .log_err();
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .size_full(),
+                ),
         )
         .into_any_element()
 }
