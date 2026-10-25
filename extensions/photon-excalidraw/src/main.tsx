@@ -16,6 +16,7 @@ import {
   BUNDLED_ID_PREFIX,
   createSession,
   isBundledLibraryItem,
+  showNotice,
 } from "./session.js";
 
 type Api = any;
@@ -127,6 +128,9 @@ photon.onMessage((message: any) => {
       break;
     case "flush":
       session.flush(message.request);
+      break;
+    case "notice":
+      showNotice(api, message.message);
       break;
     case "library":
       try {

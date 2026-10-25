@@ -528,28 +528,34 @@ fn download_destination(
     None
 }
 
-fn show_download_toast(result: Result<PathBuf, String>, window: &mut Window, cx: &mut App) {
+/// A saved download is confirmed inside the page, where the user is looking: a workspace toast
+/// would draw under the focused web view.
+fn show_download_result(
+    view: &WebEditorView,
+    result: Result<PathBuf, String>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     struct DownloadToast;
-    let Some(workspace) = Workspace::for_window(window, cx) else {
-        log::warn!("web editor download finished outside a workspace: {result:?}");
-        return;
-    };
-    let toast = match result {
+    let message = match &result {
         Ok(path) => {
             let name = path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            Toast::new(
-                NotificationId::composite::<DownloadToast>(SharedString::from(
-                    path.to_string_lossy().into_owned(),
-                )),
-                format!("Saved {name} to Downloads"),
-            )
-            .on_click("Reveal in Finder", move |_, cx| cx.reveal_path(&path))
+            format!("Saved {name} to Downloads")
         }
-        Err(message) => Toast::new(NotificationId::unique::<DownloadToast>(), message),
+        Err(message) => message.clone(),
     };
+    if let (Ok(_), Some(live)) = (&result, &view.native.page) {
+        live.page.send(ToPage::Notice { message });
+        return;
+    }
+    let Some(workspace) = Workspace::for_window(window, cx) else {
+        log::warn!("web editor download finished outside a workspace: {message}");
+        return;
+    };
+    let toast = Toast::new(NotificationId::unique::<DownloadToast>(), message);
     workspace.update(cx, |workspace, cx| workspace.show_toast(toast, cx));
 }
 
@@ -564,7 +570,7 @@ fn handle_event(
             Ok(message) => view.handle_page_message(message, window, cx),
             Err(error) => log::warn!("dropping an invalid web editor message: {error}"),
         },
-        PageEvent::Downloaded(result) => show_download_toast(result, window, cx),
+        PageEvent::Downloaded(result) => show_download_result(view, result, window, cx),
         PageEvent::Snapshot(None) => log::warn!("web editor snapshot failed"),
         PageEvent::Snapshot(Some(image)) => {
             cx.spawn_in(window, async move |this, cx| {

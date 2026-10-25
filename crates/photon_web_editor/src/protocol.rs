@@ -31,6 +31,10 @@ pub enum ToPage {
     Library {
         text: String,
     },
+    /// A confirmation for the page to show itself: Photon's toasts would draw under the web view.
+    Notice {
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +103,12 @@ mod tests {
             (
                 ToPage::Library { text: "[]".into() },
                 r#"{"type":"library","text":"[]"}"#,
+            ),
+            (
+                ToPage::Notice {
+                    message: "Saved a.png to Downloads".into(),
+                },
+                r#"{"type":"notice","message":"Saved a.png to Downloads"}"#,
             ),
         ];
         for (message, json) in to_page {
@@ -182,12 +192,15 @@ const shortcuts = JSON.parse(process.env.SHORTCUTS);
 const negatives = ["cmd-z", "cmd-a"];
 let listener = null;
 const posted = [];
+const received = [];
 const fakeWindow = {
   addEventListener: (type, callback) => { if (type === "keydown") listener = callback; },
   ipc: { postMessage: (text) => posted.push(JSON.parse(text)) },
 };
 new Function("window", process.env.BRIDGE)(fakeWindow);
+fakeWindow.photon.onMessage((message) => received.push(message));
 fakeWindow.photon._receive(JSON.stringify({ type: "load", text: "", file_name: "a", shortcuts }));
+fakeWindow.photon._receive(JSON.stringify({ type: "notice", message: "Saved a.png to Downloads" }));
 
 const shifted = { "[": "{", "]": "}" };
 const codes = { "[": "BracketLeft", "]": "BracketRight" };
@@ -212,6 +225,9 @@ const fire = (stroke) => {
 };
 
 const failures = [];
+if (received.length !== 2 || received[1].type !== "notice" || received[1].message !== "Saved a.png to Downloads") {
+  failures.push(`messages not passed to the page: ${JSON.stringify(received)}`);
+}
 for (const stroke of shortcuts) {
   const { event, posted: sent } = fire(stroke);
   const ok = event.defaultPrevented && sent.length === 1

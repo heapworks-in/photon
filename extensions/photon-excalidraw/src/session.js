@@ -17,6 +17,11 @@ export function isBundledLibraryItem(item) {
   return typeof item.id === "string" && item.id.startsWith(BUNDLED_ID_PREFIX);
 }
 
+// Photon's own toasts draw under the web view, so its confirmations are shown as Excalidraw's.
+export function showNotice(api, message) {
+  api?.setToast({ message, closable: true, duration: 3000 });
+}
+
 export function createSession({
   restore,
   serialize,

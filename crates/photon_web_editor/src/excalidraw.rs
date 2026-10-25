@@ -259,6 +259,11 @@ fn excalidraw_bundle_makes_no_remote_references() {
     );
     assert!(!ADAPTER.contains("LiveCollaborationTrigger"));
     assert!(!ADAPTER.contains("Socials"));
+    assert!(
+        ADAPTER.contains(r#"case "notice":"#)
+            && ADAPTER.contains("showNotice(api, message.message)"),
+        "the adapter does not show Photon's notices"
+    );
     assert!(ADAPTER_CSS.contains(".library-menu-browse-button"));
     let shipped_css: String = files_under(&bundle().join("editor"))
         .iter()
@@ -455,6 +460,11 @@ for (const text of ["{not json", JSON.stringify({ type: "something-else" }), "[]
   runTimers();
   expect("nothing is saved after an error", sent.length === 1);
 }
+
+const toasts = [];
+session.showNotice({ setToast: (toast) => toasts.push(toast) }, "Saved a.png to Downloads");
+session.showNotice(null, "before Excalidraw is ready");
+expect("a notice is shown as an Excalidraw toast (" + JSON.stringify(toasts) + ")", toasts.length === 1 && toasts[0].message === "Saved a.png to Downloads" && toasts[0].closable === true && toasts[0].duration === 3000);
 
 expect("bundled items are recognised", session.isBundledLibraryItem({ id: session.BUNDLED_ID_PREFIX + "x" }) && !session.isBundledLibraryItem({ id: "x" }));
 
