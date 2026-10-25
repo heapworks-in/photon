@@ -1026,7 +1026,7 @@ wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "3b3506ea31154edc04de64de
 which = "8"
 windows-core = "0.62"
 windows-registry = "0.6.0"
-wry = { version = "0.53", default-features = false, features = ["protocol"] } # photon: native web view host for web editors
+wry = { version = "0.53", default-features = false, features = ["protocol", "transparent"] } # photon: native web view host for web editors
 xkbcommon = { version = "0.8", default-features = false }
 yaml-rust2 = { version = "0.8", default-features = false }
 yawc = { version = "0.4", default-features = false }

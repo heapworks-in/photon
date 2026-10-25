@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::ptr;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::time::Instant;
@@ -8,26 +9,31 @@ use anyhow::{Context as _, Result};
 use futures::{StreamExt as _, channel::mpsc};
 use gpui::{
     AnyElement, App, AssetSource, Bounds, Context, FocusHandle, Focusable as _, Global,
-    ImageSource, InteractiveElement as _, IntoElement as _, ObjectFit, ParentElement as _, Pixels,
-    RenderImage, SharedString, Styled as _, StyledImage as _, Subscription, Task, TaskExt as _,
-    Window, canvas, div, img,
+    ImageSource, IntoElement as _, ObjectFit, ParentElement as _, Pixels, RenderImage,
+    SharedString, Styled as _, StyledImage as _, Subscription, Task, TaskExt as _, Window, canvas,
+    div, img,
 };
+use objc2::rc::Retained;
 use objc2_app_kit::NSImage;
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_graphics::{
+    CGBitmapContextCreate, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo,
+};
 use objc2_foundation::NSError;
-use ui::{Color, Label, LabelCommon as _};
+use ui::{Color, Label, LabelCommon as _, LabelSize, h_flex};
 use util::ResultExt as _;
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::http::{self, StatusCode, header::CONTENT_TYPE};
 use wry::{WebContext, WebView, WebViewBuilder, WebViewExtMacOS as _};
 
 use crate::{
-    Action, BRIDGE_JS, CSP, DROP_AFTER, FromPage, Lifecycle, PageConnection, SCHEME, ServeError,
-    ToPage, WebEditor, WebEditorRegistry, WebEditorView, serve,
+    Action, BRIDGE_JS, CSP, DROP_AFTER, FromPage, Lifecycle, NETWORK_GUARD_JS, PageConnection,
+    SCHEME, ServeError, ToPage, WebEditor, WebEditorRegistry, WebEditorView, serve,
 };
 
 enum PageEvent {
     Message(String),
-    Snapshot(Option<Vec<u8>>),
+    Snapshot(Option<Retained<CGImage>>),
 }
 
 /// One WebKit context for every web editor page, alive while any page is.
@@ -71,6 +77,9 @@ impl NativePage {
             .with_visible(false)
             // Keys stay with Photon until the tab is focused and the view shown.
             .with_focused(false)
+            // Photon paints the theme background underneath, so nothing flashes white while loading.
+            .with_transparent(true)
+            .with_initialization_script_for_main_only(NETWORK_GUARD_JS, false)
             .with_initialization_script(BRIDGE_JS)
             .with_custom_protocol(SCHEME.to_string(), move |_, request| {
                 respond(&editor, request.uri(), assets.as_ref())
@@ -123,11 +132,12 @@ impl NativePage {
     fn take_snapshot(&self) {
         let events = self.events.clone();
         let handler = block2::RcBlock::new(move |image: *mut NSImage, _error: *mut NSError| {
-            // SAFETY: WebKit passes null or an image that stays alive for the duration of this call.
-            let tiff = unsafe { image.as_ref() }
-                .and_then(|image| image.TIFFRepresentation())
-                .map(|data| data.to_vec());
-            if events.unbounded_send(PageEvent::Snapshot(tiff)).is_err() {
+            // SAFETY: WebKit passes null or an image that stays alive for the duration of this call;
+            // a null proposed rect means "the whole image", and no context or hints are needed.
+            let image = unsafe { image.as_ref() }.and_then(|image| unsafe {
+                image.CGImageForProposedRect_context_hints(ptr::null_mut(), None, None)
+            });
+            if events.unbounded_send(PageEvent::Snapshot(image)).is_err() {
                 log::debug!("web editor snapshot arrived after its tab closed");
             }
         });
@@ -187,6 +197,7 @@ fn respond(
         .status(status)
         .header(CONTENT_TYPE, mime)
         .header("Content-Security-Policy", CSP)
+        .header("X-DNS-Prefetch-Control", "off")
         .body(body)
         .unwrap_or_else(|error| {
             log::error!(
@@ -210,20 +221,16 @@ pub(crate) struct NativeHost {
     snapshot: Option<Arc<RenderImage>>,
     error: Option<SharedString>,
     drop_check: Option<Task<()>>,
-    // A focus handle inside the view's own, used only to ask whether the view was in the last
-    // drawn frame: panes are cached views, so a missing prepaint does not mean "hidden".
-    presence: FocusHandle,
 }
 
 impl NativeHost {
-    pub(crate) fn new(cx: &mut App) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             lifecycle: Lifecycle::default(),
             page: None,
             snapshot: None,
             error: None,
             drop_check: None,
-            presence: cx.focus_handle(),
         }
     }
 }
@@ -238,8 +245,12 @@ pub(crate) fn subscribe(
         // Handled here rather than at the next prepaint: when another tab takes focus this view is
         // not drawn again, but its native view must not stay on top.
         cx.on_focus_out(focus_handle, window, |view, _, window, cx| {
-            let visible = is_drawn(view, window, cx);
-            on_frame(view, visible, None, window, cx);
+            on_frame(view, false, None, window, cx);
+        }),
+        cx.on_release_in(window, |view, window, _| {
+            if let Some(snapshot) = view.native.snapshot.take() {
+                window.drop_image(snapshot).log_err();
+            }
         }),
     ]
 }
@@ -253,17 +264,31 @@ pub(crate) fn hidden(
     on_frame(view, false, None, window, cx);
 }
 
+/// The native view draws above everything in the window, so it is shown only while the tab has
+/// focus; overlays that take focus (palettes, menus, modals) therefore draw over the snapshot.
+/// Overlays that don't take focus (tooltips, toasts, tab drop targets) can end up under a focused
+/// live diagram.
 pub(crate) fn element(view: &WebEditorView, cx: &mut Context<WebEditorView>) -> AnyElement {
     let this = cx.entity().downgrade();
+    let backdrop = match view.native.snapshot.clone() {
+        Some(snapshot) => img(ImageSource::Render(snapshot))
+            .size_full()
+            .object_fit(ObjectFit::Fill)
+            .into_any_element(),
+        None => h_flex()
+            .size_full()
+            .justify_center()
+            .child(
+                Label::new("Click to edit")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .into_any_element(),
+    };
     div()
         .absolute()
         .size_full()
-        .child(div().absolute().size_0().track_focus(&view.native.presence))
-        .children(view.native.snapshot.clone().map(|snapshot| {
-            img(ImageSource::Render(snapshot))
-                .size_full()
-                .object_fit(ObjectFit::Fill)
-        }))
+        .child(backdrop)
         .children(
             view.native
                 .error
@@ -284,11 +309,6 @@ pub(crate) fn element(view: &WebEditorView, cx: &mut Context<WebEditorView>) -> 
             .size_full(),
         )
         .into_any_element()
-}
-
-fn is_drawn(view: &WebEditorView, window: &Window, cx: &App) -> bool {
-    view.focus_handle(cx)
-        .contains(&view.native.presence, window)
 }
 
 fn on_frame(
@@ -333,18 +353,16 @@ fn on_frame(
         Action::None | Action::Create => {}
     }
 
-    // ponytail: a tab hidden without an event (another project tab shown while this one was not
-    // focused) is only noticed by a check started here; one later than that keeps its web view.
-    if (action == Action::ShowSnapshot || !visible)
-        && view.native.page.is_some()
+    // One timer while the page exists but isn't shown live; showing it cancels the timer.
+    if view.native.page.is_some()
+        && !view.native.lifecycle.is_native()
         && view.native.drop_check.is_none()
     {
         view.native.drop_check = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(DROP_AFTER).await;
             this.update_in(cx, |view, window, cx| {
                 view.native.drop_check = None;
-                let visible = is_drawn(view, window, cx);
-                on_frame(view, visible, None, window, cx);
+                on_frame(view, false, None, window, cx);
             })
             .log_err();
         }));
@@ -395,11 +413,11 @@ fn handle_event(
             Err(error) => log::warn!("dropping an invalid web editor message: {error}"),
         },
         PageEvent::Snapshot(None) => log::warn!("web editor snapshot failed"),
-        PageEvent::Snapshot(Some(tiff)) => {
+        PageEvent::Snapshot(Some(image)) => {
             cx.spawn_in(window, async move |this, cx| {
                 let snapshot = cx
                     .background_executor()
-                    .spawn(async move { decode_snapshot(&tiff) })
+                    .spawn(async move { decode_snapshot(&image) })
                     .await?;
                 this.update_in(cx, |view, window, cx| {
                     if let Some(previous) = view.native.snapshot.replace(snapshot) {
@@ -413,15 +431,44 @@ fn handle_event(
     }
 }
 
-fn decode_snapshot(tiff: &[u8]) -> Result<Arc<RenderImage>> {
-    let mut pixels = image::load_from_memory_with_format(tiff, image::ImageFormat::Tiff)
-        .context("decoding a web editor snapshot")?
-        .into_rgba8();
-    // GPUI images are BGRA.
-    for pixel in pixels.chunks_exact_mut(4) {
-        pixel.swap(0, 2);
+fn decode_snapshot(image: &CGImage) -> Result<Arc<RenderImage>> {
+    let width = CGImage::width(Some(image));
+    let height = CGImage::height(Some(image));
+    let bytes_per_row = width.checked_mul(4).context("snapshot too wide")?;
+    let mut pixels = vec![
+        0u8;
+        bytes_per_row
+            .checked_mul(height)
+            .context("snapshot too large")?
+    ];
+    let color_space = CGColorSpace::new_device_rgb().context("creating a color space")?;
+    // Little-endian 32-bit with alpha first is BGRA in memory, the order GPUI images use.
+    let bitmap_info =
+        CGImageAlphaInfo::PremultipliedFirst.0 | CGImageByteOrderInfo::Order32Little.0;
+    // SAFETY: `pixels` holds `height` rows of `bytes_per_row` bytes and outlives the context,
+    // which is dropped at the end of this block before `pixels` is moved.
+    {
+        let context = unsafe {
+            CGBitmapContextCreate(
+                pixels.as_mut_ptr().cast(),
+                width,
+                height,
+                8,
+                bytes_per_row,
+                Some(&color_space),
+                bitmap_info,
+            )
+        }
+        .context("creating a bitmap context")?;
+        CGContext::draw_image(
+            Some(&context),
+            CGRect::new(CGPoint::ZERO, CGSize::new(width as f64, height as f64)),
+            Some(image),
+        );
     }
-    Ok(Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])))
+    let buffer = image::RgbaImage::from_raw(u32::try_from(width)?, u32::try_from(height)?, pixels)
+        .context("snapshot buffer size")?;
+    Ok(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
 }
 
 #[cfg(test)]
@@ -470,6 +517,7 @@ mod tests {
         assert_eq!(response.body().as_ref(), b"<html>");
         assert_eq!(response.headers()[CONTENT_TYPE], "text/html");
         assert_eq!(response.headers()["Content-Security-Policy"], CSP);
+        assert_eq!(response.headers()["X-DNS-Prefetch-Control"], "off");
 
         let response = request(&editor, "photon-web://sketch/index.html#scene");
         assert_eq!(response.status(), StatusCode::OK);

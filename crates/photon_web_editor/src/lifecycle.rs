@@ -23,35 +23,39 @@ enum State {
 #[derive(Default)]
 pub struct Lifecycle {
     state: State,
-    hidden_since: Option<Instant>,
+    not_native_since: Option<Instant>,
 }
 
 impl Lifecycle {
     pub fn on_frame(&mut self, visible: bool, focused: bool, now: Instant) -> Action {
-        if !visible {
-            if self.state == State::Absent {
-                return Action::None;
+        let wants_native = visible && focused;
+        match self.state {
+            // Unfocused tabs paint their last snapshot (or a placeholder), so nothing is created.
+            State::Absent if !wants_native => Action::None,
+            State::Absent => {
+                // Created hidden; the caller calls again at once, which returns `ShowNative`.
+                self.state = State::Snapshot;
+                self.not_native_since = Some(now);
+                Action::Create
             }
-            let hidden_since = *self.hidden_since.get_or_insert(now);
-            if now.saturating_duration_since(hidden_since) >= DROP_AFTER {
-                self.state = State::Absent;
-                self.hidden_since = None;
-                return Action::Drop;
+            _ if wants_native => {
+                self.not_native_since = None;
+                self.transition(State::Native)
             }
-            return self.transition(State::Snapshot);
+            _ => {
+                let since = *self.not_native_since.get_or_insert(now);
+                if now.saturating_duration_since(since) >= DROP_AFTER {
+                    self.state = State::Absent;
+                    self.not_native_since = None;
+                    return Action::Drop;
+                }
+                self.transition(State::Snapshot)
+            }
         }
+    }
 
-        self.hidden_since = None;
-        if self.state == State::Absent {
-            // Created hidden; the next frame shows it natively if focused.
-            self.state = State::Snapshot;
-            return Action::Create;
-        }
-        self.transition(if focused {
-            State::Native
-        } else {
-            State::Snapshot
-        })
+    pub fn is_native(&self) -> bool {
+        self.state == State::Native
     }
 
     fn transition(&mut self, state: State) -> Action {
@@ -92,9 +96,33 @@ mod tests {
             frames(
                 &mut lifecycle,
                 start,
-                &[(0, false, false), (100, false, true), (200, true, false)]
+                &[(0, false, false), (100, false, true), (200, true, true)]
             ),
             [Action::None, Action::None, Action::Create]
+        );
+    }
+
+    #[test]
+    fn unfocused_first_show_creates_nothing() {
+        let mut lifecycle = Lifecycle::default();
+        let start = Instant::now();
+        assert_eq!(
+            frames(
+                &mut lifecycle,
+                start,
+                &[
+                    (0, true, false),
+                    (10, true, false),
+                    (20, true, true),
+                    (20, true, true)
+                ]
+            ),
+            [
+                Action::None,
+                Action::None,
+                Action::Create,
+                Action::ShowNative
+            ]
         );
     }
 
@@ -173,13 +201,50 @@ mod tests {
                 &mut lifecycle,
                 start,
                 &[
-                    (0, true, false),
+                    (0, true, true),
+                    (0, true, true),
                     (10, false, false),
+                    (69, false, false),
                     (70, false, false),
                     (80, false, false)
                 ]
             ),
-            [Action::Create, Action::None, Action::Drop, Action::None]
+            [
+                Action::Create,
+                Action::ShowNative,
+                Action::ShowSnapshot,
+                Action::None,
+                Action::Drop,
+                Action::None
+            ]
+        );
+    }
+
+    #[test]
+    fn unfocused_for_sixty_seconds_drops_the_view() {
+        let mut lifecycle = Lifecycle::default();
+        let start = Instant::now();
+        assert_eq!(
+            frames(
+                &mut lifecycle,
+                start,
+                &[
+                    (0, true, true),
+                    (0, true, true),
+                    (1, true, false),
+                    (61, true, false),
+                    (62, true, false),
+                    (63, true, true)
+                ]
+            ),
+            [
+                Action::Create,
+                Action::ShowNative,
+                Action::ShowSnapshot,
+                Action::Drop,
+                Action::None,
+                Action::Create
+            ]
         );
     }
 
@@ -196,6 +261,7 @@ mod tests {
                     (0, true, true),
                     (1, false, false),
                     (61, false, false),
+                    (62, true, false),
                     (62, true, true),
                     (62, true, true)
                 ]
@@ -205,6 +271,7 @@ mod tests {
                 Action::ShowNative,
                 Action::ShowSnapshot,
                 Action::Drop,
+                Action::None,
                 Action::Create,
                 Action::ShowNative
             ]
@@ -220,10 +287,11 @@ mod tests {
                 &mut lifecycle,
                 start,
                 &[
-                    (0, true, false),
+                    (0, true, true),
+                    (0, true, true),
                     (1, false, false),
                     (60, false, false),
-                    (60, true, false),
+                    (60, true, true),
                     (61, false, false),
                     (120, false, false),
                     (121, false, false)
@@ -231,10 +299,11 @@ mod tests {
             ),
             [
                 Action::Create,
+                Action::ShowNative,
+                Action::ShowSnapshot,
                 Action::None,
-                Action::None,
-                Action::None,
-                Action::None,
+                Action::ShowNative,
+                Action::ShowSnapshot,
                 Action::None,
                 Action::Drop
             ]

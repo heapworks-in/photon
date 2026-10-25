@@ -2555,6 +2555,26 @@ extern "C" fn handle_key_equivalent(
     _: Sel,
     native_event: *mut AnyObject,
 ) -> Bool {
+    // photon: let a native child view that is first responder (a web editor) handle its own key equivalents
+    // SAFETY: `this` is a live GPUIView; `window` and `firstResponder` return nil or live objects,
+    // and NSView's own `performKeyEquivalent:` takes the event AppKit gave us.
+    unsafe {
+        let window: *mut AnyObject = msg_send![this, window];
+        let responder: *mut AnyObject = if window.is_null() {
+            ptr::null_mut()
+        } else {
+            msg_send![window, firstResponder]
+        };
+        if !responder.is_null() && !ptr::eq(responder.cast_const(), this) {
+            let is_view: Bool = msg_send![responder, isKindOfClass: class!(NSView)];
+            if is_view == Bool::YES {
+                let is_child: Bool = msg_send![responder, isDescendantOf: this];
+                if is_child == Bool::YES {
+                    return msg_send![super(this, class!(NSView)), performKeyEquivalent: native_event];
+                }
+            }
+        }
+    }
     handle_key_event(this, native_event, true)
 }
 

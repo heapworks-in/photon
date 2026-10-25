@@ -35,6 +35,9 @@
     },
   };
 
+  // Pages draw their own context menus; WebKit's (Reload, Inspect) has no place in an editor.
+  window.addEventListener("contextmenu", (event) => event.preventDefault());
+
   window.addEventListener(
     "keydown",
     (event) => {

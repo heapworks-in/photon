@@ -4,6 +4,9 @@ pub const PROTOCOL_VERSION: u32 = 1;
 
 pub const BRIDGE_JS: &str = include_str!("bridge.js");
 
+/// Injected into every frame: CSP `connect-src` does not cover WebRTC or DNS prefetching.
+pub const NETWORK_GUARD_JS: &str = include_str!("network_guard.js");
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Appearance {
@@ -238,6 +241,65 @@ if (failures.length) { console.error(failures.join("\n")); process.exit(1); }
         assert!(
             output.status.success(),
             "bridge.js mismatch:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    const GUARD_HARNESS: &str = r#"
+const peerNames = ["RTCPeerConnection", "webkitRTCPeerConnection", "RTCDataChannel", "RTCSessionDescription", "RTCIceCandidate"];
+let observer = null;
+const fakeWindow = {
+  document: {},
+  MutationObserver: class {
+    constructor(callback) { observer = callback; }
+    observe() {}
+  },
+};
+for (const name of peerNames) fakeWindow[name] = function () {};
+new Function("window", process.env.GUARD)(fakeWindow);
+
+const failures = [];
+for (const name of peerNames) {
+  if (fakeWindow[name] !== undefined) failures.push(`${name} is still defined`);
+}
+const link = (rel) => ({
+  nodeType: 1, tagName: "LINK", rel, removed: false,
+  remove() { this.removed = true; },
+  querySelectorAll() { return []; },
+});
+const hints = ["dns-prefetch", "preconnect", "prefetch", "prerender"].map(link);
+const stylesheet = link("stylesheet");
+const nested = link("dns-prefetch");
+const container = { nodeType: 1, tagName: "DIV", querySelectorAll: () => [nested], remove() {} };
+if (!observer) failures.push("no mutation observer");
+else observer([{ addedNodes: [...hints, stylesheet, container] }]);
+for (const hint of [...hints, nested]) if (!hint.removed) failures.push(`${hint.rel} link kept`);
+if (stylesheet.removed) failures.push("stylesheet link removed");
+if (failures.length) { console.error(failures.join("\n")); process.exit(1); }
+"#;
+
+    #[test]
+    fn network_guard_removes_peer_connections_and_prefetch_links() {
+        for name in [
+            "RTCPeerConnection",
+            "webkitRTCPeerConnection",
+            "RTCDataChannel",
+            "RTCSessionDescription",
+            "RTCIceCandidate",
+            "dns-prefetch",
+        ] {
+            assert!(NETWORK_GUARD_JS.contains(name), "{name}");
+        }
+        let output = smol::block_on(
+            smol::process::Command::new("node")
+                .args(["-e", GUARD_HARNESS])
+                .env("GUARD", NETWORK_GUARD_JS)
+                .output(),
+        )
+        .expect("`node` must be on PATH to test network_guard.js");
+        assert!(
+            output.status.success(),
+            "network_guard.js mismatch:\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
     }

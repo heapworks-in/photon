@@ -89,7 +89,7 @@ impl WebEditorView {
             pending_flushes: Vec::new(),
             error: None,
             #[cfg(target_os = "macos")]
-            native: crate::native::NativeHost::new(cx),
+            native: crate::native::NativeHost::new(),
             _subscriptions: subscriptions,
         }
     }
