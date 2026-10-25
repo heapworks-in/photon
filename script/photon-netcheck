@@ -8,7 +8,9 @@
 #
 # WebKit's helper processes (WebContent, Networking, GPU) are launched by launchd, not by the app, so
 # they are found by their "responsible process" (tooling/photon-perf/responsible.py). Those that appear
-# after the script starts and share the app's responsible process are watched like its children.
+# after the script starts, share the app's responsible process and started no earlier than the app are
+# watched like its children. Remaining limit: a WebKit client started from the same GUI ancestor while
+# the check runs (another app, another Photon launched from this terminal) still matches.
 # lsof cannot see their sockets (Network.framework flows, QUIC), so they are read with nettop instead.
 # Proof that this works: script/photon-netcheck -- swift tooling/photon-perf/webkit-proof.swift
 set -euo pipefail
@@ -45,19 +47,17 @@ descendants() {
 }
 
 # Everything launched from this script shares its responsible process.
-responsible_pid=$(/usr/bin/python3 -I tooling/photon-perf/responsible.py $$ | awk '{ print $2 }')
-webkit_pids() {
-  local pids=$(pgrep -f com.apple.WebKit | paste -sd' ' -)
-  [[ -z $pids ]] && return
-  /usr/bin/python3 -I tooling/photon-perf/responsible.py ${=pids} | awk -v owner=$responsible_pid '$2 == owner { print $1 }'
-}
+responsible_pid=$(/usr/bin/python3 -I tooling/photon-perf/responsible.py owner $$) \
+  || { echo "could not determine the responsible process of this script" >&2; exit 2; }
+# With a root pid, only processes that started after the root; without, a pre-launch baseline.
+webkit_pids() { /usr/bin/python3 -I tooling/photon-perf/responsible.py webkit $responsible_pid ${1:-}; }
 # One snapshot of the non-loopback flows owned by the given pids.
 webkit_flows() {
   (( $# )) || return 0
   local flags=() pid
   for pid; do flags+=(-p $pid); done
   nettop -n -L 1 $flags 2>/dev/null \
-    | awk -F, '$2 ~ /<->/ && $3 != "lo0" { split($2, flow, " "); print "WebKit", flow[2] }'
+    | awk -F, '$2 ~ /<->/ && $3 != "" && $3 != "lo0" && $2 !~ /<->\*:\*/ { split($2, flow, " "); print "WebKit", flow[2] }'
 }
 preexisting_webkit=" $(webkit_pids | paste -sd' ' -) "
 
@@ -78,7 +78,7 @@ while (( SECONDS < deadline )); do
   sleep 0.2
   kill -0 $root_pid 2>/dev/null || { keep_scratch=1; echo "process exited early; see $scratch/stdout.log" >&2; exit 2; }
   webkit=()
-  for pid in $(webkit_pids); do [[ $preexisting_webkit == *" $pid "* ]] || webkit+=($pid); done
+  for pid in $(webkit_pids $root_pid); do [[ $preexisting_webkit == *" $pid "* ]] || webkit+=($pid); done
   (( ${#webkit} > watched_webkit )) && watched_webkit=${#webkit}
   pids=$({ descendants $root_pid; print -l -- $webkit; } | grep . | paste -sd, -)
   while read -r line; do
@@ -88,6 +88,12 @@ while (( SECONDS < deadline )); do
              | grep -vE '(127\.0\.0\.1|\[::1\]|localhost)(:[0-9]+)?(->(127\.0\.0\.1|\[::1\]|localhost):[0-9]+)?$' || true
            webkit_flows $webkit; })
 done
+
+if (( with_diagram && watched_webkit == 0 )); then
+  keep_scratch=1
+  echo "FAIL: no WebKit process was attributed to the app; the web view did not start or attribution broke (see $scratch/stdout.log)" >&2
+  exit 2
+fi
 
 if (( ${#offending} )); then
   keep_scratch=1
