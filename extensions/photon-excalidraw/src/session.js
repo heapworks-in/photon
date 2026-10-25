@@ -30,9 +30,15 @@ export function createSession({
   let pending = null;
   let timer = null;
 
-  // The background colour is saved in the file but does not bump the scene version.
+  // These are saved in the file but changing them does not bump the scene version.
   const keyOf = (elements, appState) =>
-    `${sceneVersion(elements)}:${appState ? appState.viewBackgroundColor : ""}`;
+    JSON.stringify([
+      sceneVersion(elements),
+      appState?.viewBackgroundColor,
+      appState?.gridModeEnabled,
+      appState?.gridSize,
+      appState?.gridStep,
+    ]);
 
   const cancel = () => {
     if (timer !== null) timers.clearTimeout(timer);
@@ -71,7 +77,12 @@ export function createSession({
           return fail("This file is not an Excalidraw drawing");
         }
       }
-      const scene = restore(data);
+      let scene;
+      try {
+        scene = restore(data);
+      } catch (error) {
+        return fail(`This Excalidraw drawing could not be read: ${error.message}`);
+      }
       saved = keyOf(scene.elements, scene.appState);
       return scene;
     },

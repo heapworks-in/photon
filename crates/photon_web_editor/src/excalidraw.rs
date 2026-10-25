@@ -194,8 +194,6 @@ const KNOWN_HOSTS: &[&str] = &[
     "https://reddit.com",
     "https://embed.reddit.com",
     "https://giphy.com",
-    // Excalidraw's font fallback after EXCALIDRAW_ASSET_PATH; every shipped font is found first.
-    "https://esm.sh",
 ];
 
 #[test]
@@ -268,9 +266,63 @@ fn excalidraw_bundle_makes_no_remote_references() {
         .map(|file| std::fs::read_to_string(file).expect("css"))
         .collect();
     assert!(
-        shipped_css.contains(".library-menu-browse-button"),
+        shipped_css.contains(".photon-error") && shipped_css.contains("lib-dropdown--remove"),
         "photon.css is not in the bundle"
     );
+}
+
+#[test]
+fn exported_svgs_never_point_fonts_at_a_remote_url() {
+    let shipped_js: String = files_under(&bundle().join("editor"))
+        .iter()
+        .filter(|file| file.extension().is_some_and(|extension| extension == "js"))
+        .map(|file| std::fs::read_to_string(file).expect("js"))
+        .collect();
+    // Excalidraw's last-resort font source, which SVG exports used when subsetting failed.
+    assert!(
+        !shipped_js.contains("esm.sh"),
+        "the CDN font fallback ships"
+    );
+    assert!(
+        !shipped_js.contains("this.urls[this.urls.length-1]"),
+        "a font that can't be embedded still falls back to its URL"
+    );
+    // A font with no embeddable content is left out of the SVG rather than written as url().
+    let guarded = shipped_js
+        .match_indices("`@font-face {")
+        .all(|(start, _)| shipped_js[..start].ends_with("&&"));
+    assert!(
+        guarded && shipped_js.contains("`@font-face {"),
+        "an @font-face is written without content"
+    );
+    // Subsetting runs harfbuzz as WebAssembly.
+    assert!(crate::CSP.contains("'wasm-unsafe-eval'"));
+}
+
+#[test]
+fn bundled_npm_packages_and_fonts_ship_their_licences() {
+    let licences = std::fs::read_to_string(bundle().join("THIRD_PARTY_LICENSES.md"))
+        .expect("THIRD_PARTY_LICENSES.md exists");
+    for package in [
+        "## react - ",
+        "## react-dom - ",
+        "## mermaid - ",
+        "## @excalidraw/excalidraw - ",
+    ] {
+        assert!(licences.contains(package), "{package} is not listed");
+    }
+    let third_party =
+        std::fs::read_to_string(bundle().join("THIRD_PARTY.md")).expect("THIRD_PARTY.md exists");
+    assert!(third_party.contains("THIRD_PARTY_LICENSES.md"));
+    for family in FONTS {
+        let licence =
+            std::fs::read_to_string(bundle().join("fonts").join(family).join("LICENSE.txt"))
+                .unwrap_or_else(|error| panic!("{family} has no LICENSE.txt: {error}"));
+        assert!(
+            licence.contains("SIL Open Font License") || licence.starts_with("MIT License"),
+            "{family}'s licence is neither OFL nor MIT"
+        );
+    }
 }
 
 #[test]
@@ -291,7 +343,10 @@ const fakeTimers = {
 const runTimers = () => { for (let i = 0; i < timers.length; i++) { const t = timers[i]; timers[i] = null; if (t) t(); } };
 // Stand-ins for Excalidraw: a scene version is the sum of element versions.
 const sceneVersion = (elements) => elements.reduce((sum, element) => sum + element.version, 0);
-const restore = (data) => ({ elements: data ? data.elements ?? [] : [], appState: { viewBackgroundColor: data?.appState?.viewBackgroundColor ?? "#ffffff" }, files: {} });
+const restore = (data) => {
+  if (data && data.elements && data.elements.some((element) => element.broken)) throw new Error("bad element");
+  return { elements: data ? data.elements ?? [] : [], appState: { viewBackgroundColor: data?.appState?.viewBackgroundColor ?? "#ffffff", gridModeEnabled: false, gridSize: 20, gridStep: 5 }, files: {} };
+};
 const serialize = (elements, appState) => JSON.stringify({ type: "excalidraw", elements, appState });
 const make = () => session.createSession({ restore, serialize, sceneVersion, send: (m) => sent.push(m), timers: fakeTimers });
 const failures = [];
@@ -317,6 +372,16 @@ s.change(scene.elements, { viewBackgroundColor: "#000000" }, {});
 runTimers();
 expect("a background change is sent", sent.length === 2 && sent[1].type === "changed");
 
+const background = { ...scene.appState, viewBackgroundColor: "#000000" };
+for (const [field, value] of [["gridModeEnabled", true], ["gridSize", 40], ["gridStep", 10]]) {
+  const before = sent.length;
+  s.change(scene.elements, { ...background, [field]: value }, {});
+  runTimers();
+  expect(field + " change is sent", sent.length === before + 1 && sent[before].type === "changed");
+  s.change(scene.elements, background, {});
+  runTimers();
+}
+
 sent.length = 0;
 s.change([{ id: "a", version: 9 }], scene.appState, {});
 s.flush(7);
@@ -332,7 +397,7 @@ s.change([], scene.appState, {});
 runTimers();
 expect("an empty file is not dirtied", sent.length === 0);
 
-for (const text of ["{not json", JSON.stringify({ type: "something-else" }), "[]"]) {
+for (const text of ["{not json", JSON.stringify({ type: "something-else" }), "[]", JSON.stringify({ type: "excalidraw", elements: [{ broken: true }] })]) {
   sent.length = 0;
   s = make();
   expect("invalid file returns no scene", s.load(text) === null);

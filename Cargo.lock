@@ -13833,6 +13833,7 @@ dependencies = [
  "block2 0.6.2",
  "collections",
  "db",
+ "dirs",
  "extension",
  "extension_host",
  "fs",

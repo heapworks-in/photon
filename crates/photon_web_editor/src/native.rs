@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::{Component, Path, PathBuf};
 use std::ptr;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -22,6 +24,7 @@ use objc2_core_graphics::{
 use objc2_foundation::NSError;
 use ui::{Color, Label, LabelCommon as _, LabelSize, h_flex};
 use util::ResultExt as _;
+use workspace::{Toast, Workspace, notifications::NotificationId};
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::http::{self, StatusCode, header::CONTENT_TYPE};
 use wry::{WebContext, WebView, WebViewBuilder, WebViewExtMacOS as _};
@@ -34,6 +37,8 @@ use crate::{
 enum PageEvent {
     Message(String),
     Snapshot(Option<Retained<CGImage>>),
+    /// A file the page downloaded (an exported image) was saved, or why it wasn't.
+    Downloaded(Result<PathBuf, String>),
 }
 
 /// One WebKit context for every web editor page, alive while any page is.
@@ -72,6 +77,57 @@ impl NativePage {
         let url = format!("{SCHEME}://{}/{}", editor.id, editor.entry);
         let scheme_prefix = format!("{SCHEME}:");
         let ipc_events = events.clone();
+        // The completion callback isn't told where the file went, so it's looked up by URL.
+        let download_paths = Rc::new(RefCell::new(HashMap::<String, PathBuf>::new()));
+        let download_started = {
+            let download_paths = download_paths.clone();
+            let events = events.clone();
+            move |url: String, destination: &mut PathBuf| {
+                let chosen = dirs::download_dir().and_then(|downloads| {
+                    download_destination(&downloads, destination, Path::exists)
+                });
+                match chosen {
+                    Some(path) => {
+                        destination.clone_from(&path);
+                        download_paths.borrow_mut().insert(url, path);
+                        true
+                    }
+                    None => {
+                        let message =
+                            format!("Could not save {} to Downloads", destination.display());
+                        if events
+                            .unbounded_send(PageEvent::Downloaded(Err(message)))
+                            .is_err()
+                        {
+                            log::debug!("web editor download refused after its tab closed");
+                        }
+                        false
+                    }
+                }
+            }
+        };
+        let download_completed = {
+            let events = events.clone();
+            move |url: String, path: Option<PathBuf>, success: bool| {
+                let path = path.or_else(|| download_paths.borrow_mut().remove(&url));
+                let result = match path {
+                    Some(path) if success => Ok(path),
+                    Some(path) => Err(format!(
+                        "Could not save {}",
+                        path.file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.display().to_string())
+                    )),
+                    None => Err("Could not save the exported file".to_string()),
+                };
+                if events
+                    .unbounded_send(PageEvent::Downloaded(result))
+                    .is_err()
+                {
+                    log::debug!("web editor download finished after its tab closed");
+                }
+            }
+        };
         let webview = WebViewBuilder::new_with_web_context(&mut web_context.borrow_mut())
             .with_url(url)
             .with_visible(false)
@@ -85,6 +141,9 @@ impl NativePage {
                 respond(&editor, request.uri(), assets.as_ref())
             })
             .with_navigation_handler(move |url| url.starts_with(&scheme_prefix))
+            // Without these, WebKit cancels the page's `<a download>` exports.
+            .with_download_started_handler(download_started)
+            .with_download_completed_handler(download_completed)
             .with_ipc_handler(move |request| {
                 if ipc_events
                     .unbounded_send(PageEvent::Message(request.into_body()))
@@ -412,6 +471,73 @@ fn create(
     Ok(())
 }
 
+/// Where a page's download is saved: directly in `downloads`, under the name WebKit proposed, with
+/// " 2", " 3"… added when it's taken. `None` when the proposal isn't a plain file in `downloads`.
+fn download_destination(
+    downloads: &Path,
+    proposed: &Path,
+    exists: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    if proposed.parent() != Some(downloads) {
+        return None;
+    }
+    let name = match proposed.components().next_back() {
+        Some(Component::Normal(name)) => name.to_str()?,
+        _ => return None,
+    };
+    // The extension starts at the first dot, so "a.excalidraw.png" becomes "a 2.excalidraw.png".
+    let split = name
+        .char_indices()
+        .skip(1)
+        .find(|(_, character)| *character == '.')
+        .map_or(name.len(), |(index, _)| index);
+    let (mut stem, extension) = name.split_at(split);
+    // WebKit numbers a taken name as "a (1).png" before asking; undo that so Photon's numbering
+    // applies.
+    if let Some(base) = stem
+        .strip_suffix(')')
+        .and_then(|rest| rest.rsplit_once(" ("))
+        .filter(|(_, number)| !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()))
+        .map(|(base, _)| base)
+        .filter(|base| exists(&downloads.join(format!("{base}{extension}"))))
+    {
+        stem = base;
+    }
+    let mut candidate = downloads.join(format!("{stem}{extension}"));
+    for number in 2..10_000 {
+        if !exists(&candidate) {
+            return Some(candidate);
+        }
+        candidate = downloads.join(format!("{stem} {number}{extension}"));
+    }
+    None
+}
+
+fn show_download_toast(result: Result<PathBuf, String>, window: &mut Window, cx: &mut App) {
+    struct DownloadToast;
+    let Some(workspace) = Workspace::for_window(window, cx) else {
+        log::warn!("web editor download finished outside a workspace: {result:?}");
+        return;
+    };
+    let toast = match result {
+        Ok(path) => {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            Toast::new(
+                NotificationId::composite::<DownloadToast>(SharedString::from(
+                    path.to_string_lossy().into_owned(),
+                )),
+                format!("Saved {name} to Downloads"),
+            )
+            .on_click("Reveal in Finder", move |_, cx| cx.reveal_path(&path))
+        }
+        Err(message) => Toast::new(NotificationId::unique::<DownloadToast>(), message),
+    };
+    workspace.update(cx, |workspace, cx| workspace.show_toast(toast, cx));
+}
+
 fn handle_event(
     view: &mut WebEditorView,
     event: PageEvent,
@@ -423,6 +549,7 @@ fn handle_event(
             Ok(message) => view.handle_page_message(message, window, cx),
             Err(error) => log::warn!("dropping an invalid web editor message: {error}"),
         },
+        PageEvent::Downloaded(result) => show_download_toast(result, window, cx),
         PageEvent::Snapshot(None) => log::warn!("web editor snapshot failed"),
         PageEvent::Snapshot(Some(image)) => {
             cx.spawn_in(window, async move |this, cx| {
@@ -513,6 +640,60 @@ mod tests {
 
     fn request(editor: &WebEditor, uri: &'static str) -> http::Response<Cow<'static, [u8]>> {
         respond(editor, &http::Uri::from_static(uri), &NoAssets)
+    }
+
+    #[test]
+    fn downloads_get_a_unique_name_in_downloads() {
+        let downloads = Path::new("/Users/a/Downloads");
+        let taken = |names: &'static [&'static str]| {
+            move |path: &Path| names.iter().any(|name| downloads.join(name) == path)
+        };
+        let destination = |proposed: &str, names: &'static [&'static str]| {
+            download_destination(downloads, &downloads.join(proposed), taken(names))
+        };
+
+        assert_eq!(
+            destination("trip.png", &[]),
+            Some(downloads.join("trip.png"))
+        );
+        assert_eq!(
+            destination("trip.png", &["trip.png"]),
+            Some(downloads.join("trip 2.png"))
+        );
+        // WebKit has already numbered a taken name its own way; Photon's numbering replaces it.
+        assert_eq!(
+            destination("trip (1).png", &["trip.png", "trip 2.png"]),
+            Some(downloads.join("trip 3.png"))
+        );
+        assert_eq!(
+            destination("diagram.excalidraw.svg", &["diagram.excalidraw.svg"]),
+            Some(downloads.join("diagram 2.excalidraw.svg"))
+        );
+        assert_eq!(
+            destination("notes", &["notes"]),
+            Some(downloads.join("notes 2"))
+        );
+        assert_eq!(destination("(1).png", &[]), Some(downloads.join("(1).png")));
+    }
+
+    #[test]
+    fn downloads_outside_downloads_are_refused() {
+        let downloads = Path::new("/Users/a/Downloads");
+        let nothing_taken = |_: &Path| false;
+        for proposed in [
+            "/etc/passwd".into(),
+            downloads.join("../secret.png"),
+            downloads.join("nested/file.png"),
+            downloads.to_path_buf(),
+            PathBuf::from("/Users/a/Desktop/trip.png"),
+        ] {
+            assert_eq!(
+                download_destination(downloads, &proposed, nothing_taken),
+                None,
+                "{}",
+                proposed.display()
+            );
+        }
     }
 
     #[test]

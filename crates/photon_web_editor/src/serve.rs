@@ -8,8 +8,9 @@ use crate::{WebEditor, WebEditorSource};
 pub const SCHEME: &str = "photon-web";
 
 // Pages may fetch their own files (Excalidraw reads its libraries and, to embed them in SVG exports,
-// its fonts); requests for another editor's files are refused by the scheme handler.
-pub const CSP: &str = "default-src photon-web: 'unsafe-inline'; img-src photon-web: data: blob:; font-src photon-web: data:; connect-src photon-web:";
+// its fonts); requests for another editor's files are refused by the scheme handler. WebAssembly
+// is allowed (Excalidraw subsets fonts with it) but `eval` is not.
+pub const CSP: &str = "default-src photon-web: 'unsafe-inline'; script-src photon-web: 'unsafe-inline' 'wasm-unsafe-eval'; img-src photon-web: data: blob:; font-src photon-web: data:; connect-src photon-web:";
 
 pub struct Served {
     pub bytes: Cow<'static, [u8]>,
@@ -98,12 +99,22 @@ mod tests {
         for directive in CSP.split(';') {
             for source in directive.split_whitespace().skip(1) {
                 assert!(
-                    ["photon-web:", "'unsafe-inline'", "data:", "blob:"].contains(&source),
+                    [
+                        "photon-web:",
+                        "'unsafe-inline'",
+                        "'wasm-unsafe-eval'",
+                        "data:",
+                        "blob:"
+                    ]
+                    .contains(&source),
                     "{directive}"
                 );
             }
         }
         assert!(CSP.contains("connect-src photon-web:"));
+        // Excalidraw subsets fonts for SVG export with WebAssembly; plain eval stays blocked.
+        assert!(CSP.contains("script-src photon-web: 'unsafe-inline' 'wasm-unsafe-eval'"));
+        assert!(!CSP.contains("'unsafe-eval'"));
     }
     use crate::{WebEditor, WebEditorSource};
     use gpui::SharedString;
