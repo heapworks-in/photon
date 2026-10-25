@@ -22,8 +22,9 @@ use workspace::{
 };
 
 use crate::{
-    ChecksState, GhError, GhFix, GhRunner, HostAuth, Inbox, InboxSection, PrKey, PrReviewSettings,
-    PrSummary, RepoId, ReviewDb, SinceReview, Tracked, auth_status_request,
+    ChecksState, GhError, GhFix, GhRunner, HostAuth, Inbox, InboxSection, OpenPullRequestFromUrl,
+    PrKey, PrReviewSettings, PrSummary, RepoId, ReviewDb, SinceReview, Tracked,
+    auth_status_request,
     checkout::{
         ensure_safe_segment, force_remove_worktree, parse_remote_url, review_root, worktree_path,
     },
@@ -382,7 +383,7 @@ fn window_repos(workspace: &WeakEntity<Workspace>, cx: &App) -> Vec<RepoId> {
     repos
 }
 
-fn failed(error: anyhow::Error) -> GhError {
+pub(crate) fn failed(error: anyhow::Error) -> GhError {
     GhError::Failed {
         message: format!("{error:#}"),
     }
@@ -903,6 +904,21 @@ impl Render for InboxPanel {
                                     Label::new(text).color(Color::Muted).size(LabelSize::Small)
                                 }))
                             })
+                            .child(
+                                div()
+                                    .debug_selector(|| "photon-review-open-url".into())
+                                    .child(
+                                        IconButton::new("photon-review-open-url", IconName::Link)
+                                            .icon_size(IconSize::Small)
+                                            .tooltip(Tooltip::text("Open pull request from URL"))
+                                            .on_click(|_, window, cx| {
+                                                window.dispatch_action(
+                                                    OpenPullRequestFromUrl.boxed_clone(),
+                                                    cx,
+                                                )
+                                            }),
+                                    ),
+                            )
                             .child(
                                 IconButton::new("photon-review-refresh", IconName::RotateCw)
                                     .icon_size(IconSize::Small)
@@ -1538,6 +1554,37 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(request_summary(&fake), ["auth", "api github.com"]);
+    }
+
+    #[gpui::test]
+    async fn header_link_button_opens_the_url_prompt(cx: &mut TestAppContext) {
+        let fake = FakeGh::new();
+        init_test(cx, &fake);
+        cx.update(|cx| {
+            editor::init(cx);
+            crate::open_url::init_open_url(cx);
+        });
+        let (workspace, _panel, mut cx) = add_panel(cx, &[ORIGIN]).await;
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.toggle_panel_focus::<InboxPanel>(window, cx);
+        });
+        cx.run_until_parked();
+        let requests = fake.requests().len();
+
+        let bounds = cx
+            .debug_bounds("photon-review-open-url")
+            .expect("open-url button is drawn");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        workspace.read_with(&cx, |workspace, cx| {
+            assert!(
+                workspace
+                    .active_modal::<crate::OpenPullRequestModal>(cx)
+                    .is_some()
+            )
+        });
+        assert_eq!(fake.requests().len(), requests, "no network until Enter");
     }
 
     #[gpui::test]
