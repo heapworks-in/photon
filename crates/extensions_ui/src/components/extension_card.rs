@@ -499,6 +499,7 @@ impl Component for ExtensionCard {
                 debug_adapters: Default::default(),
                 debug_locators: Default::default(),
                 language_model_providers: Default::default(),
+                web_editors: Default::default(), // photon: new manifest field
             })
         }
 

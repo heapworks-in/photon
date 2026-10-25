@@ -561,6 +561,7 @@ mod tests {
             debug_adapters: BTreeMap::default(),
             debug_locators: BTreeMap::default(),
             language_model_providers: BTreeMap::default(),
+            web_editors: Default::default(), // photon: new manifest field
         }
     }
 

@@ -124,6 +124,16 @@ pub struct ExtensionManifest {
     pub debug_locators: BTreeMap<Arc<str>, DebugLocatorManifestEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub language_model_providers: BTreeMap<Arc<str>, LanguageModelProviderManifestEntry>,
+    // photon: extensions can declare offline web editors for file types
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub web_editors: BTreeMap<Arc<str>, WebEditorManifestEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebEditorManifestEntry {
+    pub name: String,
+    pub file_suffixes: Vec<String>,
+    pub entry: RelPathBuf,
 }
 
 impl ExtensionManifest {
@@ -522,6 +532,7 @@ fn manifest_from_old_manifest(
         debug_adapters: Default::default(),
         debug_locators: Default::default(),
         language_model_providers: Default::default(),
+        web_editors: Default::default(), // photon: new manifest field
     }
 }
 
@@ -556,6 +567,7 @@ mod tests {
             debug_adapters: Default::default(),
             debug_locators: Default::default(),
             language_model_providers: BTreeMap::default(),
+            web_editors: BTreeMap::default(),
         }
     }
 
@@ -653,6 +665,35 @@ mod tests {
                 .is_ok()
         );
         assert!(manifest.allow_exec("docker", &["ps"]).is_err()); // wrong first arg
+    }
+
+    #[test]
+    fn web_editors_parse_from_extension_toml() {
+        let manifest: ExtensionManifest = toml::from_str(indoc::indoc! {r#"
+            id = "excalidraw"
+            name = "Excalidraw"
+            version = "0.0.1"
+            schema_version = 1
+
+            [web_editors.excalidraw]
+            name = "Excalidraw"
+            file_suffixes = ["excalidraw"]
+            entry = "editor/index.html"
+        "#})
+        .expect("manifest should parse");
+        let editor = &manifest.web_editors["excalidraw"];
+        assert_eq!(editor.name, "Excalidraw");
+        assert_eq!(editor.file_suffixes, vec!["excalidraw".to_string()]);
+        assert_eq!(editor.entry, rel_path_buf("editor/index.html"));
+
+        let manifest: ExtensionManifest = toml::from_str(indoc::indoc! {r#"
+            id = "plain"
+            name = "Plain"
+            version = "0.0.1"
+            schema_version = 1
+        "#})
+        .expect("manifest should parse");
+        assert!(manifest.web_editors.is_empty());
     }
 
     #[test]

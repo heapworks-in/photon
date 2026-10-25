@@ -147,6 +147,7 @@ fn manifest() -> ExtensionManifest {
         debug_adapters: Default::default(),
         debug_locators: Default::default(),
         language_model_providers: BTreeMap::default(),
+        web_editors: Default::default(), // photon: new manifest field
     }
 }
 
