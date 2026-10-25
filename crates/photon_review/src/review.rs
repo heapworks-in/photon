@@ -3969,11 +3969,7 @@ impl ReviewItem {
             .id("photon-review-checklist")
             .pt_4()
             .gap_1()
-            .child(
-                Label::new(format!("Checklist · {}", progress.text()))
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            )
+            .child(Label::new(format!("Checklist · {}", progress.text())).size(LabelSize::Small))
             .children(errors.into_iter().map(|error| {
                 Label::new(error.clone())
                     .size(LabelSize::XSmall)
@@ -3986,9 +3982,10 @@ impl ReviewItem {
                 section = section.child(
                     v_flex()
                         .child(
-                            Label::new(format!("✓ {}", check.title()))
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
+                            h_flex()
+                                .gap_1()
+                                .child(Label::new("✓").size(LabelSize::Small).color(Color::Success))
+                                .child(Label::new(check.title()).size(LabelSize::Small)),
                         )
                         .child(
                             Label::new(result.evidence().to_string())
@@ -4044,6 +4041,18 @@ impl ReviewItem {
                 );
             }
         }
+        section = section.child(
+            div().pt_1().child(
+                crate::button("photon-review-own-checklist", "Add your own checklist…")
+                    .style(ButtonStyle::Subtle)
+                    .tooltip(Tooltip::text(
+                        "Opens settings.json: add checklists under \"pr_review\"",
+                    ))
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(zed_actions::OpenSettingsFile.boxed_clone(), cx)
+                    }),
+            ),
+        );
         Some(section.into_any_element())
     }
 
@@ -4062,7 +4071,7 @@ impl ReviewItem {
         };
         let mut map = v_flex()
             .id("photon-review-map")
-            .w(px(250.))
+            .w(px(320.))
             .flex_none()
             .h_full()
             .p_2()
