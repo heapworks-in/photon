@@ -7,7 +7,9 @@ use crate::{WebEditor, WebEditorSource};
 
 pub const SCHEME: &str = "photon-web";
 
-pub const CSP: &str = "default-src photon-web: 'unsafe-inline'; img-src photon-web: data: blob:; font-src photon-web: data:; connect-src 'none'";
+// Pages may fetch their own files (Excalidraw reads its libraries and, to embed them in SVG exports,
+// its fonts); requests for another editor's files are refused by the scheme handler.
+pub const CSP: &str = "default-src photon-web: 'unsafe-inline'; img-src photon-web: data: blob:; font-src photon-web: data:; connect-src photon-web:";
 
 pub struct Served {
     pub bytes: Cow<'static, [u8]>,
@@ -90,6 +92,19 @@ fn mime_type(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn csp_allows_only_photon_web_and_inline_data() {
+        for directive in CSP.split(';') {
+            for source in directive.split_whitespace().skip(1) {
+                assert!(
+                    ["photon-web:", "'unsafe-inline'", "data:", "blob:"].contains(&source),
+                    "{directive}"
+                );
+            }
+        }
+        assert!(CSP.contains("connect-src photon-web:"));
+    }
     use crate::{WebEditor, WebEditorSource};
     use gpui::SharedString;
     use std::borrow::Cow;
