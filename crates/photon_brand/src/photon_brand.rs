@@ -60,4 +60,219 @@ mod tests {
             assert!(contrast_ratio(*color, BHUMI) >= 4.5, "{color:06X}");
         }
     }
+
+    /// Text users read says Photon. This scans the places it lives (UI string literals, settings
+    /// descriptions, comments in the settings and keymap files users open) and fails on "Zed"
+    /// that isn't one of the allowed uses.
+    #[test]
+    fn user_facing_text_says_photon_not_zed() {
+        // Zed's own services (kept off in Photon), identifiers users type or that are stored,
+        // attribution, and Photon's own hook comments.
+        const ALLOWED: &[&str] = &[
+            "photon:",
+            "zed.dev",
+            "Based on Zed",
+            "Zed Pro",
+            "Zed Business",
+            "Zed Student",
+            "Zed Free",
+            "Zed AI",
+            "Zed account",
+            "Zed Account",
+            "Zed Predict",
+            "Zed's Edit Predictions",
+            "Zed Edit Predictions",
+            "Zeta",
+            "Zed server",
+            "Zed team",
+            "Zed's hosted",
+            "Zed-hosted",
+            "Zed models",
+            "signed in to Zed",
+            "Sign in to Zed",
+            "Zed rejected",
+            "Zed Keybind Context",
+            "Zed Default",
+            "Zed (Default)",
+            ".ZedSans",
+            ".ZedMono",
+            "\"Zed\"",
+            "Zed.exe",
+            "Zed.dmg",
+            "Zed.app",
+            "Zed Industries",
+            "Zed Agent\")",
+            "ZedPredictModal",
+            "{zed,Zed}",
+            "in Zed agent",
+            "the Zed agent",
+            "Zed VIP",
+            "Zed's edit predictions",
+            "Fast Mode for Zed",
+            "whether Zed may collect",
+            "IconName::Zed",
+            "\"Zed/{}",
+            "sharing a project in Zed",
+            "Zed Plex",
+            "Zed X Copilot",
+            "Zed Extension CLI",
+            "Plan::Zed",
+            "GPU Zed is running on",
+        ];
+        const SKIPPED_CRATES: &[&str] = &[
+            "collab",
+            "docs_preprocessor",
+            "eval_cli",
+            "eval",
+            "benchmarks",
+            "extension_cli",
+            "auto_update_helper",
+            "windows_resources",
+            "etw_tracing",
+            "explorer_command_injector",
+            "gpui_windows",
+            "gpui",
+            "agent/src/tools/evals",
+        ];
+        const USER_TEXT: &[&str] = &[
+            "Label::new(\"",
+            "Headline::new(\"",
+            "Tooltip::text(\"",
+            "description: \"",
+            ".label(\"",
+            "title: \"",
+            "Notification::new(\"",
+            "ListBulletItem::new(\"",
+            "Button::new(\"",
+            ".placeholder(\"",
+            "detail: \"",
+            "message: \"",
+        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let allowed = |line: &str| {
+            let mut rest = line.to_string();
+            for allowed in ALLOWED {
+                rest = rest.replace(allowed, "");
+            }
+            !rest.contains("Zed")
+        };
+        let mut found = Vec::new();
+
+        let mut stack = vec![root.join("crates")];
+        while let Some(directory) = stack.pop() {
+            for entry in std::fs::read_dir(&directory)
+                .expect("read crates")
+                .flatten()
+            {
+                let path = entry.path();
+                let relative = path
+                    .strip_prefix(root.join("crates"))
+                    .expect("inside crates");
+                let relative = relative.to_string_lossy();
+                if SKIPPED_CRATES.iter().any(|skipped| {
+                    relative == *skipped || relative.starts_with(&format!("{skipped}/"))
+                }) || relative.contains("/tests/")
+                    || relative.contains("/benches/")
+                    || relative.ends_with("_tests.rs")
+                    || relative.contains("test_fixtures")
+                {
+                    continue;
+                }
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|extension| extension != "rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("read source");
+                // Test modules sit at the end of a file in this codebase.
+                let shipped = text.split("#[cfg(test)]").next().unwrap_or_default();
+                // A string on its own line is user text unless the line before starts a log
+                // message or an internal error.
+                const NOT_SHOWN: &[&str] = &[
+                    "log::",
+                    "debug!(",
+                    "info!(",
+                    "warn!(",
+                    "error!(",
+                    "trace!(",
+                    "eprintln!(",
+                    "println!(",
+                    "log!(",
+                    "anyhow!(",
+                    "bail!(",
+                    "context(",
+                    "with_context(",
+                    "panic!(",
+                    "expect(",
+                    "assert",
+                    "Err(",
+                    "#[doc",
+                    "telemetry::event!(",
+                ];
+                let mut previous: Vec<&str> = Vec::new();
+                for (number, line) in shipped.lines().enumerate() {
+                    // Photon's own hook comments name Zed on purpose.
+                    let line = line.split("// photon:").next().unwrap_or_default();
+                    let bare_string = line.trim_start().starts_with('"')
+                        && !previous
+                            .iter()
+                            .any(|line| NOT_SHOWN.iter().any(|marker| line.contains(marker)));
+                    if !line.trim().is_empty() {
+                        previous.push(line);
+                        if previous.len() > 3 {
+                            previous.remove(0);
+                        }
+                    }
+                    let user_text = bare_string || USER_TEXT.iter().any(|call| line.contains(call));
+                    if user_text && line.contains("Zed") && !allowed(line) {
+                        found.push(format!("crates/{relative}:{}: {}", number + 1, line.trim()));
+                    }
+                }
+            }
+        }
+
+        let mut files = vec![root.join("assets/settings/default.json")];
+        for directory in [
+            "assets/keymaps",
+            "assets/keymaps/macos",
+            "assets/keymaps/linux",
+        ] {
+            for entry in std::fs::read_dir(root.join(directory))
+                .expect("read keymaps")
+                .flatten()
+            {
+                if entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+                {
+                    files.push(entry.path());
+                }
+            }
+        }
+        for path in files {
+            let text = std::fs::read_to_string(&path).expect("read json");
+            for (number, line) in text.lines().enumerate() {
+                if let Some((_, comment)) = line.split_once("//")
+                    && comment.contains("Zed")
+                    && !comment.contains("photon:")
+                    && !allowed(comment)
+                {
+                    found.push(format!(
+                        "{}:{}: {}",
+                        path.display(),
+                        number + 1,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "user-facing text names Zed:\n{}",
+            found.join("\n")
+        );
+    }
 }

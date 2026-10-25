@@ -7,6 +7,8 @@ use std::{borrow::Cow, fmt::Display, ops::Deref, sync::Arc};
 
 use crate::serialize_f32_with_two_decimal_places;
 
+// photon: user-facing text names Photon, not Zed.
+
 /// OpenType font features as a map of feature tag to value.
 /// This is a content type that mirrors `gpui::FontFeatures` but without the Arc wrapper.
 /// Values can be specified as booleans (true=1, false=0) or integers.
@@ -217,7 +219,7 @@ pub struct ThemeSettingsContent {
     /// The name of a font to use for rendering Mermaid diagrams in the agent
     /// panel and markdown preview. Falls back to the UI font if unset.
     pub mermaid_font_family: Option<FontFamilyName>,
-    /// The name of the Zed theme to use.
+    /// The name of the Photon theme to use.
     pub theme: Option<ThemeSelection>,
     /// The name of the icon theme to use.
     pub icon_theme: Option<IconThemeSelection>,

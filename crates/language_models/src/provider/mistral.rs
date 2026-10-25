@@ -23,6 +23,7 @@ use strum::IntoEnumIterator;
 use ui::IconName;
 
 use language_model::util::{fix_streamed_json, parse_tool_arguments};
+// photon: user-facing text names Photon, not Zed.
 
 const PROVIDER_ID: LanguageModelProviderId = LanguageModelProviderId::new("mistral");
 const PROVIDER_NAME: LanguageModelProviderName = LanguageModelProviderName::new("Mistral");
@@ -394,7 +395,7 @@ pub fn into_mistral(
                                         text_parts.push(text.to_string());
                                     }
                                     LanguageModelToolResultContent::Image(_) => {
-                                        text_parts.push("[Tool responded with an image, but Zed doesn't support these in Mistral models yet]".to_string());
+                                        text_parts.push("[Tool responded with an image, but Photon doesn't support these in Mistral models yet]".to_string());
                                     }
                                 }
                             }

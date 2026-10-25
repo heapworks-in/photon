@@ -31,6 +31,7 @@ use crate::{
     agent_connection_store::AgentConnectionStore,
     thread_metadata_store::{ThreadId, ThreadMetadata, ThreadMetadataStore, WorktreePaths},
 };
+// photon: user-facing text names Photon, not Zed.
 
 pub struct AcpThreadImportOnboarding;
 pub struct CrossChannelImportOnboarding;
@@ -572,7 +573,7 @@ impl Render for ThreadImportModal {
                         ModalHeader::new()
                             .headline("Import External Agent Threads")
                             .description(
-                                "Import threads from agents like Claude Agent, Codex, and more, whether started in Zed or another client. \
+                                "Import threads from agents like Claude Agent, Codex, and more, whether started in Photon or another client. \
                                 Choose which agents to include, and their threads will appear in your thread history."
                             )
                             .show_dismiss_button(true),

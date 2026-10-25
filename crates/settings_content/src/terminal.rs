@@ -7,6 +7,8 @@ use settings_macros::{MergeFrom, with_fallible_options};
 
 use crate::{FontFamilyName, FontFeaturesContent, FontSize, FontWeightContent};
 
+// photon: user-facing text names Photon, not Zed.
+
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct ProjectTerminalSettingsContent {
     /// What shell to use when opening a terminal.
@@ -63,7 +65,7 @@ pub struct ProjectTerminalSettingsContent {
     /// }
     /// ```
     ///
-    /// Use `"..."` to add regexes without repeating Zed's defaults. In project
+    /// Use `"..."` to add regexes without repeating Photon's defaults. In project
     /// settings, it extends the user or parent configuration value. Omit
     /// `"..."` to replace the inherited list. Set `[]` to clear it. Omitting this
     /// setting keeps the inherited list.

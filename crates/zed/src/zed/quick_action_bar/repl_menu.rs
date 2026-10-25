@@ -15,6 +15,7 @@ use ui::{
 use util::ResultExt;
 
 use super::QuickActionBar;
+// photon: user-facing text names Photon, not Zed.
 
 const ZED_REPL_DOCUMENTATION: &str = "https://zed.dev/docs/repl";
 
@@ -374,7 +375,8 @@ impl QuickActionBar {
     }
 
     pub fn render_repl_setup(&self, language: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let tooltip: SharedString = SharedString::from(format!("Setup Zed REPL for {}", language));
+        let tooltip: SharedString =
+            SharedString::from(format!("Setup Photon REPL for {}", language));
         Some(
             h_flex()
                 .gap(DynamicSpacing::Base06.rems(cx))

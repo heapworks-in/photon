@@ -32,6 +32,7 @@ use ui_input::InputField;
 use util::ResultExt;
 
 use crate::AllLanguageModelSettings;
+// photon: user-facing text names Photon, not Zed.
 
 const OLLAMA_DOWNLOAD_URL: &str = "https://ollama.com/download";
 const OLLAMA_LIBRARY_URL: &str = "https://ollama.com/library";
@@ -869,8 +870,10 @@ impl ConfigurationView {
                             .child(Label::new("ollama run gpt-oss:20b").inline_code(cx)),
                     )
                     .child(
-                        ListBulletItem::new("Click 'Connect' below to start using Ollama in Zed")
-                            .label_color(Color::Muted),
+                        ListBulletItem::new(
+                            "Click 'Connect' below to start using Ollama in Photon",
+                        )
+                        .label_color(Color::Muted),
                     ),
             )
             .child(
@@ -910,7 +913,7 @@ impl ConfigurationView {
           .mb_2()
           .child(
               Label::new(
-                  format!("You can also set the {API_KEY_ENV_VAR_NAME} environment variable and restart Zed.")
+                  format!("You can also set the {API_KEY_ENV_VAR_NAME} environment variable and restart Photon.")
               )
               .size(LabelSize::Small)
               .color(Color::Muted),

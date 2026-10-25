@@ -25,6 +25,8 @@ use workspace::MultiWorkspace;
 
 use crate::{SettingsUiFile, SettingsWindow, all_projects};
 
+// photon: user-facing text names Photon, not Zed.
+
 actions!(
     skill_creator,
     [SaveSkill, Cancel, FocusNextField, FocusPreviousField,]
@@ -710,7 +712,7 @@ impl SkillCreatorPage {
             .child(match &self.url_import_status {
                 UrlImportStatus::Idle => Label::new(
                     "Paste a GitHub .md URL to fetch it and fill out the form. \
-                     For private files, Zed retries using GITHUB_TOKEN, if set.",
+                     For private files, Photon retries using GITHUB_TOKEN, if set.",
                 )
                 .size(LabelSize::Small)
                 .color(Color::Muted)

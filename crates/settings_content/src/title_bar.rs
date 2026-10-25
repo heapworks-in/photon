@@ -3,6 +3,8 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use settings_macros::{MergeFrom, with_fallible_options};
 
+// photon: user-facing text names Photon, not Zed.
+
 /// The layout of window control buttons as represented by user settings.
 ///
 /// Custom layout strings use the GNOME `button-layout` format (e.g.
@@ -25,7 +27,7 @@ pub enum WindowButtonLayoutContent {
     /// Follow the system/desktop configuration.
     #[default]
     PlatformDefault,
-    /// Use Zed's built-in standard layout, regardless of system config.
+    /// Use Photon's built-in standard layout, regardless of system config.
     Standard,
     /// A raw GNOME-style layout string.
     Custom(String),
@@ -126,7 +128,7 @@ pub struct TitleBarSettingsContent {
     /// The layout of window control buttons in the title bar (Linux only).
     ///
     /// This can be set to "platform_default" to follow the system configuration, or
-    /// "standard" to use Zed's built-in layout. For custom layouts, use a
+    /// "standard" to use Photon's built-in layout. For custom layouts, use a
     /// GNOME-style layout string like "close:minimize,maximize".
     ///
     /// Default: "platform_default"

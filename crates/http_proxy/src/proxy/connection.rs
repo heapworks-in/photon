@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use url::Url;
+// photon: user-facing text names Photon, not Zed.
 
 /// Buffer size for each direction of bidir copy. 64 KiB is the sweet spot
 /// for most networks — large enough to keep the pipe full, small enough
@@ -793,7 +794,7 @@ fn deny_request(
     );
 
     let body = format!(
-        "Request blocked by the Zed sandbox network policy.\n\n  \
+        "Request blocked by the Photon sandbox network policy.\n\n  \
          Reason: {}\n\n  \
          This is not a network or server failure — it's a policy decision.\n  \
          To proceed, ask the user to approve the host on the next terminal call.\n",

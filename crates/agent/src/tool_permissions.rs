@@ -8,6 +8,7 @@ use shell_command_parser::{
 use std::path::{Component, Path};
 use std::sync::LazyLock;
 use util::shell::ShellKind;
+// photon: user-facing text names Photon, not Zed.
 
 const HARDCODED_SECURITY_DENIAL_MESSAGE: &str = "Blocked by built-in security rule. This operation is considered too \
      harmful to be allowed, and cannot be overridden by settings.";
@@ -317,7 +318,7 @@ impl ToolPermissionDecision {
                     // hidden sub-commands that bypass the allow patterns.
                     return ToolPermissionDecision::Deny(format!(
                         "The {} shell does not support \"always allow\" patterns for the terminal \
-                         tool because Zed cannot parse its command chaining syntax. Please remove \
+                         tool because Photon cannot parse its command chaining syntax. Please remove \
                          the always_allow patterns from your tool_permissions settings, or switch \
                          to a POSIX-conforming shell.",
                         shell_kind

@@ -7,6 +7,8 @@ use settings_macros::{MergeFrom, with_fallible_options};
 
 use std::sync::Arc;
 
+// photon: user-facing text names Photon, not Zed.
+
 #[with_fallible_options]
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema, MergeFrom)]
 pub struct AllLanguageModelSettingsContent {
@@ -51,7 +53,7 @@ pub struct AnthropicCompatibleSettingsContent {
 pub struct AnthropicCompatibleAvailableModel {
     /// The model's name in the provider's API. e.g. claude-3-5-sonnet-latest
     pub name: String,
-    /// The model's name in Zed's UI, such as in the model selector dropdown menu in the assistant panel.
+    /// The model's name in Photon's UI, such as in the model selector dropdown menu in the assistant panel.
     pub display_name: Option<String>,
     /// The model's context window size.
     pub max_tokens: u64,
@@ -93,7 +95,7 @@ impl Default for AnthropicCompatibleModelCapabilities {
 pub struct AnthropicAvailableModel {
     /// The model's name in the Anthropic API. e.g. claude-3-5-sonnet-latest, claude-3-opus-20240229, etc
     pub name: String,
-    /// The model's name in Zed's UI, such as in the model selector dropdown menu in the agent panel.
+    /// The model's name in Photon's UI, such as in the model selector dropdown menu in the agent panel.
     pub display_name: Option<String>,
     /// The model's context window size.
     pub max_tokens: u64,
@@ -216,7 +218,7 @@ pub struct OllamaSettingsContent {
 pub struct OllamaAvailableModel {
     /// The model name in the Ollama API (e.g. "llama3.2:latest")
     pub name: String,
-    /// The model's name in Zed's UI, such as in the model selector dropdown menu in the agent panel.
+    /// The model's name in Photon's UI, such as in the model selector dropdown menu in the agent panel.
     pub display_name: Option<String>,
     /// The Context Length parameter to the model (aka num_ctx or n_ctx)
     pub max_tokens: u64,
@@ -340,7 +342,7 @@ pub struct LlamaCppSettingsContent {
 pub struct LlamaCppAvailableModel {
     /// The model id reported by the llama.cpp server (its `--alias` or the model file path).
     pub name: String,
-    /// The model's name in Zed's UI, such as in the model selector dropdown menu in the agent panel.
+    /// The model's name in Photon's UI, such as in the model selector dropdown menu in the agent panel.
     pub display_name: Option<String>,
     /// The Context Length parameter to the model (aka n_ctx).
     pub max_tokens: u64,

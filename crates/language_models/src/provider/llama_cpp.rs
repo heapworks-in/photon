@@ -31,6 +31,7 @@ use util::ResultExt;
 
 use crate::AllLanguageModelSettings;
 use language_model::chat_completion::ChatCompletionEventMapper;
+// photon: user-facing text names Photon, not Zed.
 
 const LLAMA_CPP_DOWNLOAD_URL: &str = "https://llama.app";
 const LLAMA_CPP_MODELS_URL: &str = "https://huggingface.co/models?library=gguf&sort=trending";
@@ -1204,7 +1205,7 @@ impl ConfigurationView {
                     )
                     .child(
                         ListBulletItem::new(
-                            "Click 'Connect' below to start using llama.cpp in Zed",
+                            "Click 'Connect' below to start using llama.cpp in Photon",
                         )
                         .label_color(Color::Muted),
                     ),
@@ -1248,7 +1249,7 @@ impl ConfigurationView {
             .mb_2()
             .child(
                 Label::new(format!(
-                    "You can also set the {API_KEY_ENV_VAR_NAME} environment variable and restart Zed."
+                    "You can also set the {API_KEY_ENV_VAR_NAME} environment variable and restart Photon."
                 ))
                 .size(LabelSize::Small)
                 .color(Color::Muted),

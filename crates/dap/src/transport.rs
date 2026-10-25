@@ -31,6 +31,7 @@ use crate::{
     client::DapMessageHandler,
     debugger_settings::DebuggerSettings,
 };
+// photon: user-facing text names Photon, not Zed.
 
 pub(crate) type IoMessage = str;
 pub(crate) type Command = str;
@@ -711,7 +712,7 @@ impl StdioTransport {
     ) -> Result<Self> {
         let Some(binary_command) = &binary.command else {
             bail!(
-                "When using the `stdio` transport, the path to a debug adapter binary must be set by Zed."
+                "When using the `stdio` transport, the path to a debug adapter binary must be set by Photon."
             );
         };
         let mut command = util::command::new_std_command(&binary_command);

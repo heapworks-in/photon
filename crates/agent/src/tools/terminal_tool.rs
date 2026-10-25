@@ -21,6 +21,7 @@ use crate::sandboxing::{
     sandboxing_enabled_for_project,
 };
 use crate::{AgentTool, ThreadEnvironment, ToolCallEventStream, ToolInput};
+// photon: user-facing text names Photon, not Zed.
 
 const COMMAND_OUTPUT_LIMIT: u64 = 16 * 1024;
 
@@ -598,7 +599,7 @@ async fn run_terminal_tool(
     #[cfg(target_os = "windows")]
     let write_paths: Vec<settings::GrantedWritePath> = {
         let Some(release) = wsl_zed_release.clone() else {
-            return Err("Could not select a Linux Zed release for WSL sandboxing".to_string());
+            return Err("Could not select a Linux Photon release for WSL sandboxing".to_string());
         };
         let mut resolved_paths = Vec::with_capacity(write_paths.len());
         for requested in write_paths {

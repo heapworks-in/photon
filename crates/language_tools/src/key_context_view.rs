@@ -12,6 +12,7 @@ use ui::{
 };
 use workspace::{Item, SplitDirection, Workspace};
 use zed_actions::dev::OpenKeyContextView;
+// photon: user-facing text names Photon, not Zed.
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -198,7 +199,7 @@ impl Render for KeyContextView {
                 }),
             )
             .child(Label::new("Keyboard Context").size(LabelSize::Large))
-            .child(Label::new("This view lets you determine the current context stack for creating custom key bindings in Zed. When a keyboard shortcut is triggered, it also shows all the possible contexts it could have triggered in, and which one matched."))
+            .child(Label::new("This view lets you determine the current context stack for creating custom key bindings in Photon. When a keyboard shortcut is triggered, it also shows all the possible contexts it could have triggered in, and which one matched."))
             .child(
                 h_flex()
                     .mt_4()

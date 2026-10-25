@@ -1,4 +1,5 @@
-// Default Keymap (Atom) for Zed on Linux
+// photon: user-facing text names Photon, not Zed.
+// Default Keymap (Atom) for Photon on Linux
 [
   {
     "bindings": {

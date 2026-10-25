@@ -12,6 +12,8 @@ use crate::ExtendingVec;
 
 use crate::DockPosition;
 
+// photon: user-facing text names Photon, not Zed.
+
 /// Where to position the threads sidebar.
 #[derive(
     Clone,
@@ -361,7 +363,7 @@ pub struct AgentSettingsContent {
     ///
     /// Default: true
     pub expand_terminal_card: Option<bool>,
-    /// Command to automatically run when Zed creates a Terminal Thread shell in the agent panel.
+    /// Command to automatically run when Photon creates a Terminal Thread shell in the agent panel.
     /// The command is sent to the shell as if typed, so it is interpreted by your
     /// configured shell (including on Windows and remote/WSL projects).
     /// An empty string disables this behavior.
@@ -400,7 +402,7 @@ pub struct AgentSettingsContent {
     /// The global `default` applies when no tool-specific rules match.
     /// For external agent servers (e.g. Claude Agent) that define their own
     /// permission modes, "deny" and "confirm" still take precedence — the
-    /// external agent's permission system is only used when Zed would allow
+    /// external agent's permission system is only used when Photon would allow
     /// the action. Per-tool regex patterns (`always_allow`, `always_deny`,
     /// `always_confirm`) match against the tool's text input (command, path,
     /// URL, etc.).
@@ -907,7 +909,7 @@ pub enum CustomAgentServerSettings {
 /// path string (`"/tmp/x"`, a legacy/hand-authored entry with no resolved
 /// target) or an object (`{ "requested": "/tmp/x", "resolved": "/tmp/real" }`).
 /// Serializes back as a bare string when `resolved` is `None` and as an object
-/// otherwise, so hand-authored bare strings round-trip and Zed-written grants
+/// otherwise, so hand-authored bare strings round-trip and Photon-written grants
 /// are objects.
 #[derive(Clone, Debug, Default, PartialEq, MergeFrom)]
 pub struct GrantedWritePathContent {
@@ -1040,9 +1042,9 @@ pub struct SandboxPermissionsContent {
 
     /// Directory subtrees that sandboxed terminal commands may always write
     /// to without prompting. Each entry is either a bare path string or an
-    /// object `{requested, resolved}`; Zed writes objects (the canonical,
+    /// object `{requested, resolved}`; Photon writes objects (the canonical,
     /// symlink-resolved target established at approval time), while
-    /// hand-authored entries may be bare path strings. Paths written by Zed
+    /// hand-authored entries may be bare path strings. Paths written by Photon
     /// are absolute.
     /// Default: []
     pub write_paths: Option<ExtendingVec<GrantedWritePathContent>>,

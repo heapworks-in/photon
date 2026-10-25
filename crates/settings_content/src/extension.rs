@@ -6,10 +6,12 @@ use serde::{Deserialize, Serialize};
 use settings_macros::{MergeFrom, with_fallible_options};
 use util::serde::default_true;
 
+// photon: user-facing text names Photon, not Zed.
+
 #[with_fallible_options]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct ExtensionSettingsContent {
-    /// The extensions that should be automatically installed by Zed.
+    /// The extensions that should be automatically installed by Photon.
     ///
     /// This is used to make functionality provided by extensions (e.g., language support)
     /// available out-of-the-box.

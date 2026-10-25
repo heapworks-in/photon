@@ -18,6 +18,7 @@ use serde::Deserialize;
 use settings::Settings;
 use std::sync::Arc;
 use ui::prelude::*;
+// photon: user-facing text names Photon, not Zed.
 
 pub const HANDLE_HITBOX_SIZE: f32 = 4.0;
 const HORIZONTAL_MIN_SIZE: f32 = 80.;
@@ -421,11 +422,11 @@ impl PaneLeaderDecorator for PaneRenderContext<'_> {
                         }
                     }
                     ParticipantLocation::UnsharedProject => Some(Label::new(format!(
-                        "{} is viewing an unshared Zed project",
+                        "{} is viewing an unshared Photon project",
                         leader.user.username
                     ))),
                     ParticipantLocation::External => Some(Label::new(format!(
-                        "{} is viewing a window outside of Zed",
+                        "{} is viewing a window outside of Photon",
                         leader.user.username
                     ))),
                 };

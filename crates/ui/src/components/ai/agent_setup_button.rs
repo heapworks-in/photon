@@ -1,5 +1,6 @@
 use crate::prelude::*;
 use gpui::{ClickEvent, SharedString};
+// photon: user-facing text names Photon, not Zed.
 
 #[derive(IntoElement, RegisterComponent)]
 pub struct AgentSetupButton {
@@ -68,7 +69,7 @@ impl Component for AgentSetupButton {
             "Default",
             AgentSetupButton::new("preview")
                 .icon(Icon::new(IconName::ZedAgent))
-                .name("Zed Agent")
+                .name("Photon Agent")
                 .into_any_element(),
         )
         .into_any_element()

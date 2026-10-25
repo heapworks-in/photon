@@ -1,6 +1,7 @@
 use gpui::{AnyElement, AnyView, ClickEvent, prelude::*};
 
 use crate::{ButtonLike, CircularProgress, CommonAnimationExt, Tooltip, prelude::*};
+// photon: user-facing text names Photon, not Zed.
 
 const LOAD_CIRCLE_GLYPH_VIEWBOX: f32 = 16.0;
 const LOAD_CIRCLE_GLYPH_STROKE_WIDTH: f32 = 1.2;
@@ -100,19 +101,19 @@ impl UpdateButton {
     }
 
     pub fn checking() -> Self {
-        Self::new(IconName::LoadCircle, "Checking for Zed Updates…")
+        Self::new(IconName::LoadCircle, "Checking for Photon Updates…")
             .icon_animate(true)
             .disabled(true)
     }
 
     pub fn downloading(progress: Option<f32>) -> Self {
-        Self::new(IconName::Download, "Downloading Zed Update…")
+        Self::new(IconName::Download, "Downloading Photon Update…")
             .progress(progress)
             .disabled(true)
     }
 
     pub fn installing(version: impl Into<SharedString>) -> Self {
-        Self::new(IconName::LoadCircle, "Installing Zed Update…")
+        Self::new(IconName::LoadCircle, "Installing Photon Update…")
             .icon_animate(true)
             .tooltip(version)
             .disabled(true)

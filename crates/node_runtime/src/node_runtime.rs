@@ -176,8 +176,9 @@ impl NodeRuntime {
                     // and/or have shared tracking of when internet is available.
                     Box::new(UnavailableNodeRuntime {
                         error_message: format!(
-                            "failure while downloading and/or installing Zed managed Node.js, \
-                            restart Zed to retry: {}",
+                            // photon: Photon's name; this message is shown in the UI.
+                            "failure while downloading and/or installing Photon managed Node.js, \
+                            restart Photon to retry: {}",
                             err
                         )
                         .into(),

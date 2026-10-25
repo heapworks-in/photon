@@ -14,6 +14,7 @@ use ui::{
 use util::ResultExt;
 use util::command::new_command;
 use workspace::{ModalView, MultiWorkspace};
+// photon: user-facing text names Photon, not Zed.
 
 const DONT_ASK_AGAIN_KEY: &str = "move_to_applications_dont_ask_again";
 static PROMPTED_THIS_SESSION: AtomicBool = AtomicBool::new(false);
@@ -73,9 +74,9 @@ impl MoveToApplicationsRequest {
         let response = cx
             .prompt(
                 PromptLevel::Info,
-                "Move Zed to Applications?",
+                "Move Photon to Applications?",
                 Some(
-                    "Zed is running from a temporary location. Move it to Applications to finish installing it.",
+                    "Photon is running from a temporary location. Move it to Applications to finish installing it.",
                 ),
                 &[
                     PromptButton::ok("Yes"),
@@ -103,7 +104,7 @@ impl MoveToApplicationsRequest {
                         .ok();
                     cx.prompt(
                         PromptLevel::Critical,
-                        "Failed to move Zed to Applications",
+                        "Failed to move Photon to Applications",
                         Some(&error.to_string()),
                         &["OK"],
                     )
@@ -178,7 +179,7 @@ impl Render for InstallingZedModal {
                     .py_3()
                     .border_b_1()
                     .border_color(theme.colors().border_variant)
-                    .child(Label::new("Installing Zed…")),
+                    .child(Label::new("Installing Photon…")),
             )
             .child(
                 h_flex()
@@ -196,9 +197,9 @@ impl Render for InstallingZedModal {
                     .child(
                         v_flex()
                             .gap_1()
-                            .child(Label::new("Moving Zed to Applications"))
+                            .child(Label::new("Moving Photon to Applications"))
                             .child(
-                                Label::new("Zed will reopen when installation is complete.")
+                                Label::new("Photon will reopen when installation is complete.")
                                     .size(LabelSize::Small)
                                     .color(Color::Muted),
                             ),

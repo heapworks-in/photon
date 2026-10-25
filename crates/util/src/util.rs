@@ -51,6 +51,7 @@ pub use util_macros::{line_endings, path, uri};
 pub use self::shell::{
     get_default_system_shell, get_default_system_shell_preferring_bash, get_system_shell,
 };
+// photon: user-facing text names Photon, not Zed.
 
 pub fn truncate(s: &str, max_chars: usize) -> &str {
     match s.char_indices().nth(max_chars) {
@@ -345,7 +346,7 @@ pub fn get_shell_safe_zed_path(shell_kind: shell::ShellKind) -> anyhow::Result<S
 
     zed_path
         .try_shell_safe(shell_kind)
-        .context("Failed to shell-escape Zed executable path.")
+        .context("Failed to shell-escape Photon executable path.")
 }
 
 /// Returns a path for the zed cli executable, this function

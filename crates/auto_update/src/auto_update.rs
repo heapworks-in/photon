@@ -31,6 +31,7 @@ use std::{
 };
 use util::command::new_command;
 use workspace::Workspace;
+// photon: user-facing text names Photon, not Zed.
 
 const SHOULD_SHOW_UPDATE_NOTIFICATION_KEY: &str = "auto-updater-should-show-updated-notification";
 
@@ -314,7 +315,7 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
     {
         drop(window.prompt(
             gpui::PromptLevel::Info,
-            "Zed was installed via a package manager.",
+            "Photon was installed via a package manager.",
             Some(&message),
             &["OK"],
             cx,
@@ -1185,7 +1186,7 @@ async fn install_release_linux(
 
     anyhow::ensure!(
         output.status.success(),
-        "failed to copy Zed update from {:?} to {:?}: {:?}",
+        "failed to copy Photon update from {:?} to {:?}: {:?}",
         from,
         to,
         String::from_utf8_lossy(&output.stderr)

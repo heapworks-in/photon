@@ -173,6 +173,7 @@ use crate::{
     },
     security_modal::SecurityModal,
 };
+// photon: user-facing text names Photon, not Zed.
 
 pub const SERIALIZATION_THROTTLE_TIME: Duration = Duration::from_millis(200);
 pub const MAX_RECENT_SELECTIONS: usize = 20;
@@ -10611,9 +10612,9 @@ pub struct OpenChannelNotesById {
 actions!(
     zed,
     [
-        /// Opens the Zed log file.
+        /// Opens the Photon log file.
         OpenLog,
-        /// Reveals the Zed log file in the system file manager.
+        /// Reveals the Photon log file in the system file manager.
         RevealLogInFileManager
     ]
 );
@@ -10867,7 +10868,7 @@ pub fn join_channel(
                         let detail: SharedString = match err.error_code() {
                             ErrorCode::SignedOut => "Please sign in to continue.".into(),
                             ErrorCode::UpgradeRequired => concat!(
-                                "Your are running an unsupported version of Zed. ",
+                                "Your are running an unsupported version of Photon. ",
                                 "Please update to continue."
                             )
                             .into(),

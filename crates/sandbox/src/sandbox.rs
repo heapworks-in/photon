@@ -38,6 +38,7 @@ pub use util::{
 };
 #[cfg(target_os = "windows")]
 pub use windows_wsl::{ResolvedGrant, resolve_canonical_for_grant};
+// photon: user-facing text names Photon, not Zed.
 
 #[cfg(target_os = "windows")]
 pub(crate) const WSL_SANDBOX_UNAVAILABLE_PREFIX: &str = "Windows sandboxing via WSL is unavailable";
@@ -431,7 +432,7 @@ impl fmt::Display for SandboxError {
             }
             SandboxError::BwrapSetuidRejected => write!(
                 formatter,
-                "the only available `bwrap` is setuid-root, which Zed refuses to run"
+                "the only available `bwrap` is setuid-root, which Photon refuses to run"
             ),
             SandboxError::SandboxProbeFailed => {
                 write!(

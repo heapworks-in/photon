@@ -15,9 +15,10 @@ use language_model::{
 use openai_subscribed::{ChatGptModel, PROVIDER_ID, PROVIDER_NAME, State, language_model};
 use std::sync::Arc;
 use ui::{ConfiguredApiCard, prelude::*};
+// photon: user-facing text names Photon, not Zed.
 
 const SUBSCRIPTION_DESCRIPTION: &str =
-    "Sign in with your ChatGPT Plus or Pro subscription to use OpenAI models in Zed's agent.";
+    "Sign in with your ChatGPT Plus or Pro subscription to use OpenAI models in Photon's agent.";
 
 pub struct OpenAiSubscribedProvider {
     state: Entity<State>,

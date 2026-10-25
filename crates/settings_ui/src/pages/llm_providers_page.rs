@@ -21,6 +21,8 @@ use util::ResultExt as _;
 use crate::SettingsWindow;
 use crate::components::SettingsInputField;
 
+// photon: user-facing text names Photon, not Zed.
+
 pub(crate) fn render_llm_providers_page(
     settings_window: &SettingsWindow,
     scroll_handle: &ScrollHandle,
@@ -296,7 +298,7 @@ fn render_api_key_providers_item(
                         )
                         .child(
                             Label::new(format!(
-                                "Or set the {env_var_name} env var and restart Zed for it to take effect."
+                                "Or set the {env_var_name} env var and restart Photon for it to take effect."
                             ))
                             .size(LabelSize::XSmall)
                             .color(Color::Muted),

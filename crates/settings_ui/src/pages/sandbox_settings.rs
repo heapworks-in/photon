@@ -10,6 +10,8 @@ use util::ResultExt as _;
 use crate::SettingsWindow;
 use crate::components::{SettingsInputField, SettingsSectionHeader};
 
+// photon: user-facing text names Photon, not Zed.
+
 const DOMAINS_DESCRIPTION: &str = "Each entry is an exact domain (github.com) or a leading-*. subdomain wildcard (*.npmjs.org). IP addresses and local domains are not allowed.";
 
 const WRITE_PATHS_DESCRIPTION: &str = "Each entry must be an absolute path and grants write access to the whole subtree, except protected Git metadata.";
@@ -63,7 +65,7 @@ pub(crate) fn render_sandbox_settings_page(
                 "sandbox-enabled",
                 Some("Enable Sandbox"),
                 Some(
-                    "Wrap agent-run terminal commands in an OS-level sandbox. When off, commands run with Zed's own permissions."
+                    "Wrap agent-run terminal commands in an OS-level sandbox. When off, commands run with Photon's own permissions."
                         .into(),
                 ),
                 sandbox_enabled,

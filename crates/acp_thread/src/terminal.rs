@@ -20,6 +20,7 @@ use std::{
 };
 use task::Shell;
 use util::get_default_system_shell_preferring_bash;
+// photon: user-facing text names Photon, not Zed.
 
 /// Request to run a terminal command inside an OS-level sandbox.
 ///
@@ -122,7 +123,7 @@ impl LinuxWslSandboxError {
                     .to_string()
             }
             LinuxWslSandboxError::SetuidRejected => {
-                "The only `bwrap` available is setuid-root, which Zed refuses to run. Install \
+                "The only `bwrap` available is setuid-root, which Photon refuses to run. Install \
                  a non-setuid Bubblewrap to let the agent sandbox terminal commands."
                     .to_string()
             }

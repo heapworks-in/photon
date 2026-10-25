@@ -1,3 +1,4 @@
+// photon: user-facing text names Photon, not Zed.
 [
   // Cursor for MacOS. See: https://docs.cursor.com/kbd
   {
@@ -48,11 +49,11 @@
       "ctrl-r": "agent::NewThread",
       "ctrl-shift-v": "editor::Paste",
       // "escape": "agent::ToggleFocus"
-      ///// Enable when Zed supports multiple thread tabs
+      ///// Enable when Photon supports multiple thread tabs
       // "ctrl-t": // new thread tab
       // "ctrl-[": // next thread tab
       // "ctrl-]": // next thread tab
-      ///// Enable if Zed adds support for keyboard navigation of thread elements
+      ///// Enable if Photon adds support for keyboard navigation of thread elements
       // "tab": // cycle to next message
       // "shift-tab": // cycle to previous message
     },

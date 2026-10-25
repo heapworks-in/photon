@@ -13692,5 +13692,7 @@ async fn test_starts_open_without_a_folder(cx: &mut gpui::TestAppContext) {
     let cx = &mut VisualTestContext::from_window(window.into(), cx);
     let panel = workspace.update_in(cx, ProjectPanel::new);
     cx.run_until_parked();
-    panel.update_in(cx, |panel, window, cx| assert!(panel.starts_open(window, cx)));
+    panel.update_in(cx, |panel, window, cx| {
+        assert!(panel.starts_open(window, cx))
+    });
 }

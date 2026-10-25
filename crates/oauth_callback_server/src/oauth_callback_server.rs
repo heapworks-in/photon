@@ -4,6 +4,7 @@
 //! Subscription) to receive the authorization code redirect from the user's
 //! browser. The HTML response page rendered to the browser is kept alongside
 //! the server so all OAuth callback presentation lives in one place.
+// photon: user-facing text names Photon, not Zed.
 
 /// Generate a styled HTML page for OAuth callback responses.
 ///
@@ -98,7 +99,7 @@ pub fn oauth_callback_page(title: &str, message: &str, is_error: bool) -> String
   </div>
   <h1>{title}</h1>
   <p>{message}</p>
-  <div class="brand">Zed</div>
+  <div class="brand">Photon</div>
 </div>
 </body>
 </html>"#,
@@ -308,7 +309,7 @@ mod server {
                         200,
                         oauth_callback_page(
                             "Authorization Successful",
-                            "You can close this tab and return to Zed.",
+                            "You can close this tab and return to Photon.",
                             false,
                         ),
                     ),
@@ -318,7 +319,7 @@ mod server {
                             400,
                             oauth_callback_page(
                                 "Authorization Failed",
-                                "Something went wrong. Please try again from Zed.",
+                                "Something went wrong. Please try again from Photon.",
                                 true,
                             ),
                         )

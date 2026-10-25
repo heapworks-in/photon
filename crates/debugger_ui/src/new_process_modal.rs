@@ -35,6 +35,7 @@ use crate::{
     attach_modal::{AttachModal, ModalIntent},
     debugger_panel::DebugPanel,
 };
+// photon: user-facing text names Photon, not Zed.
 
 actions!(
     new_process_modal,
@@ -828,7 +829,7 @@ pub(super) struct ConfigureMode {
 impl ConfigureMode {
     pub(super) fn new(window: &mut Window, cx: &mut App) -> Entity<Self> {
         let program = cx.new(|cx| {
-            InputField::new(window, cx, "ENV=Zed ~/bin/program --option")
+            InputField::new(window, cx, "ENV=Photon ~/bin/program --option")
                 .label("Program")
                 .tab_stop(true)
                 .tab_index(1)

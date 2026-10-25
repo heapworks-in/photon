@@ -6,6 +6,7 @@ use util::{ResultExt as _, command::new_command};
 use workspace::AppState;
 
 use crate::div_inspector::DivInspector;
+// photon: user-facing text names Photon, not Zed.
 
 pub fn init(app_state: Arc<AppState>, cx: &mut App) {
     cx.on_action(|_: &zed_actions::dev::ToggleInspector, cx| {
@@ -139,7 +140,7 @@ fn render_inspector_id(inspector_id: &InspectorElementId, cx: &App) -> Div {
                 .font_buffer(cx)
                 .text_xs()
                 .child(source_location_string)
-                .tooltip(Tooltip::text("Click to open by running Zed CLI"))
+                .tooltip(Tooltip::text("Click to open by running Photon CLI"))
                 .on_click(move |_, _window, cx| {
                     cx.background_spawn(open_zed_source_location(source_location))
                         .detach_and_log_err(cx);

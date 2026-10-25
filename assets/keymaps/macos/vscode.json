@@ -1,7 +1,8 @@
+// photon: user-facing text names Photon, not Zed.
 [
   // VS Code for macOS. See: https://code.visualstudio.com/docs/reference/default-keybindings
   //
-  // Zed's default keymap is close to VS Code's, so this overlay only contains
+  // Photon's default keymap is close to VS Code's, so this overlay only contains
   // the bindings where the two diverge.
   {
     "context": "Editor",
