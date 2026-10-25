@@ -1,8 +1,22 @@
 # Third-party software in Photon's Excalidraw editor
 
 - Excalidraw (@excalidraw/excalidraw 0.18.1), MIT, see LICENSE. Its npm dependencies are bundled under their own licences.
-- React and React DOM, MIT.
-- Fonts shipped by Excalidraw: Excalifont, Virgil, Nunito, Lilita One, Cascadia Code, Liberation Sans and Assistant (SIL Open Font License 1.1), Comic Shanns (MIT).
+- React, React DOM, Mermaid and the other bundled npm packages, each under its own licence: see THIRD_PARTY_LICENSES.md.
+
+## Fonts
+
+Each font's licence is in fonts/<Family>/LICENSE.txt.
+
+| Font | Licence |
+| --- | --- |
+| Excalifont | SIL Open Font License 1.1 |
+| Virgil | SIL Open Font License 1.1 |
+| Nunito | SIL Open Font License 1.1 |
+| Comic Shanns | MIT |
+| Lilita One | SIL Open Font License 1.1 |
+| Cascadia Code | SIL Open Font License 1.1 |
+| Liberation Sans | SIL Open Font License 1.1 |
+| Assistant | SIL Open Font License 1.1 |
 
 ## Community libraries
 
