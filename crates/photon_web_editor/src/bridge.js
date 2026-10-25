@@ -6,8 +6,8 @@
     const parts = [];
     if (event.ctrlKey) parts.push("ctrl");
     if (event.altKey) parts.push("alt");
-    if (event.shiftKey) parts.push("shift");
     if (event.metaKey) parts.push("cmd");
+    if (event.shiftKey) parts.push("shift");
     // With shift held, event.key is the shifted symbol ("{"), so brackets come from the physical key.
     const key =
       event.code === "BracketLeft" ? "[" :

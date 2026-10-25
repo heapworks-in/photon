@@ -13566,6 +13566,7 @@ dependencies = [
  "gpui",
  "serde",
  "serde_json",
+ "smol",
  "tempfile",
  "thiserror 2.0.17",
  "urlencoding",

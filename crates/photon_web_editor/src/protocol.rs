@@ -173,4 +173,72 @@ mod tests {
         assert_eq!(PROTOCOL_VERSION, 1);
         assert!(BRIDGE_JS.contains("version: 1"));
     }
+
+    const NODE_HARNESS: &str = r#"
+const shortcuts = JSON.parse(process.env.SHORTCUTS);
+const negatives = ["cmd-z", "cmd-a"];
+let listener = null;
+const posted = [];
+const fakeWindow = {
+  addEventListener: (type, callback) => { if (type === "keydown") listener = callback; },
+  ipc: { postMessage: (text) => posted.push(JSON.parse(text)) },
+};
+new Function("window", process.env.BRIDGE)(fakeWindow);
+fakeWindow.photon._receive(JSON.stringify({ type: "load", text: "", file_name: "a", shortcuts }));
+
+const shifted = { "[": "{", "]": "}" };
+const codes = { "[": "BracketLeft", "]": "BracketRight" };
+const fire = (stroke) => {
+  const parts = stroke.split("-");
+  const base = parts.pop();
+  const shift = parts.includes("shift");
+  let key = base === "tab" ? "Tab" : base;
+  if (shift && shifted[base]) key = shifted[base];
+  else if (shift && /^[a-z]$/.test(base)) key = base.toUpperCase();
+  const event = {
+    metaKey: parts.includes("cmd"), ctrlKey: parts.includes("ctrl"),
+    altKey: parts.includes("alt"), shiftKey: shift,
+    key, code: codes[base] || "",
+    defaultPrevented: false,
+    preventDefault() { this.defaultPrevented = true; },
+    stopPropagation() {},
+  };
+  posted.length = 0;
+  listener(event);
+  return { event, posted: [...posted] };
+};
+
+const failures = [];
+for (const stroke of shortcuts) {
+  const { event, posted: sent } = fire(stroke);
+  const ok = event.defaultPrevented && sent.length === 1
+    && sent[0].type === "shortcut" && sent[0].keystroke === stroke;
+  if (!ok) failures.push(`${stroke} -> ${JSON.stringify(sent)}`);
+}
+for (const stroke of negatives) {
+  const { event, posted: sent } = fire(stroke);
+  if (event.defaultPrevented || sent.length) failures.push(`${stroke} was forwarded`);
+}
+if (failures.length) { console.error(failures.join("\n")); process.exit(1); }
+"#;
+
+    #[test]
+    fn bridge_forwards_exactly_the_shortcut_list() {
+        let output = smol::block_on(
+            smol::process::Command::new("node")
+                .args(["-e", NODE_HARNESS])
+                .env("BRIDGE", BRIDGE_JS)
+                .env(
+                    "SHORTCUTS",
+                    serde_json::to_string(&forwarded_shortcuts()).unwrap(),
+                )
+                .output(),
+        )
+        .expect("`node` must be on PATH to test bridge.js");
+        assert!(
+            output.status.success(),
+            "bridge.js mismatch:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
