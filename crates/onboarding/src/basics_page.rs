@@ -27,10 +27,11 @@ use crate::{
 };
 // photon: user-facing text names Photon, not Zed.
 
+// photon: the first family is Photon's defaults (Photon Black, with One Light for light mode).
 const LIGHT_THEMES: [&str; 3] = ["One Light", "Ayu Light", "Gruvbox Light"];
-const DARK_THEMES: [&str; 3] = ["One Dark", "Ayu Dark", "Gruvbox Dark"];
+const DARK_THEMES: [&str; 3] = ["Photon Black", "Ayu Dark", "Gruvbox Dark"];
 const FAMILY_NAMES: [SharedString; 3] = [
-    SharedString::new_static("One"),
+    SharedString::new_static("Photon"),
     SharedString::new_static("Ayu"),
     SharedString::new_static("Gruvbox"),
 ];
@@ -104,7 +105,7 @@ fn render_theme_section(tab_index: &mut isize, cx: &mut App) -> impl IntoElement
         tab_index: &mut isize,
         theme_selection: &ThemeSelection,
         cx: &mut App,
-    ) -> [impl IntoElement; 3] {
+    ) -> Vec<impl IntoElement> {
         let system_appearance = SystemAppearance::global(cx);
         let theme_registry = ThemeRegistry::global(cx);
 
@@ -127,78 +128,84 @@ fn render_theme_section(tab_index: &mut isize, cx: &mut App) -> impl IntoElement
             Appearance::Dark => DARK_THEMES,
         };
 
-        let themes = theme_names.map(|theme| theme_registry.get(theme).unwrap());
+        // photon: a missing theme leaves its preview out instead of panicking.
+        let themes = theme_names.map(|theme| theme_registry.get(theme).ok());
 
-        [0, 1, 2].map(|index| {
-            let theme = &themes[index];
-            let is_selected = theme.name == current_theme_name;
-            let name = theme.name.clone();
-            let colors = cx.theme().colors();
+        themes
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, theme)| {
+                let theme = &theme?;
+                let is_selected = theme.name == current_theme_name;
+                let name = theme.name.clone();
+                let colors = cx.theme().colors();
 
-            v_flex()
-                .w_full()
-                .items_center()
-                .gap_1()
-                .child(
-                    h_flex()
-                        .id(name)
-                        .relative()
-                        .w_full()
-                        .border_2()
-                        .border_color(colors.border_transparent)
-                        .rounded(ThemePreviewTile::ROOT_RADIUS)
-                        .map(|this| {
-                            if is_selected {
-                                this.border_color(colors.border_selected)
-                            } else {
-                                this.opacity(0.8).hover(|s| s.border_color(colors.border))
-                            }
-                        })
-                        .tab_index({
-                            *tab_index += 1;
-                            *tab_index - 1
-                        })
-                        .focus(|mut style| {
-                            style.border_color = Some(colors.border_focused);
-                            style
-                        })
-                        .on_click({
-                            let theme_name = theme.name.clone();
-                            let current_theme_name = current_theme_name.clone();
+                v_flex()
+                    .w_full()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .id(name)
+                            .relative()
+                            .w_full()
+                            .border_2()
+                            .border_color(colors.border_transparent)
+                            .rounded(ThemePreviewTile::ROOT_RADIUS)
+                            .map(|this| {
+                                if is_selected {
+                                    this.border_color(colors.border_selected)
+                                } else {
+                                    this.opacity(0.8).hover(|s| s.border_color(colors.border))
+                                }
+                            })
+                            .tab_index({
+                                *tab_index += 1;
+                                *tab_index - 1
+                            })
+                            .focus(|mut style| {
+                                style.border_color = Some(colors.border_focused);
+                                style
+                            })
+                            .on_click({
+                                let theme_name = theme.name.clone();
+                                let current_theme_name = current_theme_name.clone();
 
-                            move |_, _, cx| {
-                                write_theme_change(theme_name.clone(), theme_mode, cx);
-                                telemetry::event!(
-                                    "Welcome Theme Changed",
-                                    from = current_theme_name,
-                                    to = theme_name
-                                );
-                            }
-                        })
-                        .map(|this| {
-                            if theme_mode == ThemeAppearanceMode::System {
-                                let (light, dark) = (
-                                    theme_registry.get(LIGHT_THEMES[index]).unwrap(),
-                                    theme_registry.get(DARK_THEMES[index]).unwrap(),
-                                );
-                                this.child(
-                                    ThemePreviewTile::new(light, theme_seed)
-                                        .style(ThemePreviewStyle::SideBySide(dark)),
-                                )
-                            } else {
-                                this.child(
-                                    ThemePreviewTile::new(theme.clone(), theme_seed)
-                                        .style(ThemePreviewStyle::Bordered),
-                                )
-                            }
-                        }),
-                )
-                .child(
-                    Label::new(FAMILY_NAMES[index].clone())
-                        .color(Color::Muted)
-                        .size(LabelSize::Small),
-                )
-        })
+                                move |_, _, cx| {
+                                    write_theme_change(theme_name.clone(), theme_mode, cx);
+                                    telemetry::event!(
+                                        "Welcome Theme Changed",
+                                        from = current_theme_name,
+                                        to = theme_name
+                                    );
+                                }
+                            })
+                            .map(|this| {
+                                if theme_mode == ThemeAppearanceMode::System {
+                                    let (light, dark) = (
+                                        theme_registry.get(LIGHT_THEMES[index]).unwrap(),
+                                        theme_registry.get(DARK_THEMES[index]).unwrap(),
+                                    );
+                                    this.child(
+                                        ThemePreviewTile::new(light, theme_seed)
+                                            .style(ThemePreviewStyle::SideBySide(dark)),
+                                    )
+                                } else {
+                                    this.child(
+                                        ThemePreviewTile::new(theme.clone(), theme_seed)
+                                            .style(ThemePreviewStyle::Bordered),
+                                    )
+                                }
+                            }),
+                    )
+                    .child(
+                        Label::new(FAMILY_NAMES[index].clone())
+                            .color(Color::Muted)
+                            .size(LabelSize::Small),
+                    )
+                    .into()
+            })
+            .collect()
     }
 
     fn write_mode_change(mode: ThemeAppearanceMode, cx: &mut App) {
@@ -737,4 +744,17 @@ pub(crate) fn render_basics_page(user_store: &Entity<UserStore>, cx: &mut App) -
             page.child(Divider::horizontal().color(ui::DividerColor::BorderVariant))
                 .child(render_telemetry_section(&mut tab_index, cx))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_photon_family_is_photons_default_themes() {
+        assert_eq!(FAMILY_NAMES[0].as_ref(), "Photon");
+        let defaults = (settings::DEFAULT_LIGHT_THEME, settings::DEFAULT_DARK_THEME);
+        assert_eq!(get_theme_family_themes("Photon Black"), Some(defaults));
+        assert_eq!(get_theme_family_themes("One Light"), Some(defaults));
+    }
 }

@@ -42,6 +42,7 @@ use gpui_platform;
 
 use gpui_tokio::Tokio;
 use language::LanguageRegistry;
+use onboarding::{FIRST_OPEN, show_onboarding_view}; // photon: first launch shows onboarding
 use project_panel::ProjectPanel;
 use prompt_store::PromptBuilder;
 use remote::RemoteConnectionOptions;
@@ -1434,6 +1435,7 @@ pub(crate) async fn restore_or_create_workspace(
     app_state: Arc<AppState>,
     cx: &mut AsyncApp,
 ) -> Result<()> {
+    let kvp = cx.update(|cx| KeyValueStore::global(cx));
     if let Some(multi_workspaces) = restorable_workspaces(cx, &app_state).await {
         let mut error_count = 0;
         for multi_workspace in multi_workspaces {
@@ -1567,9 +1569,12 @@ pub(crate) async fn restore_or_create_workspace(
             })
             .await?;
         }
+    } else if matches!(kvp.read_kvp(FIRST_OPEN), Ok(None)) {
+        // photon: first launch shows Photon's onboarding (theme, keymap, agents); it has no Zed
+        // sign-in or telemetry.
+        cx.update(|cx| show_onboarding_view(app_state, cx)).await?;
     } else {
-        // photon: no onboarding view (it is Zed sign-in and hosted-AI setup); first launch opens a
-        // terminal like every other launch.
+        // photon: later launches with nothing to restore open a terminal.
         cx.update(|cx| {
             workspace::open_new(
                 Default::default(),

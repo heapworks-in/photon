@@ -3872,6 +3872,83 @@ mod tests {
             .unwrap();
     }
 
+    #[gpui::test]
+    async fn photon_first_launch_shows_onboarding_then_a_terminal(cx: &mut TestAppContext) {
+        let app_state = init_test(cx);
+        cx.executor().allow_parking();
+        cx.update(|cx| client::Client::set_global(app_state.client.clone(), cx));
+        let active_tabs = |cx: &mut TestAppContext| -> Vec<String> {
+            cx.update(|cx| {
+                cx.windows()
+                    .into_iter()
+                    .filter_map(|window| window.downcast::<MultiWorkspace>())
+                    .filter_map(|window| {
+                        window
+                            .read_with(cx, |multi_workspace, cx| {
+                                multi_workspace
+                                    .workspace()
+                                    .read(cx)
+                                    .active_item(cx)
+                                    .map(|item| item.tab_content_text(0, cx).to_string())
+                            })
+                            .ok()
+                            .flatten()
+                    })
+                    .collect()
+            })
+        };
+
+        let mut async_cx = cx.to_async();
+        crate::restore_or_create_workspace(app_state.clone(), &mut async_cx)
+            .await
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(active_tabs(cx), ["Onboarding"]);
+        let window = cx.update(|cx| cx.windows()[0]);
+        window
+            .update(cx, |_, window, cx| {
+                window.dispatch_action(onboarding::Finish.boxed_clone(), cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            active_tabs(cx),
+            ["Welcome"],
+            "Finish Setup goes to the welcome page"
+        );
+
+        cx.update(|cx| {
+            for window in cx.windows() {
+                window
+                    .update(cx, |_, window, _| window.remove_window())
+                    .unwrap();
+            }
+        });
+        cx.run_until_parked();
+        let mut async_cx = cx.to_async();
+        crate::restore_or_create_workspace(app_state.clone(), &mut async_cx)
+            .await
+            .unwrap();
+        cx.run_until_parked();
+        let windows = cx.update(|cx| cx.windows());
+        let multi_workspace = windows
+            .last()
+            .and_then(|window| window.downcast::<MultiWorkspace>())
+            .unwrap();
+        multi_workspace
+            .update(cx, |multi_workspace, _, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
+                    assert!(
+                        workspace
+                            .active_item_as::<terminal_view::TerminalView>(cx)
+                            .is_some(),
+                        "after onboarding, a launch with nothing to restore opens a terminal"
+                    );
+                });
+            })
+            .unwrap();
+    }
+
     // photon: projects open as tabs inside one window.
     #[gpui::test]
     async fn photon_open_second_project_shows_two_tabs(cx: &mut TestAppContext) {
