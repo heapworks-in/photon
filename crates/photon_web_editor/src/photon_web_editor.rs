@@ -1,10 +1,14 @@
 mod document;
+mod lifecycle;
+#[cfg(target_os = "macos")]
+mod native;
 mod protocol;
 mod registry;
 mod serve;
 mod view;
 
 pub use document::*;
+pub use lifecycle::*;
 pub use protocol::*;
 pub use registry::*;
 pub use serve::*;

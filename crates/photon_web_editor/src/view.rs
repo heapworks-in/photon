@@ -54,6 +54,8 @@ pub struct WebEditorView {
     next_flush_request: u64,
     pending_flushes: Vec<(u64, oneshot::Sender<()>)>,
     error: Option<SharedString>,
+    #[cfg(target_os = "macos")]
+    pub(crate) native: crate::native::NativeHost,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -61,11 +63,13 @@ impl WebEditorView {
     pub fn new(
         document: Entity<WebDocument>,
         project: Entity<Project>,
-        _window: &mut Window,
+        #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let buffer = document.read(cx).buffer().clone();
-        let subscriptions = vec![
+        let focus_handle = cx.focus_handle();
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+        let mut subscriptions = vec![
             cx.subscribe(&buffer, Self::on_buffer_event),
             cx.observe_global::<GlobalTheme>(|this, cx| {
                 this.send(ToPage::Theme {
@@ -73,15 +77,19 @@ impl WebEditorView {
                 })
             }),
         ];
+        #[cfg(target_os = "macos")]
+        subscriptions.extend(crate::native::subscribe(&focus_handle, window, cx));
         Self {
             document,
             project,
-            focus_handle: cx.focus_handle(),
+            focus_handle,
             page: None,
             page_text: None,
             next_flush_request: 0,
             pending_flushes: Vec::new(),
             error: None,
+            #[cfg(target_os = "macos")]
+            native: crate::native::NativeHost::new(cx),
             _subscriptions: subscriptions,
         }
     }
@@ -320,7 +328,14 @@ impl Render for WebEditorView {
         div()
             .track_focus(&self.focus_handle)
             .size_full()
+            .relative()
             .bg(cx.theme().colors().editor_background)
+            .map(|this| {
+                #[cfg(target_os = "macos")]
+                return this.child(crate::native::element(self, cx));
+                #[cfg(not(target_os = "macos"))]
+                this.p_4().child(Label::new("Web editors need macOS"))
+            })
             .when_some(self.error.clone(), |this, error| {
                 this.p_4().child(Label::new(error).color(Color::Error))
             })
@@ -338,6 +353,11 @@ impl Item for WebEditorView {
                 f(ItemEvent::UpdateBreadcrumbs);
             }
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn deactivated(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        crate::native::hidden(self, window, cx);
     }
 
     fn tab_content_text(&self, _detail: usize, cx: &App) -> SharedString {

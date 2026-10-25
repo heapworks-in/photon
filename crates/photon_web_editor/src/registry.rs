@@ -3,11 +3,13 @@ use std::sync::Arc;
 
 use gpui::Global;
 
+#[derive(Clone)]
 pub enum WebEditorSource {
     Embedded { prefix: String },
     Directory(PathBuf),
 }
 
+#[derive(Clone)]
 pub struct WebEditor {
     pub id: Arc<str>,
     pub extension_id: Arc<str>,

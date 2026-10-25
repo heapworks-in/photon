@@ -32,6 +32,14 @@ urlencoding.workspace = true
 util.workspace = true
 workspace.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+block2.workspace = true
+image.workspace = true
+objc2-app-kit.workspace = true
+objc2-foundation.workspace = true
+objc2-web-kit.workspace = true
+wry.workspace = true
+
 [dev-dependencies]
 db = { workspace = true, features = ["test-support"] }
 fs = { workspace = true, features = ["test-support"] }
