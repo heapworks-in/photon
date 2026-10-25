@@ -1,0 +1,243 @@
+[
+  {
+    "name": "Software Architecture",
+    "authors": [
+      "Youri Tjang"
+    ],
+    "file": "youritjang-software-architecture.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "System Design Components",
+    "authors": [
+      "Rohan Pithadiya"
+    ],
+    "file": "rohanp-system-design.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Architecture diagram components",
+    "authors": [
+      "Anna Pastushko"
+    ],
+    "file": "anna-pastushko-architecture-diagram-components.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Software Logos",
+    "authors": [
+      "drwnio.polyrand.net"
+    ],
+    "file": "drwnio-drwnio.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Stick Figures",
+    "authors": [
+      "Youri Tjang"
+    ],
+    "file": "youritjang-stick-figures.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Shapes for UML & ER Diagrams",
+    "authors": [
+      "BjoernKW"
+    ],
+    "file": "bjoernkw-uml-er-library.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Forms",
+    "authors": [
+      "NicolasGoudry@G.Script"
+    ],
+    "file": "g-script-forms.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Awesome Icons",
+    "authors": [
+      "ferminrp"
+    ],
+    "file": "ferminrp-awesome-icons.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Cloud",
+    "authors": [
+      "rfranzke"
+    ],
+    "file": "cloud-cloud.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Basic UX/wireframing elements",
+    "authors": [
+      "gabi.macakova"
+    ],
+    "file": "gabrielamacakova-basic-ux-wireframing-elements.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Decision flow control",
+    "authors": [
+      "James Wiens"
+    ],
+    "file": "aretecode-decision-flow-control.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "System Design Template",
+    "authors": [
+      "James Wiens"
+    ],
+    "file": "aretecode-system-design-template.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Systems Design Components",
+    "authors": [
+      "Arach Tchoupani"
+    ],
+    "file": "arach-systems-design-components.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Network topology icons",
+    "authors": [
+      "dwelle"
+    ],
+    "file": "dwelle-network-topology-icons.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Algorithms and Data Structures (Arrays, Matrices, Trees ...)",
+    "authors": [
+      "intradeus"
+    ],
+    "file": "intradeus-algorithms-and-data-structures-arrays-matrices-trees.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Lo-Fi Wireframing Kit",
+    "authors": [
+      "Aleksandra Lazovic"
+    ],
+    "file": "spfr-lo-fi-wireframing-kit.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Technology Logos",
+    "authors": [
+      "Matthias Haeussler"
+    ],
+    "file": "maeddes-technology-logos.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Sticky Notes",
+    "authors": [
+      "ferminrp"
+    ],
+    "file": "ferminrp-post-it.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Cloud Design Patterns",
+    "authors": [
+      "Michel Caradec"
+    ],
+    "file": "michelcaradec-cloud-design-patterns.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Basic shapes",
+    "authors": [
+      "Pablo Gil Fernández"
+    ],
+    "file": "pgilfernandez-basic-shapes.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Bubbles",
+    "authors": [
+      "Oscar Capraro"
+    ],
+    "file": "ocapraro-bubbles.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Web Kit",
+    "authors": [
+      "Sunit Shirke"
+    ],
+    "file": "excacomp-web-kit.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Information Architecture",
+    "authors": [
+      "inwardmovement"
+    ],
+    "file": "inwardmovement-information-architecture.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "IT Logos",
+    "authors": [
+      "Pierre Clainchard"
+    ],
+    "file": "pclainchard-it-logos.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Storytelling",
+    "authors": [
+      "drwnio.polyrand.net"
+    ],
+    "file": "drwnio-storytelling.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Computers",
+    "authors": [
+      "EI d'AU"
+    ],
+    "file": "ei-au-computers.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "AWS Serverless Icons",
+    "authors": [
+      "Slobodan Stojanović"
+    ],
+    "file": "slobodan-aws-serverless.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Gantt Diagram",
+    "authors": [
+      "ferminrp"
+    ],
+    "file": "ferminrp-gantt.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Artem's icons",
+    "authors": [
+      "Artem Anufrij"
+    ],
+    "file": "artem-anufrij-live-de-artem-s-icons.excalidrawlib",
+    "license": "MIT"
+  },
+  {
+    "name": "Azure cloud services icons",
+    "authors": [
+      "Youri Tjang",
+      "bothzoli"
+    ],
+    "file": "youritjang-azure-cloud-services.excalidrawlib",
+    "license": "MIT"
+  }
+]

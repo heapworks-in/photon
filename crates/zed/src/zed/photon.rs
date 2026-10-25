@@ -744,4 +744,55 @@ mod tests {
             "{symbols}"
         );
     }
+
+    #[gpui::test]
+    async fn opening_an_excalidraw_file_opens_a_web_editor_tab(cx: &mut TestAppContext) {
+        use editor::Editor;
+        use project::Project;
+        use serde_json::json;
+        use util::path;
+        use workspace::MultiWorkspace;
+
+        let app_state = super::super::tests::init_test(cx);
+        cx.update(photon_web_editor::init);
+        app_state
+            .fs
+            .as_fake()
+            .insert_tree(
+                path!("/project"),
+                json!({ "a.excalidraw": "{}", "a.json": "{}" }),
+            )
+            .await;
+        let project = Project::test(app_state.fs.clone(), [path!("/project").as_ref()], cx).await;
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .unwrap();
+        let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+
+        for (file, is_web_editor) in [("a.excalidraw", true), ("a.json", false)] {
+            let item = workspace
+                .update_in(cx, |workspace, window, cx| {
+                    workspace.open_abs_path(
+                        std::path::PathBuf::from(path!("/project")).join(file),
+                        workspace::OpenOptions::default(),
+                        window,
+                        cx,
+                    )
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                item.downcast::<photon_web_editor::WebEditorView>()
+                    .is_some(),
+                is_web_editor,
+                "{file}"
+            );
+            assert_eq!(
+                item.downcast::<Editor>().is_some(),
+                !is_web_editor,
+                "{file}"
+            );
+        }
+    }
 }

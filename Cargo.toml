@@ -166,6 +166,7 @@ members = [
     "crates/photon_blocks",
     "crates/photon_brand",
     "crates/photon_review", # photon: PR review
+    "crates/photon_web_editor", # photon: extension web editors
     "crates/photon_tabs", # photon: project tabs inside one window
     "crates/photon_terminal",
     "crates/picker",
@@ -449,6 +450,7 @@ photon_brand = { path = "crates/photon_brand" }
 photon_review = { path = "crates/photon_review" } # photon: PR review
 photon_tabs = { path = "crates/photon_tabs" } # photon: project tabs inside one window
 photon_terminal = { path = "crates/photon_terminal" }
+photon_web_editor = { path = "crates/photon_web_editor" } # photon: extension web editors
 picker = { path = "crates/picker" }
 picker_preview = { path = "crates/picker_preview" }
 platform_title_bar = { path = "crates/platform_title_bar" }
@@ -821,6 +823,14 @@ objc2-screen-capture-kit = { version = "=0.3.2", default-features = false, featu
     "SCStream",
     "std"
 ] }
+# photon: snapshots of web editor views
+objc2-web-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2-app-kit",
+    "WKSnapshotConfiguration",
+    "WKWebView",
+] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = [
     "std",
     "block2",
@@ -1016,6 +1026,7 @@ wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "3b3506ea31154edc04de64de
 which = "8"
 windows-core = "0.62"
 windows-registry = "0.6.0"
+wry = { version = "0.53", default-features = false, features = ["protocol", "transparent"] } # photon: native web view host for web editors
 xkbcommon = { version = "0.8", default-features = false }
 yaml-rust2 = { version = "0.8", default-features = false }
 yawc = { version = "0.4", default-features = false }

@@ -770,6 +770,7 @@ fn main() {
         photon_terminal::init(cx); // photon: block terminal input and history
         photon_review::init(cx); // photon: GitHub PR review
         photon_tabs::init(zed::photon::ensure_center_terminal, cx); // photon: project tabs inside one window
+        photon_web_editor::init(cx); // photon: web editors for file types (after editor::init so they open first)
         journal::init(app_state.clone(), cx);
         encoding_selector::init(cx);
         language_selector::init(cx);

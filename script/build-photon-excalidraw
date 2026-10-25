@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# Rebuilds Photon's built-in Excalidraw editor into assets/web_editors/excalidraw/.
+# A developer tool, run when bumping Excalidraw; the output is committed so building Photon needs
+# no npm or network.
+set -euo pipefail
+
+# The excalidraw/excalidraw tag matching the pinned npm package, for its LICENSE.
+EXCALIDRAW_COMMIT=a2ec2889babf7d2295469c6d90ebe77fae57df84 # v0.18.1
+# github.com/excalidraw/excalidraw-libraries, for the bundled community libraries.
+LIBRARIES_COMMIT=297a349eaff859e678f78d4dbc8e68df5fce42e5
+LIBRARY_COUNT=30
+LIBRARY_BUDGET_BYTES=3000000
+# A few icon sets are each most of the budget; leaving them out keeps room for many smaller ones.
+LIBRARY_MAX_BYTES=300000
+FONTS=(Excalifont Virgil Nunito ComicShanns Lilita Cascadia Liberation Assistant)
+# Each font's licence, from its upstream repository at a pinned commit. Excalidraw's package ships
+# none. Excalifont has no public repository; it is Excalidraw's OFL font derived from Virgil.
+GOOGLE_FONTS="google/fonts/e7db6ca603fd4862010383ff17ffd6cc4ffac1c0/ofl"
+FONT_LICENCES=(
+  "Virgil excalidraw/virgil/3d4c829dc85b455d4646631ac52bc1517df04217/LICENSE.md"
+  "Nunito $GOOGLE_FONTS/nunito/OFL.txt"
+  "ComicShanns shannpersand/comic-shanns/b98eee0894464de98754d6c89ffdfb8c29ce9e45/LICENSE"
+  "Lilita $GOOGLE_FONTS/lilitaone/OFL.txt"
+  "Cascadia microsoft/cascadia-code/56bcca3f2c1e4cb19458954f0e2bb4635960df91/LICENSE"
+  "Liberation liberationfonts/liberation-fonts/49e1358e4017577429c9f8c39a3e6e879093264e/LICENSE"
+  "Assistant $GOOGLE_FONTS/assistant/OFL.txt"
+)
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+extension="$root/extensions/photon-excalidraw"
+out="$root/assets/web_editors/excalidraw"
+downloads="$(mktemp -d)"
+trap 'rm -rf "$downloads"' EXIT
+
+cd "$extension"
+npm ci --ignore-scripts
+npx vite build
+
+rm -rf "$out"
+mkdir -p "$out/fonts" "$out/libraries"
+cp -R dist/editor "$out/editor"
+# Vite's licence report covers every npm package in the bundle.
+mv "$out/editor/.vite/license.md" "$out/THIRD_PARTY_LICENSES.md"
+rm -rf "$out/editor/.vite"
+for font in "${FONTS[@]}"; do
+  cp -R "node_modules/@excalidraw/excalidraw/dist/prod/fonts/$font" "$out/fonts/$font"
+done
+
+raw="https://raw.githubusercontent.com"
+curl -sfL -o "$out/LICENSE" "$raw/excalidraw/excalidraw/$EXCALIDRAW_COMMIT/LICENSE"
+for entry in "${FONT_LICENCES[@]}"; do
+  read -r font source <<<"$entry"
+  curl -sfL -o "$out/fonts/$font/LICENSE.txt" "$raw/$source"
+done
+{
+  echo "Excalifont is Excalidraw's font, derived from Virgil."
+  echo "It is licensed under the SIL Open Font License, Version 1.1, copied below from Virgil's licence."
+  echo
+  sed -n '/^# SIL OPEN FONT LICENSE/,$p' "$out/fonts/Virgil/LICENSE.txt"
+} >"$out/fonts/Excalifont/LICENSE.txt"
+for file in libraries.json stats.json LICENSE; do
+  curl -sfL -o "$downloads/$file" "$raw/excalidraw/excalidraw-libraries/$LIBRARIES_COMMIT/$file"
+done
+
+node --input-type=module - "$downloads" "$out" <<EOF
+import fs from "node:fs";
+import path from "node:path";
+
+const [downloads, out] = process.argv.slice(2);
+const read = (file) => fs.readFileSync(path.join(downloads, file), "utf8");
+
+// Libraries are published under the repository's licence unless they declare their own.
+if (!read("LICENSE").startsWith("MIT License")) {
+  throw new Error("excalidraw-libraries is no longer MIT licensed");
+}
+const stats = JSON.parse(read("stats.json"));
+const downloadsOf = (library) =>
+  stats[library.source.replace(/\.excalidrawlib$/, "").replaceAll("/", "-").toLowerCase()]?.total ?? 0;
+const libraries = JSON.parse(read("libraries.json")).sort((a, b) => downloadsOf(b) - downloadsOf(a));
+
+const chosen = [];
+const skipped = [];
+for (const library of libraries) {
+  if (chosen.length === $LIBRARY_COUNT) break;
+  const url = "$raw/excalidraw/excalidraw-libraries/$LIBRARIES_COMMIT/libraries/" + library.source;
+  const response = await fetch(url);
+  if (!response.ok) {
+    skipped.push(library.name + " (missing)");
+    continue;
+  }
+  const data = await response.json();
+  const license = library.license ?? data.license ?? "MIT";
+  if (data.type !== "excalidrawlib" || license !== "MIT") {
+    skipped.push(library.name + " (" + license + ")");
+    continue;
+  }
+  const text = JSON.stringify(data);
+  if (text.length > $LIBRARY_MAX_BYTES) {
+    skipped.push(library.name + " (" + text.length + " bytes)");
+    continue;
+  }
+  chosen.push({
+    name: library.name,
+    authors: library.authors.map((author) => author.name),
+    file: library.source.replaceAll("/", "-").toLowerCase(),
+    license,
+    text,
+  });
+}
+// Over budget: drop the least popular.
+let total = chosen.reduce((sum, library) => sum + library.text.length, 0);
+while (total > $LIBRARY_BUDGET_BYTES) {
+  const dropped = chosen.pop();
+  skipped.push(dropped.name + " (over budget)");
+  total -= dropped.text.length;
+}
+for (const library of chosen) {
+  fs.writeFileSync(path.join(out, "libraries", library.file), library.text);
+}
+
+fs.writeFileSync(
+  path.join(out, "libraries", "index.json"),
+  JSON.stringify(chosen.map(({ name, authors, file, license }) => ({ name, authors, file, license })), null, 2) + "\n",
+);
+
+const rows = chosen.map((library) => "| " + library.name + " | " + library.authors.join(", ") + " | " + library.license + " |");
+fs.writeFileSync(
+  path.join(out, "THIRD_PARTY.md"),
+  [
+    "# Third-party software in Photon's Excalidraw editor",
+    "",
+    "- Excalidraw (@excalidraw/excalidraw 0.18.1), MIT, see LICENSE. Its npm dependencies are bundled under their own licences.",
+    "- React, React DOM, Mermaid and the other bundled npm packages, each under its own licence: see THIRD_PARTY_LICENSES.md.",
+    "",
+    "## Fonts",
+    "",
+    "Each font's licence is in fonts/<Family>/LICENSE.txt.",
+    "",
+    "| Font | Licence |",
+    "| --- | --- |",
+    "| Excalifont | SIL Open Font License 1.1 |",
+    "| Virgil | SIL Open Font License 1.1 |",
+    "| Nunito | SIL Open Font License 1.1 |",
+    "| Comic Shanns | MIT |",
+    "| Lilita One | SIL Open Font License 1.1 |",
+    "| Cascadia Code | SIL Open Font License 1.1 |",
+    "| Liberation Sans | SIL Open Font License 1.1 |",
+    "| Assistant | SIL Open Font License 1.1 |",
+    "",
+    "## Community libraries",
+    "",
+    "From excalidraw-libraries at commit $LIBRARIES_COMMIT, published under that repository's MIT licence.",
+    "",
+    "| Library | Authors | Licence |",
+    "| --- | --- | --- |",
+    ...rows,
+    "",
+  ].join("\n"),
+);
+
+console.log("libraries: " + chosen.length + ", " + total + " bytes");
+console.log("skipped: " + skipped.join("; "));
+EOF
+
+du -sh "$out" "$out/libraries"

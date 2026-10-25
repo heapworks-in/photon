@@ -2,6 +2,14 @@
 # Measures Photon's cold start (launch -> first frame), idle memory (macOS physical footprint, the
 # number Activity Monitor shows) and idle CPU, and compares them with the committed baseline.
 #
+# A second run opens tooling/photon-perf/sample/diagram.excalidraw, which starts the Excalidraw web view,
+# and reports RSS and idle CPU of Photon plus its WebKit helper processes (WebContent, Networking, GPU).
+# Those are launched by launchd, so they are found by their "responsible process"
+# (tooling/photon-perf/responsible.py): those that share Photon's responsible process, started no earlier than
+# Photon and did not exist before the run. Remaining limit: a WebKit client started from the same GUI ancestor
+# during the run (another app, another Photon launched from this terminal) still matches.
+# Idle CPU there must also be under 1%; it is not compared with a baseline.
+#
 # The sample project opens with one block terminal at a zsh prompt. Idle CPU covers the whole process
 # tree (app plus shells) over 10 s after 5 s of settling. Footprint is the app process only; the zsh
 # Tab-completion helper (two extra zsh processes per terminal, spawned on the first Tab) is not started.
@@ -51,6 +59,9 @@ tree_cpu_seconds() {
     | awk -F: '{ seconds = 0; for (i = 1; i <= NF; i++) seconds = seconds * 60 + $i; total += seconds }
                END { printf "%.2f", total }'
 }
+
+# With a root pid, only processes that started after the root; without, a pre-launch baseline.
+webkit_pids() { /usr/bin/python3 -I tooling/photon-perf/responsible.py webkit $responsible_pid ${1:-}; }
 
 start_times=()
 footprint_values=()
@@ -109,7 +120,53 @@ if (( update_baseline )); then
   echo "baseline written to $baseline"
 fi
 
+# Diagram open: Photon plus WebKit.
+# A process that exited between samples counts as 0.
+cpu_seconds() {
+  { ps -o time= -p "$1" 2>/dev/null || true; } \
+    | awk -F: '{ s = 0; for (i = 1; i <= NF; i++) s = s * 60 + $i; t += s } END { printf "%.2f", t }'
+}
+rss_mb() { { ps -o rss= -p "$1" 2>/dev/null || true; } | awk '{ t += $1 } END { printf "%d", t / 1024 }'; }
+
+responsible_pid=$(/usr/bin/python3 -I tooling/photon-perf/responsible.py owner $$) \
+  || { echo "could not determine the responsible process of this script" >&2; exit 2; }
+preexisting_webkit=" $(webkit_pids | paste -sd' ' -) "
+scratch=$(mktemp -d)
+pid=""
+cleanup() {
+  [[ -n $pid ]] && kill $(descendants $pid) 2>/dev/null || true
+  rm -rf "$scratch"
+}
+trap cleanup EXIT
+mkdir "$scratch/zdotdir"
+export ZDOTDIR="$scratch/zdotdir"
+"$binary" --user-data-dir "$scratch/data" tooling/photon-perf/sample tooling/photon-perf/sample/diagram.excalidraw \
+  >"$scratch/stdout.log" 2>"$scratch/stderr.log" &
+pid=$!
+sleep 15
+new_webkit_pids() {
+  local found=() candidate
+  for candidate in $(webkit_pids $pid); do [[ $preexisting_webkit == *" $candidate "* ]] || found+=($candidate); done
+  (( ${#found} )) && print -l -- $found
+  return 0
+}
+webkit=($(new_webkit_pids))
+if (( ${#webkit} == 0 )); then
+  echo "no WebKit processes found for the diagram run; see $scratch/stderr.log" >&2
+  exit 2
+fi
+# The same pids are sampled before and after the window.
+sampled_pids=$({ descendants $pid; print -l -- $webkit; } | paste -sd, -)
+cpu_before=$(cpu_seconds "$sampled_pids")
+sleep 10
+cpu_after=$(cpu_seconds "$sampled_pids")
+photon_rss_mb=$(rss_mb $pid)
+webkit_rss_mb=$(rss_mb "${(j:,:)webkit}")
+diagram_cpu=$(printf '%.2f' $(( (cpu_after - cpu_before) * 100.0 / 10 )))
+echo "diagram open: RSS Photon ${photon_rss_mb} MB + ${#webkit} WebKit processes ${webkit_rss_mb} MB, idle CPU (Photon tree + WebKit) ${diagram_cpu}%"
+
 failed=0
+(( diagram_cpu >= budget_idle_cpu_percent )) && { echo "FAIL: diagram-open idle CPU ${diagram_cpu}% is not under ${budget_idle_cpu_percent}%"; failed=1; }
 (( footprint_mb > budget_footprint_mb )) && { echo "FAIL: idle footprint ${footprint_mb} MB exceeds budget ${budget_footprint_mb} MB"; failed=1; }
 (( start_ms > budget_start_ms )) && { echo "FAIL: cold start ${start_ms} ms exceeds budget ${budget_start_ms} ms"; failed=1; }
 # A budget, not a baseline comparison: near 0%, a relative change is noise.

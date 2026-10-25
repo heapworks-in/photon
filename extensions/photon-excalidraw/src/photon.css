@@ -1,0 +1,24 @@
+/* Online features with no prop to turn them off: the libraries.excalidraw.com link and publishing. */
+.library-menu-browse-button,
+.library-menu-dropdown-container [data-testid="lib-dropdown--remove"] {
+  display: none !important;
+}
+
+.photon-editor {
+  position: relative;
+  height: 100%;
+}
+
+.photon-error {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  background: var(--island-bg-color, #fff);
+  color: var(--color-on-surface, #1b1b1f);
+  font: 14px system-ui, sans-serif;
+  text-align: center;
+  z-index: 10;
+}

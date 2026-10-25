@@ -1,0 +1,11 @@
+id = "photon-excalidraw"
+name = "Excalidraw"
+description = "Draw Excalidraw diagrams in .excalidraw files."
+version = "0.18.1"
+schema_version = 1
+authors = ["Photon"]
+
+[web_editors.excalidraw]
+name = "Excalidraw"
+file_suffixes = ["excalidraw"]
+entry = "editor/index.html"

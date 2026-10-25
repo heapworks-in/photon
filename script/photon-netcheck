@@ -3,16 +3,27 @@
 #
 #   script/photon-netcheck                 # checks target/release/zed
 #   script/photon-netcheck --binary PATH   # checks another build
+#   script/photon-netcheck --with-diagram  # also opens a .excalidraw file, so the web editor starts, and watches WebKit
 #   script/photon-netcheck -- CMD ARGS...  # checks an arbitrary command (used to prove the check works)
+#
+# WebKit's helper processes (WebContent, Networking, GPU) are launched by launchd, not by the app, so
+# they are found by their "responsible process" (tooling/photon-perf/responsible.py). Those that appear
+# after the script starts, share the app's responsible process and started no earlier than the app are
+# watched like its children. Remaining limit: a WebKit client started from the same GUI ancestor while
+# the check runs (another app, another Photon launched from this terminal) still matches.
+# lsof cannot see their sockets (Network.framework flows, QUIC), so they are read with nettop instead.
+# Proof that this works: script/photon-netcheck -- swift tooling/photon-perf/webkit-proof.swift
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 binary=target/release/zed
 seconds=30
 command=()
+with_diagram=0
 while (( $# )); do
   case $1 in
     --binary) binary=$2; shift 2 ;;
+    --with-diagram) with_diagram=1; shift ;;
     --seconds) seconds=$2; shift 2 ;;
     --) shift; command=("$@"); break ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -26,6 +37,7 @@ mkdir "$scratch/zdotdir"
 export ZDOTDIR="$scratch/zdotdir"
 if (( ${#command} == 0 )); then
   command=("$binary" --user-data-dir "$scratch/data" tooling/photon-perf/sample)
+  (( with_diagram )) && command+=(tooling/photon-perf/sample/diagram.excalidraw)
 fi
 
 descendants() {
@@ -33,6 +45,21 @@ descendants() {
   echo $pid
   for child in $(pgrep -P $pid 2>/dev/null); do descendants $child; done
 }
+
+# Everything launched from this script shares its responsible process.
+responsible_pid=$(/usr/bin/python3 -I tooling/photon-perf/responsible.py owner $$) \
+  || { echo "could not determine the responsible process of this script" >&2; exit 2; }
+# With a root pid, only processes that started after the root; without, a pre-launch baseline.
+webkit_pids() { /usr/bin/python3 -I tooling/photon-perf/responsible.py webkit $responsible_pid ${1:-}; }
+# One snapshot of the non-loopback flows owned by the given pids.
+webkit_flows() {
+  (( $# )) || return 0
+  local flags=() pid
+  for pid; do flags+=(-p $pid); done
+  nettop -n -L 1 $flags 2>/dev/null \
+    | awk -F, '$2 ~ /<->/ && $3 != "" && $3 != "lo0" && $2 !~ /<->\*:\*/ { split($2, flow, " "); print "WebKit", flow[2] }'
+}
+preexisting_webkit=" $(webkit_pids | paste -sd' ' -) "
 
 "${command[@]}" >"$scratch/stdout.log" 2>&1 &
 root_pid=$!
@@ -45,16 +72,28 @@ trap cleanup EXIT
 
 # ponytail: lsof polling still misses connections shorter than one poll; a packet capture would not.
 offending=()
-for (( poll = 0; poll < seconds * 5; poll++ )); do
+watched_webkit=0
+deadline=$(( SECONDS + seconds ))
+while (( SECONDS < deadline )); do
   sleep 0.2
   kill -0 $root_pid 2>/dev/null || { keep_scratch=1; echo "process exited early; see $scratch/stdout.log" >&2; exit 2; }
-  pids=$(descendants $root_pid | paste -sd, -)
+  webkit=()
+  for pid in $(webkit_pids $root_pid); do [[ $preexisting_webkit == *" $pid "* ]] || webkit+=($pid); done
+  (( ${#webkit} > watched_webkit )) && watched_webkit=${#webkit}
+  pids=$({ descendants $root_pid; print -l -- $webkit; } | grep . | paste -sd, -)
   while read -r line; do
     [[ -z $line ]] && continue
     offending+=("$line")
-  done < <(lsof -nP -i -a -p "$pids" 2>/dev/null | awk 'NR > 1 { print $1, $9 }' \
-             | grep -vE '(127\.0\.0\.1|\[::1\]|localhost)(:[0-9]+)?(->(127\.0\.0\.1|\[::1\]|localhost):[0-9]+)?$' || true)
+  done < <({ lsof -nP -i -a -p "$pids" 2>/dev/null | awk 'NR > 1 { print $1, $9 }' \
+             | grep -vE '(127\.0\.0\.1|\[::1\]|localhost)(:[0-9]+)?(->(127\.0\.0\.1|\[::1\]|localhost):[0-9]+)?$' || true
+           webkit_flows $webkit; })
 done
+
+if (( with_diagram && watched_webkit == 0 )); then
+  keep_scratch=1
+  echo "FAIL: no WebKit process was attributed to the app; the web view did not start or attribution broke (see $scratch/stdout.log)" >&2
+  exit 2
+fi
 
 if (( ${#offending} )); then
   keep_scratch=1
@@ -63,4 +102,4 @@ if (( ${#offending} )); then
   printf '  %s\n' "${(u)offending[@]}"
   exit 1
 fi
-echo "OK: no non-loopback connections during ${seconds}s idle"
+echo "OK: no non-loopback connections during ${seconds}s idle (up to $watched_webkit WebKit processes watched)"

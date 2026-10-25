@@ -20,6 +20,7 @@ util::fs_embed! {
         "prompts/**/*",
         "*.md",
         "shell_integration/**/*", // photon: bundled zsh integration files
+        "web_editors/**/*", // photon: built-in web editors
     ],
     exclude = ["themes/src/*", "*.DS_Store"],
 }
