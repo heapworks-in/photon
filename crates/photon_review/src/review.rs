@@ -3943,7 +3943,7 @@ impl ReviewItem {
             0 => "View".to_string(),
             count => format!("View · {count} hidden"),
         };
-        ui::PopoverMenu::new("photon-review-view")
+        let menu = ui::PopoverMenu::new("photon-review-view")
             .trigger_with_tooltip(
                 crate::button("photon-review-view-trigger", label)
                     .style(ButtonStyle::Outlined)
@@ -3990,7 +3990,10 @@ impl ReviewItem {
                             },
                         )
                 }))
-            })
+            });
+        div()
+            .debug_selector(|| "photon-review-view".into())
+            .child(menu)
     }
 
     fn render_hidden_by_view(&self) -> Option<AnyElement> {
@@ -4011,6 +4014,7 @@ impl ReviewItem {
         };
         Some(
             v_flex()
+                .debug_selector(|| "photon-review-hidden".into())
                 .pt_4()
                 .gap_1()
                 .child(
@@ -4063,6 +4067,7 @@ impl ReviewItem {
             .child(
                 h_flex()
                     .id("photon-review-checklist-toggle")
+                    .debug_selector(|| "photon-review-checklist-toggle".into())
                     .gap_1()
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -4153,16 +4158,19 @@ impl ReviewItem {
             }
         }
         section = section.child(
-            div().pt_1().child(
-                crate::button("photon-review-own-checklist", "Add your own checklist…")
-                    .style(ButtonStyle::Subtle)
-                    .tooltip(Tooltip::text(
-                        "Opens settings.json: add checklists under \"pr_review\"",
-                    ))
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(zed_actions::OpenSettingsFile.boxed_clone(), cx)
-                    }),
-            ),
+            div()
+                .pt_1()
+                .debug_selector(|| "photon-review-own-checklist".into())
+                .child(
+                    crate::button("photon-review-own-checklist", "Add your own checklist…")
+                        .style(ButtonStyle::Subtle)
+                        .tooltip(Tooltip::text(
+                            "Opens settings.json: add checklists under \"pr_review\"",
+                        ))
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(zed_actions::OpenSettingsFile.boxed_clone(), cx)
+                        }),
+                ),
         );
         Some(section.into_any_element())
     }
@@ -4215,6 +4223,7 @@ impl ReviewItem {
                     .child(
                         // Ticking a step mustn't also select it.
                         div()
+                            .debug_selector(move || format!("photon-review-step-viewed-{index}"))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .child(
                                 Checkbox::new(("photon-review-step-viewed", index), viewed.into())
@@ -4267,11 +4276,13 @@ impl ReviewItem {
                             (IconName::SquareDot, Color::VersionControlModified)
                         }
                     };
+                    let selector = format!("photon-review-file-{icon:?}:{path}");
                     map = map.child(
                         v_flex()
                             .pl_6()
                             .child(
                                 h_flex()
+                                    .debug_selector(move || selector)
                                     .gap_1p5()
                                     .child(Icon::new(icon).size(IconSize::Small).color(color))
                                     .child(div().min_w_0().flex_1().child(
@@ -6128,18 +6139,6 @@ fn verify_password(user: &str, password: &str) -> bool {
         )
         .await;
         settle(&mut cx);
-        let step_files = |item: &Entity<ReviewItem>, cx: &mut VisualTestContext| {
-            item.read_with(cx, |item, _| {
-                let mut files: Vec<String> = item
-                    .steps()
-                    .iter()
-                    .flat_map(|step| step.files.clone())
-                    .collect();
-                files.sort();
-                files.dedup();
-                files
-            })
-        };
         assert_eq!(step_files(&item, &mut cx), ["src/b.rs", "src/c.rs"]);
 
         item.update(&mut cx, |item, cx| item.toggle_diff_view(true, cx));
@@ -6172,6 +6171,285 @@ fn verify_password(user: &str, password: &str) -> bool {
                 .and_then(|(_, diff)| diff.read(cx).base_text_string(cx))
         });
         assert_eq!(base.as_deref(), Some(C_BASE));
+    }
+
+    fn step_files(item: &Entity<ReviewItem>, cx: &mut VisualTestContext) -> Vec<String> {
+        item.read_with(cx, |item, _| {
+            let mut files: Vec<String> = item
+                .steps()
+                .iter()
+                .flat_map(|step| step.files.clone())
+                .collect();
+            files.sort();
+            files.dedup();
+            files
+        })
+    }
+
+    #[gpui::test]
+    async fn hiding_moved_code_drops_files_that_only_moved_it(cx: &mut TestAppContext) {
+        const MOVED: &str = "fn helper() {\n    let total = 1;\n    total\n}\n";
+        let a_base = format!("fn keep() {{}}\n{MOVED}");
+        let c_base = "fn other() {}\n";
+        let c_head = format!("fn other() {{}}\n{MOVED}");
+        let a_base: &'static str = a_base.leak();
+        let c_head: &'static str = c_head.leak();
+        let (item, mut cx) = open_item(
+            cx,
+            json!({ "src": { "a.rs": "fn keep() {}\n", "b.rs": B_HEAD, "c.rs": c_head } }),
+            vec![
+                modified("src/a.rs", a_base),
+                modified("src/b.rs", B_BASE),
+                modified("src/c.rs", c_base),
+            ],
+            Graph {
+                functions: vec![
+                    function("callee", "src/b.rs", 0, 2),
+                    function("helper", "src/c.rs", 1, 4),
+                ],
+                calls: Vec::new(),
+            },
+            true,
+            None,
+        )
+        .await;
+        settle(&mut cx);
+        assert_eq!(
+            step_files(&item, &mut cx),
+            ["src/a.rs", "src/b.rs", "src/c.rs"]
+        );
+
+        item.update(&mut cx, |item, cx| item.toggle_diff_view(false, cx));
+        settle(&mut cx);
+        assert_eq!(step_files(&item, &mut cx), ["src/b.rs"]);
+        item.read_with(&cx, |item, _| {
+            assert_eq!(
+                item.moves,
+                [Move {
+                    from_path: "src/a.rs".into(),
+                    from_line: 2,
+                    to_path: "src/c.rs".into(),
+                    to_line: 2,
+                    lines: 4,
+                }]
+            );
+        });
+
+        item.update(&mut cx, |item, cx| item.toggle_diff_view(false, cx));
+        settle(&mut cx);
+        assert_eq!(
+            step_files(&item, &mut cx),
+            ["src/a.rs", "src/b.rs", "src/c.rs"]
+        );
+        item.read_with(&cx, |item, _| assert!(item.moves.is_empty()));
+    }
+
+    #[gpui::test]
+    async fn hiding_generated_files_drops_lock_files_from_the_map(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_item(
+            cx,
+            json!({ "Cargo.lock": "version = 4\n", "src": { "b.rs": B_HEAD } }),
+            vec![
+                modified("Cargo.lock", "version = 3\n"),
+                modified("src/b.rs", B_BASE),
+            ],
+            Graph {
+                functions: vec![function("callee", "src/b.rs", 0, 2)],
+                calls: Vec::new(),
+            },
+            true,
+            None,
+        )
+        .await;
+        settle(&mut cx);
+        assert_eq!(step_files(&item, &mut cx), ["Cargo.lock", "src/b.rs"]);
+        item.update(&mut cx, |item, cx| item.toggle_hide_generated(cx));
+        settle(&mut cx);
+        assert_eq!(step_files(&item, &mut cx), ["src/b.rs"]);
+        item.read_with(&cx, |item, _| {
+            assert!(item.hidden_by_view(&item.files[0]));
+            assert!(!item.hidden_by_view(&item.files[1]));
+        });
+        item.update(&mut cx, |item, cx| item.toggle_hide_generated(cx));
+        settle(&mut cx);
+        assert_eq!(step_files(&item, &mut cx), ["Cargo.lock", "src/b.rs"]);
+    }
+
+    fn click(selector: &'static str, cx: &mut VisualTestContext) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is drawn"));
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    fn drawn(selector: &'static str, cx: &mut VisualTestContext) -> bool {
+        cx.run_until_parked();
+        cx.debug_bounds(selector).is_some()
+    }
+
+    const C_REFORMATTED_BASE: &str = "fn other() {\n  let c = 3;\n}\n";
+    const C_REFORMATTED_HEAD: &str = "fn other() {\n    let c = 3;\n}\n";
+
+    async fn open_reformatted(cx: &mut TestAppContext) -> (Entity<ReviewItem>, VisualTestContext) {
+        let (item, mut cx) = open_item(
+            cx,
+            json!({ "src": { "b.rs": B_HEAD, "c.rs": C_REFORMATTED_HEAD } }),
+            vec![
+                modified("src/b.rs", B_BASE),
+                modified("src/c.rs", C_REFORMATTED_BASE),
+            ],
+            Graph {
+                functions: vec![
+                    function("callee", "src/b.rs", 0, 2),
+                    function("other", "src/c.rs", 0, 2),
+                ],
+                calls: Vec::new(),
+            },
+            true,
+            None,
+        )
+        .await;
+        settle(&mut cx);
+        (item, cx)
+    }
+
+    #[gpui::test]
+    async fn the_view_menu_hides_whitespace_when_clicked(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_reformatted(cx).await;
+        assert!(!drawn("photon-review-hidden", &mut cx));
+
+        click("photon-review-view", &mut cx);
+        click("MENU_ITEM-Whitespace changes", &mut cx);
+        settle(&mut cx);
+        item.read_with(&cx, |item, _| assert!(item.hide_whitespace));
+        assert_eq!(step_files(&item, &mut cx), ["src/b.rs"]);
+        assert!(drawn("photon-review-hidden", &mut cx));
+
+        click("photon-review-view", &mut cx);
+        click("MENU_ITEM-Whitespace changes", &mut cx);
+        settle(&mut cx);
+        assert_eq!(step_files(&item, &mut cx), ["src/b.rs", "src/c.rs"]);
+        assert!(!drawn("photon-review-hidden", &mut cx));
+
+        click("photon-review-view", &mut cx);
+        click("MENU_ITEM-Moved code", &mut cx);
+        item.read_with(&cx, |item, _| assert!(item.hide_moves));
+        click("photon-review-view", &mut cx);
+        click("MENU_ITEM-Generated and lock files", &mut cx);
+        item.read_with(&cx, |item, _| assert!(item.hide_generated));
+    }
+
+    #[gpui::test]
+    async fn clicking_the_checklist_heading_folds_and_unfolds_it(cx: &mut TestAppContext) {
+        let (_item, mut cx) = open_reformatted(cx).await;
+        assert!(drawn("photon-review-own-checklist", &mut cx));
+        click("photon-review-checklist-toggle", &mut cx);
+        assert!(!drawn("photon-review-own-checklist", &mut cx));
+        assert!(drawn("photon-review-checklist-toggle", &mut cx));
+        click("photon-review-checklist-toggle", &mut cx);
+        assert!(drawn("photon-review-own-checklist", &mut cx));
+    }
+
+    #[gpui::test]
+    async fn add_your_own_checklist_opens_the_settings_file(cx: &mut TestAppContext) {
+        let (_item, mut cx) = open_reformatted(cx).await;
+        let opened = std::rc::Rc::new(std::cell::Cell::new(0));
+        cx.update(|_, cx| {
+            let opened = opened.clone();
+            cx.on_action(move |_: &zed_actions::OpenSettingsFile, _| opened.set(opened.get() + 1));
+        });
+        click("photon-review-own-checklist", &mut cx);
+        assert_eq!(opened.get(), 1);
+    }
+
+    #[gpui::test]
+    async fn clicking_a_step_checkbox_ticks_it_without_selecting_it(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_reformatted(cx).await;
+        let fake = install_fake(&mut cx);
+        let marks_viewed = |request: &crate::GhRequest| {
+            request
+                .stdin
+                .as_deref()
+                .is_some_and(|stdin| stdin.contains("FileAsViewed("))
+        };
+        fake.respond(marks_viewed, Ok(r#"{"data":{"x":{}}}"#.to_string()));
+        let (selected, second) =
+            item.read_with(&cx, |item, _| (item.selected, item.steps[1].key.clone()));
+        click("photon-review-step-viewed-1", &mut cx);
+        item.read_with(&cx, |item, _| {
+            assert!(item.viewed_steps.contains(&second));
+            assert_eq!(item.selected, selected);
+            assert!(item.progress_text().starts_with("1 of 2 steps viewed"));
+        });
+        assert_eq!(
+            fake.requests()
+                .iter()
+                .filter(|request| marks_viewed(request))
+                .count(),
+            1,
+            "the step's only file is marked viewed on GitHub"
+        );
+        click("photon-review-step-viewed-1", &mut cx);
+        item.read_with(&cx, |item, _| assert!(!item.viewed_steps.contains(&second)));
+    }
+
+    #[gpui::test]
+    async fn the_selected_step_lists_its_files_with_status(cx: &mut TestAppContext) {
+        let added = PrFile {
+            path: "src/new.rs",
+            base: None,
+            status: FileStatus::Added,
+            hunks: vec![crate::Hunk {
+                old_start: 0,
+                old_len: 0,
+                new_start: 1,
+                new_len: 2,
+                body: "+fn fresh() {\n+}\n".into(),
+            }],
+        };
+        let (item, mut cx) = open_item(
+            cx,
+            json!({ "src": { "b.rs": B_HEAD, "new.rs": "fn fresh() {\n}\n" } }),
+            vec![modified("src/b.rs", B_BASE), added],
+            Graph {
+                functions: vec![
+                    function("callee", "src/b.rs", 0, 2),
+                    function("fresh", "src/new.rs", 0, 1),
+                ],
+                calls: Vec::new(),
+            },
+            true,
+            None,
+        )
+        .await;
+        settle(&mut cx);
+        let step_of = |path: &str, cx: &mut VisualTestContext| {
+            item.read_with(cx, |item, _| {
+                item.steps
+                    .iter()
+                    .position(|step| step.files.iter().any(|file| file == path))
+                    .expect("step")
+            })
+        };
+        let new_step = step_of("src/new.rs", &mut cx);
+        item.update_in(&mut cx, |item, window, cx| {
+            item.select_step(new_step, window, cx)
+        });
+        assert!(drawn("photon-review-file-SquarePlus:src/new.rs", &mut cx));
+        let b_step = step_of("src/b.rs", &mut cx);
+        item.update_in(&mut cx, |item, window, cx| {
+            item.select_step(b_step, window, cx)
+        });
+        assert!(drawn("photon-review-file-SquareDot:src/b.rs", &mut cx));
+        assert!(!drawn("photon-review-file-SquarePlus:src/new.rs", &mut cx));
+        item.read_with(&cx, |item, _| {
+            let new_file = item
+                .files
+                .iter()
+                .find(|file| file.diff.path == "src/new.rs");
+            assert_eq!(new_file.expect("new file").diff.line_counts(), (2, 0));
+        });
     }
 
     #[gpui::test]

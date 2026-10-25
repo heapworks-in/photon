@@ -456,7 +456,8 @@ pub fn review_block(
     let answered_auto = auto
         .iter()
         .any(|(check, result)| auto_answer(check, result).is_some());
-    if items.is_empty() && !answered_auto {
+    let answered_item = items.iter().any(|item| answers.contains_key(&item.key));
+    if !answered_auto && !answered_item {
         return None;
     }
     let progress = progress(auto, items, answers);
@@ -848,8 +849,9 @@ mod tests {
             &[],
         )
         .0;
+        let answered = HashMap::from_iter([(items[0].key.clone(), Answer::Yes)]);
         assert!(
-            review_block(&failed, &items, &HashMap::default(), &HashMap::default())
+            review_block(&failed, &items, &answered, &HashMap::default())
                 .expect("block")
                 .contains("- [ ] Tests changed with the code: dbg! in src/Api.rs:3\n")
         );
@@ -865,5 +867,21 @@ mod tests {
         let failed = [(AutoCheck::RanLocally, AutoResult::Unknown("not run".into()))];
         let answers = HashMap::from_iter([(AutoCheck::RanLocally.key(), Answer::Yes)]);
         assert!(review_block(&failed, &[], &answers, &HashMap::default()).is_some());
+
+        // A default checklist nobody touched mustn't be appended to every review.
+        let (items, _) = applicable_items(
+            &[(
+                ChecklistSource::Settings,
+                checklist("Review", &[], &[], &["Errors handled"]),
+            )],
+            "a/b",
+            &[],
+        );
+        assert_eq!(
+            review_block(&auto, &items, &HashMap::default(), &HashMap::default()),
+            None
+        );
+        let answered = HashMap::from_iter([(items[0].key.clone(), Answer::Yes)]);
+        assert!(review_block(&auto, &items, &answered, &HashMap::default()).is_some());
     }
 }

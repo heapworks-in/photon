@@ -534,6 +534,47 @@ mod tests {
     }
 
     #[gpui::test]
+    fn default_checklists_match_the_files_a_pr_touches(cx: &mut TestAppContext) {
+        let checklists = cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            PrReviewSettings::get_global(cx).checklists.clone()
+        });
+        let names_for = |paths: &[&str]| {
+            let sourced: Vec<_> = checklists
+                .iter()
+                .cloned()
+                .map(|checklist| (crate::ChecklistSource::Settings, checklist))
+                .collect();
+            let paths: Vec<String> = paths.iter().map(|path| path.to_string()).collect();
+            let (items, errors) = crate::applicable_items(&sourced, "acme/web", &paths);
+            assert!(errors.is_empty(), "{errors:?}");
+            let mut names: Vec<String> = items.into_iter().map(|item| item.checklist).collect();
+            names.dedup();
+            names
+        };
+        assert_eq!(names_for(&["src/main.rs"]), ["Review"]);
+        assert_eq!(
+            names_for(&["Cargo.toml", "src/main.rs"]),
+            ["Review", "Dependencies"]
+        );
+        assert_eq!(
+            names_for(&["db/migrations/0042_users.sql"]),
+            ["Review", "Database"]
+        );
+        assert_eq!(
+            names_for(&[".github/workflows/ci.yml", "deploy/Dockerfile"]),
+            ["Review", "CI and deployment"]
+        );
+        assert!(
+            checklists
+                .iter()
+                .flat_map(|checklist| &checklist.items)
+                .all(|item| !item.trim().is_empty())
+        );
+    }
+
+    #[gpui::test]
     async fn pr_review_settings_read_from_project(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let store = SettingsStore::test(cx);
