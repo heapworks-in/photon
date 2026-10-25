@@ -13737,6 +13737,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "photon_call_trails"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "call_hierarchy",
+ "collections",
+ "editor",
+ "futures 0.3.34",
+ "gpui",
+ "language",
+ "log",
+ "lsp",
+ "menu",
+ "project",
+ "serde_json",
+ "tree-sitter-rust",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "photon_review"
 version = "0.1.0"
 dependencies = [
@@ -23267,6 +23289,7 @@ dependencies = [
  "parking_lot",
  "paths",
  "photon_brand",
+ "photon_call_trails",
  "photon_review",
  "photon_tabs",
  "photon_terminal",

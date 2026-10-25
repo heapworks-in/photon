@@ -180,6 +180,8 @@ pub fn hide_offline_actions(cx: &mut App) {
             std::any::TypeId::of::<super::GetMerch>(),
             // The built-in agent is off; agents run over ACP.
             std::any::TypeId::of::<agent_ui::NewNativeAgentThreadFromSummary>(),
+            // Only the call hierarchy popup's Keep Open button can use it.
+            std::any::TypeId::of::<call_hierarchy::KeepOpen>(),
         ]);
     });
 }
@@ -424,6 +426,7 @@ mod tests {
             assert!(filter.is_hidden(&auto_update::Check));
             assert!(filter.is_hidden(&zed_actions::OpenAccountSettings));
             assert!(filter.is_hidden(&workspace::NewCenterTerminal::default()));
+            assert!(filter.is_hidden(&call_hierarchy::KeepOpen));
             assert!(!filter.is_hidden(&workspace::NewTerminal::default()));
             let from_summary: agent_ui::NewNativeAgentThreadFromSummary =
                 serde_json::from_value(serde_json::json!({ "from_session_id": "session" }))
