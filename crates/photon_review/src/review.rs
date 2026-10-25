@@ -17,8 +17,8 @@ use futures::future::{FutureExt as _, Shared, join_all, try_join_all};
 use gpui::{
     Action as _, AnyWindowHandle, App, AsyncApp, AsyncWindowContext, BackgroundExecutor,
     ClickEvent, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Global,
-    HighlightStyle, PromptLevel, Render, SharedString, Stateful, StyledText, Subscription, Task,
-    WeakEntity, Window, actions, rgb,
+    HighlightStyle, MouseButton, PromptLevel, Render, SharedString, Stateful, StyledText,
+    Subscription, Task, WeakEntity, Window, actions, rgb,
 };
 use language::{Buffer, Capability, Point};
 use multi_buffer::{ToPoint as _, build_excerpt_ranges};
@@ -28,7 +28,7 @@ use project::{
     lsp_store::OpenLspBufferHandle,
     trusted_worktrees::{TrustedWorktrees, TrustedWorktreesEvent},
 };
-use ui::{Checkbox, TintColor, ToggleState, Tooltip, prelude::*};
+use ui::{Checkbox, Disclosure, TintColor, ToggleState, Tooltip, prelude::*};
 use util::{ResultExt as _, rel_path::RelPath};
 use workspace::{
     AppState, Item, OpenOptions, Toast, ToggleWorktreeSecurity, Workspace, WorkspaceDb,
@@ -60,7 +60,7 @@ use crate::{
     refuse_head_change_under_open_window, reply_request, reply_slot, resolve_request,
     review_request, review_root, since_review_files, viewed_request,
 };
-use crate::{Move, ViewFile, open_feedback, push_command, simplified_bases};
+use crate::{Move, ViewFile, is_generated, open_feedback, push_command, simplified_bases};
 use crate::{
     apply_suggestion, commit_file_request, file_at_commit_request, parse_file_contents,
     parse_suggestion, suggestion_block,
@@ -292,6 +292,8 @@ pub struct ReviewItem {
     full_files: Option<Vec<LoadedFile>>,
     hide_whitespace: bool,
     hide_moves: bool,
+    hide_generated: bool,
+    checklist_open: bool,
     /// Each file's real base text, kept while the diff shows a simplified one.
     original_bases: HashMap<EntityId, Option<String>>,
     moves: Vec<Move>,
@@ -1286,6 +1288,8 @@ impl ReviewItem {
             full_files: None,
             hide_whitespace: false,
             hide_moves: false,
+            hide_generated: false,
+            checklist_open: true,
             original_bases: HashMap::new(),
             moves: Vec::new(),
             _diff_view_task: Task::ready(()),
@@ -1428,6 +1432,12 @@ impl ReviewItem {
 
     fn diff_simplified(&self) -> bool {
         self.hide_whitespace || self.hide_moves
+    }
+
+    fn toggle_hide_generated(&mut self, cx: &mut Context<Self>) {
+        self.hide_generated = !self.hide_generated;
+        self.reindex_files(cx);
+        cx.notify();
     }
 
     fn toggle_diff_view(&mut self, whitespace: bool, cx: &mut Context<Self>) {
@@ -2593,6 +2603,33 @@ impl ReviewItem {
             .any(|file| file.path == path && file.viewed)
     }
 
+    /// A step is viewed when ticked here, or when GitHub has all its files viewed.
+    fn step_viewed(&self, step: &Step) -> bool {
+        self.viewed_steps.contains(&step.key)
+            || (!step.files.is_empty() && step.files.iter().all(|path| self.file_viewed(path)))
+    }
+
+    /// Ticks a step. A file is marked viewed on GitHub once every step showing it is ticked;
+    /// unticking a step unmarks its files.
+    pub fn toggle_step_viewed(&mut self, index: usize, viewed: bool, cx: &mut Context<Self>) {
+        let Some(step) = self.steps.get(index).cloned() else {
+            return;
+        };
+        self.set_step_viewed(&step.key, viewed, cx);
+        for path in &step.files {
+            let file_done = self
+                .steps
+                .iter()
+                .filter(|step| step.files.contains(path))
+                .all(|step| self.viewed_steps.contains(&step.key));
+            let sync = if viewed { file_done } else { true };
+            if sync && self.file_viewed(path) != viewed {
+                self.set_file_viewed(path, viewed, cx)
+                    .detach_and_log_err(cx);
+            }
+        }
+    }
+
     /// Steps exist only in Photon, so their viewed state stays local.
     pub fn set_step_viewed(&mut self, step_key: &str, viewed: bool, cx: &mut Context<Self>) {
         if self.full_files.is_some() {
@@ -3253,14 +3290,16 @@ impl ReviewItem {
         self.update_impact(cx);
     }
 
-    /// A file whose every change is whitespace or moved code, while those are hidden.
+    /// A generated file, or one whose every change is whitespace or moved code, while those are
+    /// hidden.
     fn hidden_by_view(&self, file: &LoadedFile) -> bool {
-        self.diff_simplified()
-            && file.contents.is_some()
-            && self
-                .changed_rows
-                .get(&file.diff.path)
-                .is_none_or(|rows| rows.is_empty())
+        (self.hide_generated && is_generated(&file.diff.path))
+            || self.diff_simplified()
+                && file.contents.is_some()
+                && self
+                    .changed_rows
+                    .get(&file.diff.path)
+                    .is_none_or(|rows| rows.is_empty())
     }
 
     fn map_inputs(&self) -> (Vec<MapFile>, Vec<MapFunction>) {
@@ -3302,6 +3341,10 @@ impl ReviewItem {
         let (files, functions) = self.map_inputs();
         let selected_key = self.steps.get(self.selected).map(|step| step.key.clone());
         self.steps = build_review_map(&files, &functions, edges);
+        // Changed functions in hidden files would otherwise still make steps.
+        let shown: HashSet<&str> = files.iter().map(|file| file.path.as_str()).collect();
+        self.steps
+            .retain(|step| step.files.iter().any(|path| shown.contains(path.as_str())));
         self.selected = selected_key
             .and_then(|key| self.steps.iter().position(|step| step.key == key))
             .unwrap_or_else(|| self.selected.min(self.steps.len().saturating_sub(1)));
@@ -3537,7 +3580,7 @@ impl ReviewItem {
         let viewed = self
             .steps
             .iter()
-            .filter(|step| self.viewed_steps.contains(&step.key))
+            .filter(|step| self.step_viewed(step))
             .count();
         let mut text = format!("{viewed} of {} steps viewed", self.steps.len());
         let checklist = self.checklist_progress();
@@ -3756,24 +3799,7 @@ impl ReviewItem {
                 .size(LabelSize::Small)
                 .color(Color::Muted),
             )
-            .child(
-                crate::button("hide-whitespace", "Hide whitespace")
-                    .style(ButtonStyle::Outlined)
-                    .toggle_state(self.hide_whitespace)
-                    .tooltip(Tooltip::text(
-                        "Hide changes that only re-indent or re-space lines",
-                    ))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_diff_view(true, cx))),
-            )
-            .child(
-                crate::button("hide-moves", "Hide moved code")
-                    .style(ButtonStyle::Outlined)
-                    .toggle_state(self.hide_moves)
-                    .tooltip(Tooltip::text(
-                        "Hide blocks of 3 or more lines moved without changes; the map lists them",
-                    ))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_diff_view(false, cx))),
-            )
+            .child(self.render_view_menu(cx))
             .when(self.changes_since_review_offered(), |header| {
                 let showing = self.showing_changes_since_review();
                 header.child(
@@ -3904,6 +3930,69 @@ impl ReviewItem {
             .into_any_element()
     }
 
+    /// What the diff hides. New view controls go in this menu rather than the header.
+    fn render_view_menu(&self, cx: &Context<Self>) -> impl IntoElement {
+        let item = cx.weak_entity();
+        let (hide_whitespace, hide_moves, hide_generated) =
+            (self.hide_whitespace, self.hide_moves, self.hide_generated);
+        let hidden = [hide_whitespace, hide_moves, hide_generated]
+            .into_iter()
+            .filter(|hidden| *hidden)
+            .count();
+        let label = match hidden {
+            0 => "View".to_string(),
+            count => format!("View · {count} hidden"),
+        };
+        ui::PopoverMenu::new("photon-review-view")
+            .trigger_with_tooltip(
+                crate::button("photon-review-view-trigger", label)
+                    .style(ButtonStyle::Outlined)
+                    .toggle_state(hidden > 0)
+                    .end_icon(Icon::new(IconName::ChevronDown).size(IconSize::XSmall)),
+                Tooltip::text("Choose what the diff hides"),
+            )
+            .menu(move |window, cx| {
+                let item = item.clone();
+                Some(ui::ContextMenu::build(window, cx, move |menu, _, _| {
+                    let toggle = |whitespace: bool| {
+                        let item = item.clone();
+                        move |_: &mut Window, cx: &mut App| {
+                            item.update(cx, |item, cx| item.toggle_diff_view(whitespace, cx))
+                                .log_err();
+                        }
+                    };
+                    menu.header("Hide in diff")
+                        .toggleable_entry(
+                            "Whitespace changes",
+                            hide_whitespace,
+                            IconPosition::Start,
+                            None,
+                            toggle(true),
+                        )
+                        .toggleable_entry(
+                            "Moved code",
+                            hide_moves,
+                            IconPosition::Start,
+                            None,
+                            toggle(false),
+                        )
+                        .toggleable_entry(
+                            "Generated and lock files",
+                            hide_generated,
+                            IconPosition::Start,
+                            None,
+                            {
+                                let item = item.clone();
+                                move |_, cx| {
+                                    item.update(cx, |item, cx| item.toggle_hide_generated(cx))
+                                        .log_err();
+                                }
+                            },
+                        )
+                }))
+            })
+    }
+
     fn render_hidden_by_view(&self) -> Option<AnyElement> {
         let hidden_files: Vec<&str> = self
             .files
@@ -3935,11 +4024,13 @@ impl ReviewItem {
                         moved.lines, moved.from_path, moved.from_line, moved.to_path, moved.to_line
                     ))
                 }))
-                .children(
-                    hidden_files
-                        .into_iter()
-                        .map(|path| row(format!("{path}: only whitespace or moved code"))),
-                )
+                .children(hidden_files.into_iter().map(|path| {
+                    row(if self.hide_generated && is_generated(path) {
+                        format!("{path}: generated")
+                    } else {
+                        format!("{path}: only whitespace or moved code")
+                    })
+                }))
                 .into_any_element(),
         )
     }
@@ -3969,12 +4060,32 @@ impl ReviewItem {
             .id("photon-review-checklist")
             .pt_4()
             .gap_1()
-            .child(Label::new(format!("Checklist · {}", progress.text())).size(LabelSize::Small))
+            .child(
+                h_flex()
+                    .id("photon-review-checklist-toggle")
+                    .gap_1()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.checklist_open = !this.checklist_open;
+                        cx.notify();
+                    }))
+                    .child(Disclosure::new(
+                        "photon-review-checklist-disclosure",
+                        self.checklist_open,
+                    ))
+                    .child(
+                        Label::new(format!("Checklist · {}", progress.text()))
+                            .size(LabelSize::Small),
+                    ),
+            )
             .children(errors.into_iter().map(|error| {
                 Label::new(error.clone())
                     .size(LabelSize::XSmall)
                     .color(Color::Error)
             }));
+        if !self.checklist_open {
+            return Some(section.into_any_element());
+        }
         let (passed, open): (Vec<_>, Vec<_>) = auto.iter().partition(|(_, result)| result.passed());
         if !passed.is_empty() {
             section = section.child(group("Photon checked"));
@@ -4084,15 +4195,12 @@ impl ReviewItem {
                     .size(LabelSize::Small)
                     .color(Color::Muted),
             );
+        map = map.children(self.render_checklist(cx));
         map = map.children(self.render_feedback(cx));
         map = map.children(self.render_outdated_drafts(cx));
         for (index, step) in self.steps.iter().enumerate() {
             let selected = index == self.selected;
-            let title = if self.viewed_steps.contains(&step.key) {
-                format!("✓ {}", step.title)
-            } else {
-                step.title.clone()
-            };
+            let viewed = self.step_viewed(step);
             map = map.child(
                 h_flex()
                     .id(("photon-review-step", index))
@@ -4105,14 +4213,37 @@ impl ReviewItem {
                         cx.listener(move |this, _, window, cx| this.select_step(index, window, cx)),
                     )
                     .child(
-                        Label::new((index + 1).to_string())
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
+                        // Ticking a step mustn't also select it.
+                        div()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(
+                                Checkbox::new(("photon-review-step-viewed", index), viewed.into())
+                                    .disabled(self.full_files.is_some())
+                                    .tooltip(Tooltip::text(if self.full_files.is_some() {
+                                        VIEWED_DISABLED_TOOLTIP
+                                    } else {
+                                        "Viewed: also marks the files viewed on GitHub once all \
+                                         their steps are viewed"
+                                    }))
+                                    .on_click(cx.listener(
+                                        move |this, state: &ToggleState, _, cx| {
+                                            this.toggle_step_viewed(
+                                                index,
+                                                *state == ToggleState::Selected,
+                                                cx,
+                                            )
+                                        },
+                                    )),
+                            ),
                     )
                     .child(
                         v_flex()
                             .min_w_0()
-                            .child(Label::new(title).truncate())
+                            .child(
+                                Label::new(step.title.clone())
+                                    .truncate()
+                                    .when(viewed, |label| label.color(Color::Muted)),
+                            )
                             .child(
                                 Label::new(step.subtitle.clone())
                                     .size(LabelSize::XSmall)
@@ -4122,54 +4253,41 @@ impl ReviewItem {
                     ),
             );
             if selected {
-                let step_key = step.key.clone();
-                map = map.child(
-                    div().pl_6().child(
-                        Checkbox::new(
-                            ("photon-review-step-viewed", index),
-                            self.viewed_steps.contains(&step.key).into(),
-                        )
-                        .label("Step viewed")
-                        .label_size(LabelSize::Small)
-                        .disabled(self.full_files.is_some())
-                        .when(self.full_files.is_some(), |checkbox| {
-                            checkbox.tooltip(Tooltip::text(VIEWED_DISABLED_TOOLTIP))
-                        })
-                        .on_click(cx.listener(
-                            move |this, state: &ToggleState, _, cx| {
-                                this.set_step_viewed(&step_key, *state == ToggleState::Selected, cx)
-                            },
-                        )),
-                    ),
-                );
                 for path in &step.files {
-                    let file_path = path.clone();
+                    let Some(file) = self.files.iter().find(|file| file.diff.path == *path) else {
+                        continue;
+                    };
+                    let (added, removed) = file.diff.line_counts();
+                    let (icon, color) = match file.diff.status {
+                        FileStatus::Added => (IconName::SquarePlus, Color::VersionControlAdded),
+                        FileStatus::Deleted => {
+                            (IconName::SquareMinus, Color::VersionControlDeleted)
+                        }
+                        FileStatus::Modified | FileStatus::Renamed { .. } => {
+                            (IconName::SquareDot, Color::VersionControlModified)
+                        }
+                    };
                     map = map.child(
                         v_flex()
                             .pl_6()
                             .child(
-                                Checkbox::new(
-                                    SharedString::from(format!("photon-review-viewed-{path}")),
-                                    self.file_viewed(path).into(),
-                                )
-                                .label(format!("{path} viewed"))
-                                .label_size(LabelSize::Small)
-                                .disabled(
-                                    self.marking_viewed.contains(path) || self.full_files.is_some(),
-                                )
-                                .when(self.full_files.is_some(), |checkbox| {
-                                    checkbox.tooltip(Tooltip::text(VIEWED_DISABLED_TOOLTIP))
-                                })
-                                .on_click(cx.listener(
-                                    move |this, state: &ToggleState, _, cx| {
-                                        this.set_file_viewed(
-                                            &file_path,
-                                            *state == ToggleState::Selected,
-                                            cx,
+                                h_flex()
+                                    .gap_1p5()
+                                    .child(Icon::new(icon).size(IconSize::Small).color(color))
+                                    .child(div().min_w_0().flex_1().child(
+                                        Label::new(path.clone()).size(LabelSize::Small).truncate(),
+                                    ))
+                                    .child(
+                                        ui::DiffStat::new(
+                                            SharedString::from(format!(
+                                                "photon-review-stat-{path}"
+                                            )),
+                                            added,
+                                            removed,
                                         )
-                                        .detach_and_log_err(cx)
-                                    },
-                                )),
+                                        .label_size(LabelSize::XSmall)
+                                        .tooltip(status_label(&file.diff)),
+                                    ),
                             )
                             .children(self.file_errors.get(path).map(|error| {
                                 Label::new(error.clone())
@@ -4210,7 +4328,6 @@ impl ReviewItem {
                 }
             }
         }
-        map = map.children(self.render_checklist(cx));
         map = map.children(self.render_hidden_by_view());
         let legend_row = |text: &'static str, color: Color| {
             h_flex()
@@ -7321,6 +7438,69 @@ fn verify_password(user: &str, password: &str) -> bool {
             assert!(item.file_errors.contains_key("src/upload.rs"))
         });
         assert_eq!(fake.requests().len(), 4);
+    }
+
+    #[gpui::test]
+    async fn a_file_is_viewed_on_github_once_all_its_steps_are(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        let fake = install_fake(&mut cx);
+        fake.respond(
+            |request| {
+                request
+                    .stdin
+                    .as_deref()
+                    .is_some_and(|stdin| stdin.contains("markFileAsViewed("))
+            },
+            Ok(r#"{"data":{"x":{}}}"#.to_string()),
+        );
+        let step = |key: &str, path: &str| Step {
+            key: key.into(),
+            title: key.into(),
+            subtitle: String::new(),
+            files: vec![path.into()],
+            functions: Vec::new(),
+        };
+        item.update(&mut cx, |item, _| {
+            item.steps = vec![
+                step("first", "src/retry.rs"),
+                step("second", "src/retry.rs"),
+                step("viewed on github", "src/upload.rs"),
+            ];
+        });
+        let marks = |fake: &FakeGh| {
+            fake.requests()
+                .iter()
+                .filter(|request| {
+                    request
+                        .stdin
+                        .as_deref()
+                        .is_some_and(|stdin| stdin.contains("FileAs"))
+                })
+                .count()
+        };
+
+        item.read_with(&cx, |item, _| {
+            assert!(!item.step_viewed(&item.steps[0]));
+            assert!(
+                item.step_viewed(&item.steps[2]),
+                "GitHub already has its file viewed"
+            );
+        });
+        item.update(&mut cx, |item, cx| item.toggle_step_viewed(0, true, cx));
+        cx.run_until_parked();
+        assert_eq!(marks(&fake), 0, "another step still shows the file");
+
+        item.update(&mut cx, |item, cx| item.toggle_step_viewed(1, true, cx));
+        cx.run_until_parked();
+        assert_eq!(marks(&fake), 1);
+        item.read_with(&cx, |item, _| {
+            assert!(item.file_viewed("src/retry.rs"));
+            assert!(item.progress_text().starts_with("3 of 3 steps viewed"));
+        });
+
+        item.update(&mut cx, |item, cx| item.toggle_step_viewed(0, false, cx));
+        cx.run_until_parked();
+        assert_eq!(marks(&fake), 2, "unticking unmarks the file");
     }
 
     #[gpui::test]

@@ -49,6 +49,20 @@ pub struct LoadedFile {
     pub contents: Option<(Entity<Buffer>, Entity<BufferDiff>)>,
 }
 
+impl FileDiff {
+    /// Lines added and removed, as GitHub counts them.
+    pub fn line_counts(&self) -> (usize, usize) {
+        self.hunks.iter().flat_map(|hunk| hunk.body.lines()).fold(
+            (0, 0),
+            |(added, removed), line| match line.as_bytes().first() {
+                Some(b'+') => (added + 1, removed),
+                Some(b'-') => (added, removed + 1),
+                _ => (added, removed),
+            },
+        )
+    }
+}
+
 pub fn parse_unified_diff(patch: &str) -> Result<Vec<FileDiff>> {
     let mut files: Vec<FileDiff> = Vec::new();
     let mut skipping = false;
@@ -420,6 +434,16 @@ pub fn build_loaded_file(
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "synchronous fixture setup")]
 mod tests {
+
+    #[test]
+    fn line_counts_skip_context_lines() {
+        let file = parse_unified_diff(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,3 +1,3 @@\n keep\n-old\n+new\n+more\n",
+        )
+        .expect("parse");
+        assert_eq!(file[0].line_counts(), (2, 1));
+    }
+
     use super::*;
     use fs::FakeFs;
     use gpui::TestAppContext;

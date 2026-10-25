@@ -9,6 +9,39 @@ pub enum FileKind {
     Unanalysable,
 }
 
+/// Lock files and build output that reviewers usually skip.
+// shortcut: name patterns only; `linguist-generated` in .gitattributes isn't read yet.
+pub fn is_generated(path: &str) -> bool {
+    let name = file_name(path);
+    matches!(
+        name,
+        "Cargo.lock"
+            | "package-lock.json"
+            | "npm-shrinkwrap.json"
+            | "yarn.lock"
+            | "pnpm-lock.yaml"
+            | "bun.lockb"
+            | "bun.lock"
+            | "Gemfile.lock"
+            | "poetry.lock"
+            | "Pipfile.lock"
+            | "uv.lock"
+            | "composer.lock"
+            | "go.sum"
+            | "flake.lock"
+            | "Package.resolved"
+            | "pubspec.lock"
+            | "mix.lock"
+    ) || [
+        ".min.js", ".min.css", ".js.map", ".css.map", ".snap", ".pb.go", "_pb2.py",
+    ]
+    .iter()
+    .any(|suffix| name.ends_with(suffix))
+        || name.contains(".generated.")
+        || name.ends_with(".g.dart")
+        || name.ends_with(".g.cs")
+}
+
 pub fn classify_path(path: &str) -> FileKind {
     let name = file_name(path);
     let directories = path
@@ -405,6 +438,30 @@ fn strongly_connected_components(callees_of: &[Vec<usize>]) -> Vec<Vec<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lock_and_build_output_files_are_generated() {
+        for path in [
+            "Cargo.lock",
+            "web/package-lock.json",
+            "go.sum",
+            "dist/app.min.js",
+            "src/__snapshots__/view.test.ts.snap",
+            "api/user.pb.go",
+            "lib/model.g.dart",
+        ] {
+            assert!(is_generated(path), "{path}");
+        }
+        for path in [
+            "src/lock.rs",
+            "README.md",
+            "src/minify.js",
+            "e.g.txt",
+            "Cargo.toml",
+        ] {
+            assert!(!is_generated(path), "{path}");
+        }
+    }
 
     fn file(path: &str, kind: FileKind) -> MapFile {
         MapFile {
