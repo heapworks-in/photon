@@ -136,7 +136,7 @@ How to review:
 2. Read beyond the diff: the callers of every changed function, the functions it calls, and its \
 tests. When a signature, return value or behaviour changes, find every caller; a change can \
 break code it doesn't touch. Trace the real flow: where data comes in, what is stored, what goes \
-out.
+out. Spend your reading where the risk is; you don't need to read the whole repository.
 3. Judge scale against the expected use, found from the repository (README, deployment \
 config): one person running a tool, or many users and processes at once.
 4. Follow the conventions of this language and this codebase: how it handles errors, names \
@@ -171,11 +171,13 @@ unrelated jobs.
 - Conventions: code that departs from this language's idioms or this codebase's established \
 patterns in a way a maintainer would have to fix. Not taste.
 
-Check before you report:
+Before you reply, verify every candidate finding, and expect to drop most of them:
 
 - Every finding needs a concrete case: this input or situation leads to this wrong result. No \
 case, no finding. Re-read the lines and confirm the caller exists, the value can really be \
-empty, the code really is unused.
+empty, the code really is unused, the check isn't already done elsewhere.
+- If you're unsure, leave it out. A short list of real problems gets fixed; a long list gets \
+ignored.
 - A shortcut marked with a `shortcut:` or `ponytail:` comment that names its limit is a \
 decision, not a finding, unless the expected use already crosses that limit.
 - Propose the smallest fix that works, preferring fixes that delete code. Never suggest layers, \
@@ -202,8 +204,8 @@ shouldn't exist) or \"nice to have\" (small speed-ups, shorter forms).
 conventions, checklist.
 - `body` is very plain English in two to four short sentences: the problem and the concrete case \
 that triggers it, the smallest fix, and what happens if it's skipped. Explain a technical term \
-the first time you use it. When the fix replaces just that line, end the body with a \
-```suggestion block holding the new line.
+the first time you use it. Show the fix as code where you can: when it replaces just that line, \
+end the body with a ```suggestion block holding the new line; otherwise a short code snippet.
 
 List the findings most severe first, one per problem, at most 15. Reply with [] if you find none.
 ";
@@ -401,6 +403,8 @@ mod tests {
             "No case, no finding.",
             "`shortcut:` or `ponytail:` comment",
             "preferring fixes that delete code",
+            "expect to drop most of them",
+            "If you're unsure, leave it out.",
         ] {
             assert!(prompt.contains(rule), "missing {rule}");
         }
