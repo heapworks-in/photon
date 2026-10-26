@@ -359,6 +359,28 @@ impl Navigated {
     }
 }
 
+// photon: lets photon_navigation answer go-to-definition when no language server can.
+// Returns `None` to leave the result to Zed's own fallback.
+#[derive(Clone)]
+pub struct DefinitionFallback(
+    pub  Rc<
+        dyn Fn(&mut Editor, &mut Window, &mut Context<Editor>) -> Option<Task<Result<Navigated>>>,
+    >,
+);
+
+impl Global for DefinitionFallback {}
+
+impl Editor {
+    fn photon_definition_fallback(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<Result<Navigated>>> {
+        let fallback = cx.try_global::<DefinitionFallback>()?.0.clone();
+        fallback(self, window, cx)
+    }
+}
+
 pub fn init(cx: &mut App) {
     cx.set_global(GlobalBlameRenderer(Arc::new(())));
     cx.set_global(breadcrumbs::RenderBreadcrumbText(render_breadcrumb_text));

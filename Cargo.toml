@@ -165,6 +165,7 @@ members = [
     "crates/paths",
     "crates/photon_blocks",
     "crates/photon_brand",
+    "crates/photon_navigation", # photon: navigation without a language server
     "crates/photon_review", # photon: PR review
     "crates/photon_web_editor", # photon: extension web editors
     "crates/photon_tabs", # photon: project tabs inside one window
@@ -447,6 +448,7 @@ paths = { path = "crates/paths" }
 perf = { path = "tooling/perf", default-features = false }
 photon_blocks = { path = "crates/photon_blocks" }
 photon_brand = { path = "crates/photon_brand" }
+photon_navigation = { path = "crates/photon_navigation" } # photon: navigation without a language server
 photon_review = { path = "crates/photon_review" } # photon: PR review
 photon_tabs = { path = "crates/photon_tabs" } # photon: project tabs inside one window
 photon_terminal = { path = "crates/photon_terminal" }

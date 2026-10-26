@@ -13737,6 +13737,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "photon_navigation"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "editor",
+ "extension_suggest",
+ "futures 0.3.34",
+ "gpui",
+ "indoc",
+ "language",
+ "lsp",
+ "project",
+ "regex",
+ "serde_json",
+ "settings",
+ "ui",
+ "util",
+ "workspace",
+ "zed_actions",
+]
+
+[[package]]
 name = "photon_review"
 version = "0.1.0"
 dependencies = [
@@ -23267,6 +23289,7 @@ dependencies = [
  "parking_lot",
  "paths",
  "photon_brand",
+ "photon_navigation",
  "photon_review",
  "photon_tabs",
  "photon_terminal",
