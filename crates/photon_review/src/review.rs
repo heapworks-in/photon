@@ -59,17 +59,18 @@ use crate::{
     classify_caller, classify_path, commentable_lines, context::buffer_path, context_excerpts,
     deleted_lines, detail_request, fetch_checkout, fetch_url, find_clone, finish_checkout,
     functions, gh_runner, git_diff, is_sendable, landing_note, merge_error_message, merge_request,
-    parse_auth_status, parse_detail,
-    parse_mutation, parse_reply, place, plan_since_review, reanchor,
-    refuse_head_change_under_open_window, reply_request, reply_slot, resolve_request,
+    parse_auth_status, parse_detail, parse_mutation, parse_reply, place, plan_since_review,
+    reanchor, refuse_head_change_under_open_window, reply_request, reply_slot, resolve_request,
     review_request, review_root, since_review_files, viewed_request,
 };
 use crate::{CheckOutcome, MergeMethod, PrState, Readiness, remove_from_inbox};
 use crate::{Move, ViewFile, is_generated, open_feedback, push_command, simplified_bases};
+use crate::{TimelineEvent, issue_comment_request, parse_timeline, timeline_request};
 use crate::{
     apply_suggestion, commit_file_request, file_at_commit_request, parse_file_contents,
     parse_suggestion, suggestion_block,
 };
+use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 
 actions!(
     photon_review,
@@ -247,6 +248,34 @@ struct SelectedLines {
 
 const ALL_ANSWERS: [Answer; 3] = [Answer::Yes, Answer::No, Answer::NotApplicable];
 
+/// The general conversation, built the first time it's opened.
+struct Conversation {
+    description: Entity<Markdown>,
+    /// None until the timeline is fetched, and again once a refresh makes it stale.
+    events: Option<Vec<(TimelineEvent, Option<Entity<Markdown>>)>>,
+    fetching: bool,
+    error: Option<SharedString>,
+    composer: Entity<Editor>,
+    posting: bool,
+    post_error: Option<SharedString>,
+    _fetch_task: Task<()>,
+    _composer_subscription: Subscription,
+}
+
+fn markdown_body(body: &str, cx: &mut App) -> Option<Entity<Markdown>> {
+    (!body.trim().is_empty())
+        .then(|| cx.new(|cx| Markdown::new(body.to_string().into(), None, None, cx)))
+}
+
+fn timeline_entry(event: TimelineEvent, cx: &mut App) -> (TimelineEvent, Option<Entity<Markdown>>) {
+    let body = match &event {
+        TimelineEvent::Comment(comment) => markdown_body(&comment.body, cx),
+        TimelineEvent::Review { body, .. } => markdown_body(body, cx),
+        TimelineEvent::Commit { .. } => None,
+    };
+    (event, body)
+}
+
 pub struct ReviewItem {
     project: Entity<Project>,
     detail: PrDetail,
@@ -284,6 +313,8 @@ pub struct ReviewItem {
     submit_error: Option<SharedString>,
     merging: bool,
     merge_error: Option<SharedString>,
+    conversation_open: bool,
+    conversation: Option<Conversation>,
     thread_errors: HashMap<String, SharedString>,
     file_errors: HashMap<String, SharedString>,
     submit_note: Option<SharedString>,
@@ -1341,6 +1372,8 @@ impl ReviewItem {
             submit_error: None,
             merging: false,
             merge_error: None,
+            conversation_open: false,
+            conversation: None,
             thread_errors: HashMap::new(),
             file_errors: HashMap::new(),
             submit_note: None,
@@ -2009,6 +2042,7 @@ impl ReviewItem {
                     this.last_review = Some(commit.clone());
                 }
                 this.detail = detail;
+                this.refresh_conversation(cx);
                 this.refresh_auto_results(cx);
                 this.add_reply_editors(&HashMap::new(), window, cx);
                 this.show_comments(cx);
@@ -2526,8 +2560,7 @@ impl ReviewItem {
                 match result {
                     Ok(()) => this.merged(window, cx),
                     Err(error) => {
-                        this.merge_error =
-                            Some(merge_error_message(&format!("{error:#}")).into());
+                        this.merge_error = Some(merge_error_message(&format!("{error:#}")).into());
                     }
                 }
                 cx.notify();
@@ -3420,12 +3453,155 @@ impl ReviewItem {
     }
 
     pub fn select_step(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
-        if index >= self.steps.len() || index == self.selected {
+        if index >= self.steps.len() || (index == self.selected && !self.conversation_open) {
             return;
         }
+        self.conversation_open = false;
         self.selected = index;
         self.show_step(cx);
         cx.notify();
+    }
+
+    pub fn open_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.conversation_open = true;
+        if self.conversation.is_none() {
+            let description =
+                cx.new(|cx| Markdown::new(self.detail.body.clone().into(), None, None, cx));
+            let composer = cx.new(|cx| {
+                let mut editor = Editor::auto_height(3, 12, window, cx);
+                editor.set_placeholder_text("Leave a comment", window, cx);
+                editor
+            });
+            // Comment is enabled by text, so the composer's row redraws as it is typed.
+            let subscription = cx.subscribe(&composer, |_, _, event: &EditorEvent, cx| {
+                if matches!(event, EditorEvent::BufferEdited) {
+                    cx.notify();
+                }
+            });
+            self.conversation = Some(Conversation {
+                description,
+                events: None,
+                fetching: false,
+                error: None,
+                composer,
+                posting: false,
+                post_error: None,
+                _fetch_task: Task::ready(()),
+                _composer_subscription: subscription,
+            });
+        }
+        if self
+            .conversation
+            .as_ref()
+            .is_some_and(|conversation| conversation.events.is_none())
+        {
+            self.fetch_conversation(cx);
+        }
+        cx.notify();
+    }
+
+    fn fetch_conversation(&mut self, cx: &mut Context<Self>) {
+        let request = timeline_request(&self.detail.summary.key);
+        let runner = gh_runner(cx);
+        let Some(conversation) = self.conversation.as_mut() else {
+            return;
+        };
+        conversation.fetching = true;
+        conversation._fetch_task = cx.spawn(async move |this, cx| {
+            let result = match runner.run(request).await {
+                Ok(output) => parse_timeline(&output),
+                Err(error) => Err(error.into()),
+            };
+            this.update(cx, |this, cx| {
+                let Some(conversation) = this.conversation.as_mut() else {
+                    return;
+                };
+                conversation.fetching = false;
+                match result {
+                    Ok(events) => {
+                        conversation.error = None;
+                        conversation.events = Some(
+                            events
+                                .into_iter()
+                                .map(|event| timeline_entry(event, cx))
+                                .collect(),
+                        );
+                    }
+                    Err(error) => conversation.error = Some(format!("{error:#}").into()),
+                }
+                cx.notify();
+            })
+            .log_err();
+        });
+    }
+
+    /// After the detail refreshes: a showing timeline is fetched again, a hidden one when next
+    /// opened.
+    fn refresh_conversation(&mut self, cx: &mut Context<Self>) {
+        let body = self.detail.body.clone();
+        let open = self.conversation_open;
+        let Some(conversation) = self.conversation.as_mut() else {
+            return;
+        };
+        conversation
+            .description
+            .update(cx, |description, cx| description.reset(body.into(), cx));
+        conversation.events = None;
+        if open {
+            self.fetch_conversation(cx);
+        }
+    }
+
+    /// The Comment button: posts the composer's text as a general comment.
+    pub fn post_comment(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
+        let Some(conversation) = self.conversation.as_mut() else {
+            return Task::ready(Ok(()));
+        };
+        let body = conversation.composer.read(cx).text(cx);
+        if body.trim().is_empty() || conversation.posting {
+            return Task::ready(Ok(()));
+        }
+        conversation.posting = true;
+        conversation.post_error = None;
+        cx.notify();
+        let request = issue_comment_request(&self.detail.summary.key, &body);
+        let runner = gh_runner(cx);
+        cx.spawn(async move |this, cx| {
+            let result = match runner.run(request).await {
+                Ok(output) => parse_reply(&output),
+                Err(error) => Err(error.into()),
+            };
+            this.update(cx, |this, cx| {
+                let Some(conversation) = this.conversation.as_mut() else {
+                    return;
+                };
+                conversation.posting = false;
+                match &result {
+                    Ok(comment) => {
+                        let entry = timeline_entry(TimelineEvent::Comment(comment.clone()), cx);
+                        if let Some(events) = conversation.events.as_mut() {
+                            events.push(entry);
+                        }
+                        // Text typed while posting stays for the next comment.
+                        let buffer = conversation
+                            .composer
+                            .read(cx)
+                            .buffer()
+                            .read(cx)
+                            .as_singleton();
+                        if let Some(buffer) = buffer
+                            && buffer.read(cx).text() == body
+                        {
+                            buffer.update(cx, |buffer, cx| buffer.set_text("", cx));
+                        }
+                        this.detail.comment_count += 1;
+                    }
+                    Err(error) => conversation.post_error = Some(format!("{error:#}").into()),
+                }
+                cx.notify();
+            })?;
+            result.map(|_| ())
+        })
     }
 
     pub fn context_state(&self) -> &ContextState {
@@ -4994,8 +5170,35 @@ impl ReviewItem {
         map = map.children(self.render_feedback(cx));
         map = map.children(self.render_outdated_drafts(cx));
         map = map.children(self.render_unplaced_threads(cx));
+        let comments = self.detail.comment_count;
+        map = map.child(
+            h_flex()
+                .id("photon-review-conversation")
+                .debug_selector(|| "photon-review-conversation".into())
+                .gap_2()
+                .px_1()
+                .rounded_sm()
+                .cursor_pointer()
+                .when(self.conversation_open, |this| {
+                    this.bg(colors.element_selected)
+                })
+                .on_click(cx.listener(|this, _, window, cx| this.open_conversation(window, cx)))
+                .child(
+                    Icon::new(IconName::Chat)
+                        .size(IconSize::Small)
+                        .color(Color::Muted),
+                )
+                .child(div().flex_1().child(Label::new("Conversation")))
+                .when(comments > 0, |this| {
+                    this.child(
+                        Label::new(comments.to_string())
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                }),
+        );
         for (index, step) in self.steps.iter().enumerate() {
-            let selected = index == self.selected;
+            let selected = index == self.selected && !self.conversation_open;
             let viewed = self.step_viewed(step);
             map = map.child(
                 h_flex()
@@ -5429,6 +5632,152 @@ impl ReviewItem {
             .child(div().flex_1().min_h_0().child(self.editor.clone()))
     }
 
+    /// The description, then comments, reviews and pushed commits in order, then a composer.
+    fn render_conversation(
+        &self,
+        conversation: &Conversation,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let style = MarkdownStyle::themed(MarkdownFont::Editor, window, cx);
+        let colors = cx.theme().colors();
+        let date = |time: &str| time.get(..10).unwrap_or(time).to_string();
+        let byline = |author: String, time: String| {
+            h_flex()
+                .gap_2()
+                .child(Label::new(author).size(LabelSize::Small))
+                .child(Label::new(time).size(LabelSize::XSmall).color(Color::Muted))
+        };
+        let description = div()
+            .debug_selector(|| "photon-review-description".into())
+            .pb_2()
+            .border_b_1()
+            .border_color(colors.border_variant)
+            .child(byline(self.detail.summary.author.clone(), String::new()))
+            .child(if self.detail.body.trim().is_empty() {
+                Label::new("No description provided.")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .into_any_element()
+            } else {
+                MarkdownElement::new(conversation.description.clone(), style.clone())
+                    .into_any_element()
+            });
+        let events =
+            conversation
+                .events
+                .iter()
+                .flatten()
+                .enumerate()
+                .map(|(index, (event, body))| {
+                    let row = match event {
+                        TimelineEvent::Comment(comment) => v_flex()
+                            .child(byline(comment.author.clone(), date(&comment.created_at))),
+                        TimelineEvent::Review {
+                            author,
+                            verb,
+                            submitted_at,
+                            ..
+                        } => v_flex().child(byline(format!("{author} {verb}"), date(submitted_at))),
+                        TimelineEvent::Commit {
+                            short_sha,
+                            headline,
+                        } => v_flex().child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Icon::new(IconName::GitCommit)
+                                        .size(IconSize::Small)
+                                        .color(Color::Muted),
+                                )
+                                .child(
+                                    Label::new(short_sha.clone())
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted)
+                                        .buffer_font(cx),
+                                )
+                                .child(
+                                    Label::new(headline.clone())
+                                        .size(LabelSize::Small)
+                                        .truncate(),
+                                ),
+                        ),
+                    };
+                    row.debug_selector(move || format!("photon-review-timeline-{index}"))
+                        .children(
+                            body.clone()
+                                .map(|body| MarkdownElement::new(body, style.clone())),
+                        )
+                });
+        let status = if let Some(error) = &conversation.error {
+            Some(
+                Label::new(error.clone())
+                    .size(LabelSize::Small)
+                    .color(Color::Error),
+            )
+        } else if conversation.events.is_none() {
+            Some(
+                Label::new("Loading conversation…")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+        } else {
+            None
+        };
+        let has_text = !conversation.composer.read(cx).text(cx).trim().is_empty();
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .child(
+                v_flex()
+                    .id("photon-review-conversation-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p_3()
+                    .gap_3()
+                    .child(description)
+                    .children(events)
+                    .children(status),
+            )
+            .child(
+                v_flex()
+                    .p_2()
+                    .gap_1()
+                    .border_t_1()
+                    .border_color(colors.border)
+                    .child(
+                        div()
+                            .p_1()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(colors.border)
+                            .child(conversation.composer.clone()),
+                    )
+                    .children(conversation.post_error.clone().map(|error| {
+                        div()
+                            .debug_selector(|| "photon-review-comment-error".into())
+                            .child(Label::new(error).size(LabelSize::Small).color(Color::Error))
+                    }))
+                    .child(
+                        h_flex().justify_end().child(
+                            div()
+                                .debug_selector(|| "photon-review-comment".into())
+                                .child(
+                                    crate::button("photon-review-comment", "Comment")
+                                        .style(ButtonStyle::Tinted(TintColor::Accent))
+                                        .disabled(!has_text || conversation.posting)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.post_comment(cx).detach_and_log_err(cx)
+                                        })),
+                                ),
+                        ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_feedback(&self, cx: &Context<Self>) -> Option<AnyElement> {
         if !self.is_own_pr() {
             return None;
@@ -5532,7 +5881,7 @@ fn mark_explanation(mark: CallerMark) -> &'static str {
 }
 
 impl Render for ReviewItem {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .key_context("PhotonReview")
             .size_full()
@@ -5577,7 +5926,12 @@ impl Render for ReviewItem {
                             .child(self.render_map(cx))
                             .child(self.render_map_resize_handle(cx)),
                     )
-                    .child(self.render_code(cx)),
+                    .map(|this| match &self.conversation {
+                        Some(conversation) if self.conversation_open => {
+                            this.child(self.render_conversation(conversation, window, cx))
+                        }
+                        _ => this.child(self.render_code(cx).into_any_element()),
+                    }),
             )
     }
 }
@@ -10004,7 +10358,10 @@ fn verify_password(user: &str, password: &str) -> bool {
         cx.simulate_prompt_answer("Merge");
         cx.run_until_parked();
         let merges: Vec<_> = fake.requests().into_iter().filter(is_merge).collect();
-        assert_eq!(request_json(&merges[0])["variables"]["mergeMethod"], "MERGE");
+        assert_eq!(
+            request_json(&merges[0])["variables"]["mergeMethod"],
+            "MERGE"
+        );
     }
 
     #[gpui::test]
@@ -10044,5 +10401,185 @@ fn verify_password(user: &str, password: &str) -> bool {
             assert!(!cx.has_pending_prompt(), "{block}");
         }
         assert_eq!(readiness(&item, &mut cx), "Conflicts");
+    }
+
+    const TIMELINE: &str = include_str!("../test_fixtures/timeline.json");
+
+    fn is_timeline(request: &crate::GhRequest) -> bool {
+        request
+            .stdin
+            .as_deref()
+            .is_some_and(|stdin| stdin.contains("timelineItems"))
+    }
+
+    fn is_comment_post(request: &crate::GhRequest) -> bool {
+        request
+            .args
+            .iter()
+            .any(|argument| argument.ends_with("/issues/482/comments"))
+    }
+
+    fn timeline_requests(fake: &FakeGh) -> usize {
+        fake.requests().iter().filter(|r| is_timeline(r)).count()
+    }
+
+    fn conversation_composer(
+        item: &Entity<ReviewItem>,
+        cx: &mut VisualTestContext,
+    ) -> Entity<Editor> {
+        item.read_with(cx, |item, _| {
+            item.conversation
+                .as_ref()
+                .expect("conversation")
+                .composer
+                .clone()
+        })
+    }
+
+    #[gpui::test]
+    async fn the_conversation_is_fetched_when_first_opened_and_shown_in_order(
+        cx: &mut TestAppContext,
+    ) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        let fake = install_fake(&mut cx);
+        assert!(drawn("photon-review-conversation", &mut cx));
+        assert!(!drawn("photon-review-description", &mut cx));
+        assert_eq!(timeline_requests(&fake), 0);
+
+        fake.respond(is_timeline, Ok(TIMELINE.into()));
+        click("photon-review-conversation", &mut cx);
+        assert_eq!(timeline_requests(&fake), 1);
+        let selectors = [
+            "photon-review-description",
+            "photon-review-timeline-0",
+            "photon-review-timeline-1",
+            "photon-review-timeline-2",
+            "photon-review-timeline-3",
+            "photon-review-timeline-4",
+        ];
+        let tops: Vec<Pixels> = selectors
+            .iter()
+            .map(|selector| {
+                cx.debug_bounds(selector)
+                    .unwrap_or_else(|| panic!("{selector} is drawn"))
+                    .top()
+            })
+            .collect();
+        assert!(tops.windows(2).all(|pair| pair[0] < pair[1]), "{tops:?}");
+        assert!(!drawn("photon-review-timeline-5", &mut cx));
+        item.read_with(&cx, |item, _| {
+            let events = item.conversation.as_ref().and_then(|c| c.events.as_ref());
+            let kinds: Vec<&str> = events
+                .expect("events")
+                .iter()
+                .map(|(event, body)| match event {
+                    TimelineEvent::Comment(_) => "comment",
+                    TimelineEvent::Review { .. } if body.is_some() => "review with body",
+                    TimelineEvent::Review { .. } => "review",
+                    TimelineEvent::Commit { .. } => "commit",
+                })
+                .collect();
+            assert_eq!(
+                kinds,
+                ["commit", "comment", "review with body", "commit", "review"]
+            );
+        });
+
+        // Back to a step shows the code; coming back reuses what was fetched.
+        item.update_in(&mut cx, |item, window, cx| item.select_step(0, window, cx));
+        assert!(!drawn("photon-review-description", &mut cx));
+        click("photon-review-conversation", &mut cx);
+        assert!(drawn("photon-review-timeline-4", &mut cx));
+        assert_eq!(timeline_requests(&fake), 1);
+    }
+
+    #[gpui::test]
+    async fn a_refresh_fetches_the_conversation_again_only_while_it_shows(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        let fake = install_fake(&mut cx);
+        let refresh = |item: &Entity<ReviewItem>, cx: &mut VisualTestContext| {
+            let task = item.update_in(cx, |item, window, cx| item.refresh_detail(window, cx));
+            cx.run_until_parked();
+            task.now_or_never().expect("refreshed").expect("refresh");
+        };
+        fake.respond(is_detail, Ok(DETAIL.into()));
+        refresh(&item, &mut cx);
+        assert_eq!(timeline_requests(&fake), 0);
+
+        fake.respond(is_timeline, Ok(TIMELINE.into()));
+        click("photon-review-conversation", &mut cx);
+        fake.respond(is_detail, Ok(DETAIL.into()));
+        fake.respond(is_timeline, Ok(TIMELINE.into()));
+        refresh(&item, &mut cx);
+        assert_eq!(timeline_requests(&fake), 2);
+
+        item.update_in(&mut cx, |item, window, cx| item.select_step(0, window, cx));
+        fake.respond(is_detail, Ok(DETAIL.into()));
+        refresh(&item, &mut cx);
+        assert_eq!(timeline_requests(&fake), 2);
+        fake.respond(is_timeline, Ok(TIMELINE.into()));
+        click("photon-review-conversation", &mut cx);
+        assert_eq!(timeline_requests(&fake), 3);
+    }
+
+    #[gpui::test]
+    async fn a_comment_posts_and_is_appended(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        let fake = install_fake(&mut cx);
+        fake.respond(is_timeline, Ok(TIMELINE.into()));
+        click("photon-review-conversation", &mut cx);
+        fake.respond(
+            is_comment_post,
+            Ok(r#"{"id":3002,"user":{"login":"alice"},"body":"Ship it","created_at":"2026-10-05T09:00:00Z"}"#.into()),
+        );
+        let composer = conversation_composer(&item, &mut cx);
+        type_text(&composer, "Ship it", &mut cx);
+        click("photon-review-comment", &mut cx);
+        let posts: Vec<_> = fake
+            .requests()
+            .into_iter()
+            .filter(is_comment_post)
+            .collect();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(request_json(&posts[0]), json!({"body": "Ship it"}));
+        assert!(drawn("photon-review-timeline-5", &mut cx));
+        item.read_with(&cx, |item, cx| {
+            let conversation = item.conversation.as_ref().expect("conversation");
+            let last = conversation
+                .events
+                .as_ref()
+                .and_then(|events| events.last())
+                .map(|(event, _)| event.clone());
+            let Some(TimelineEvent::Comment(comment)) = last else {
+                panic!("expected the new comment last, got {last:?}");
+            };
+            assert_eq!(
+                (comment.author.as_str(), comment.body.as_str()),
+                ("alice", "Ship it")
+            );
+            assert_eq!(conversation.composer.read(cx).text(cx), "");
+            assert_eq!(item.detail.comment_count, 3);
+        });
+        assert!(!drawn("photon-review-comment-error", &mut cx));
+    }
+
+    #[gpui::test]
+    async fn a_failed_comment_keeps_the_text(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        let fake = install_fake(&mut cx);
+        fake.respond(is_timeline, Ok(TIMELINE.into()));
+        click("photon-review-conversation", &mut cx);
+        fake.respond(
+            is_comment_post,
+            Err(GhError::Failed {
+                message: "gh: HTTP 403".into(),
+            }),
+        );
+        let composer = conversation_composer(&item, &mut cx);
+        type_text(&composer, "Ship it", &mut cx);
+        click("photon-review-comment", &mut cx);
+        assert!(drawn("photon-review-comment-error", &mut cx));
+        assert!(!drawn("photon-review-timeline-5", &mut cx));
+        composer.read_with(&cx, |editor, cx| assert_eq!(editor.text(cx), "Ship it"));
     }
 }

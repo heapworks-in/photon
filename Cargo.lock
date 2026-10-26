@@ -13809,6 +13809,7 @@ dependencies = [
  "language",
  "log",
  "lsp",
+ "markdown",
  "menu",
  "multi_buffer",
  "parking_lot",

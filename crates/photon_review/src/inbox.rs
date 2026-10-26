@@ -283,7 +283,10 @@ impl InboxPanel {
         let InboxState::Loaded(hosts) = &mut self.state else {
             return;
         };
-        for inbox in hosts.iter_mut().filter_map(|host| host.result.as_mut().ok()) {
+        for inbox in hosts
+            .iter_mut()
+            .filter_map(|host| host.result.as_mut().ok())
+        {
             for (_, rows) in &mut inbox.sections {
                 rows.retain(|row| row.key != *key);
             }

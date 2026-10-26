@@ -1778,8 +1778,8 @@ mod tests {
             let detail = detail_with(|pull_request| {
                 for (field, value) in change.as_object().expect("object") {
                     if field == "rollup" {
-                        pull_request["lastCommit"]["nodes"][0]["commit"]["statusCheckRollup"]
-                            ["state"] = value.clone();
+                        pull_request["lastCommit"]["nodes"][0]["commit"]["statusCheckRollup"]["state"] =
+                            value.clone();
                     } else {
                         pull_request[field] = value.clone();
                     }
@@ -1820,8 +1820,7 @@ mod tests {
 
     #[test]
     fn timeline_lists_comments_reviews_and_commits_in_order() {
-        let events =
-            parse_timeline(include_str!("../test_fixtures/timeline.json")).expect("parse");
+        let events = parse_timeline(include_str!("../test_fixtures/timeline.json")).expect("parse");
         assert_eq!(
             events,
             [
