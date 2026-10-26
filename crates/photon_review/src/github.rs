@@ -120,6 +120,148 @@ pub struct PrDetail {
     /// pull request from a fork; None when that fork was deleted).
     pub head_ref: String,
     pub head_repository: Option<String>,
+    pub merge: MergeStatus,
+    /// General comments on the conversation, not counting review comments on lines.
+    pub comment_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+impl MergeMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "MERGE",
+            MergeMethod::Squash => "SQUASH",
+            MergeMethod::Rebase => "REBASE",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "Merge",
+            MergeMethod::Squash => "Squash and Merge",
+            MergeMethod::Rebase => "Rebase and Merge",
+        }
+    }
+
+    /// The method as the start of a sentence, like "Squash and merge #482 into main?".
+    pub fn verb(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "Merge",
+            MergeMethod::Squash => "Squash and merge",
+            MergeMethod::Rebase => "Rebase and merge",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckOutcome {
+    Passed,
+    Failed,
+    Running,
+}
+
+impl CheckOutcome {
+    pub fn label(self) -> &'static str {
+        match self {
+            CheckOutcome::Passed => "passed",
+            CheckOutcome::Failed => "failed",
+            CheckOutcome::Running => "running",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Check {
+    pub name: String,
+    pub outcome: CheckOutcome,
+    pub url: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MergeStatus {
+    pub is_draft: bool,
+    /// GitHub's `mergeable`: MERGEABLE, CONFLICTING, or UNKNOWN while GitHub works it out.
+    pub mergeable: String,
+    pub merge_state: String,
+    pub review_decision: Option<String>,
+    /// The head commit's combined check state.
+    pub checks_state: Option<String>,
+    pub checks: Vec<Check>,
+    /// The methods the repository allows, its default first.
+    pub methods: Vec<MergeMethod>,
+}
+
+/// The one thing that matters most about whether the pull request can merge.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Readiness {
+    Merged,
+    Closed,
+    Draft,
+    Conflicts,
+    ChecksFailing,
+    ChangesRequested,
+    ReviewRequired,
+    ChecksRunning,
+    Checking,
+    Behind(String),
+    Ready,
+}
+
+impl Readiness {
+    pub fn label(&self) -> String {
+        match self {
+            Readiness::Merged => "Merged".into(),
+            Readiness::Closed => "Closed".into(),
+            Readiness::Draft => "Draft".into(),
+            Readiness::Conflicts => "Conflicts".into(),
+            Readiness::ChecksFailing => "Checks failing".into(),
+            Readiness::ChangesRequested => "Changes requested".into(),
+            Readiness::ReviewRequired => "Review required".into(),
+            Readiness::ChecksRunning => "Checks running".into(),
+            Readiness::Checking => "Checking…".into(),
+            Readiness::Behind(base) => format!("Behind {base}"),
+            Readiness::Ready => "Ready to merge".into(),
+        }
+    }
+}
+
+impl PrDetail {
+    pub fn readiness(&self) -> Readiness {
+        let merge = &self.merge;
+        match self.state {
+            PrState::Merged => return Readiness::Merged,
+            PrState::Closed => return Readiness::Closed,
+            PrState::Open => {}
+        }
+        let checks = merge.checks_state.as_deref();
+        let decision = merge.review_decision.as_deref();
+        if merge.is_draft {
+            Readiness::Draft
+        } else if merge.mergeable == "CONFLICTING" || merge.merge_state == "DIRTY" {
+            Readiness::Conflicts
+        } else if matches!(checks, Some("FAILURE" | "ERROR")) {
+            Readiness::ChecksFailing
+        } else if decision == Some("CHANGES_REQUESTED") {
+            Readiness::ChangesRequested
+        } else if decision == Some("REVIEW_REQUIRED") {
+            Readiness::ReviewRequired
+        } else if matches!(checks, Some("PENDING" | "EXPECTED")) {
+            Readiness::ChecksRunning
+        } else if merge.mergeable == "UNKNOWN" || merge.merge_state == "UNKNOWN" {
+            // Saying "Ready" before GitHub has worked out conflicts could be wrong.
+            Readiness::Checking
+        } else if merge.merge_state == "BEHIND" {
+            Readiness::Behind(self.summary.base_ref.clone())
+        } else {
+            Readiness::Ready
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -251,6 +393,22 @@ struct RawPullRequest {
     head_ref_name: Option<String>,
     #[serde(default)]
     head_repository: Option<RawRepository>,
+    #[serde(default)]
+    is_draft: bool,
+    #[serde(default)]
+    mergeable: Option<String>,
+    #[serde(default)]
+    merge_state_status: Option<String>,
+    #[serde(default)]
+    review_decision: Option<String>,
+    #[serde(default)]
+    comments: Option<RawCount>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawCount {
+    total_count: usize,
 }
 
 #[derive(Deserialize)]
@@ -285,6 +443,49 @@ struct RawLastCommitRollup {
 #[derive(Deserialize)]
 struct RawRollup {
     state: String,
+    #[serde(default)]
+    contexts: Option<Nodes<RawCheckContext>>,
+}
+
+/// A CheckRun (`name`, `status`, `conclusion`, `detailsUrl`) or a StatusContext (`context`,
+/// `state`, `targetUrl`).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawCheckContext {
+    name: Option<String>,
+    status: Option<String>,
+    conclusion: Option<String>,
+    details_url: Option<String>,
+    context: Option<String>,
+    state: Option<String>,
+    target_url: Option<String>,
+}
+
+impl RawCheckContext {
+    fn to_check(&self) -> Option<Check> {
+        if let Some(context) = &self.context {
+            let outcome = match self.state.as_deref() {
+                Some("SUCCESS") => CheckOutcome::Passed,
+                Some("PENDING" | "EXPECTED") => CheckOutcome::Running,
+                _ => CheckOutcome::Failed,
+            };
+            return Some(Check {
+                name: context.clone(),
+                outcome,
+                url: self.target_url.clone(),
+            });
+        }
+        let outcome = match (self.status.as_deref(), self.conclusion.as_deref()) {
+            (Some(status), _) if status != "COMPLETED" => CheckOutcome::Running,
+            (_, Some("SUCCESS" | "NEUTRAL" | "SKIPPED")) => CheckOutcome::Passed,
+            _ => CheckOutcome::Failed,
+        };
+        Some(Check {
+            name: self.name.clone()?,
+            outcome,
+            url: self.details_url.clone(),
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -521,9 +722,16 @@ pub fn parse_inbox(
 pub fn detail_request(key: &PrKey, login: &str) -> GhRequest {
     let query = format!(
         "query($owner: String!, $name: String!, $number: Int!, $login: String!) {{ \
-         repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ \
+         repository(owner: $owner, name: $name) {{ \
+         mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed viewerDefaultMergeMethod \
+         pullRequest(number: $number) {{ \
          {PR_SUMMARY_FIELDS} state additions deletions body headRefName \
          headRepository {{ nameWithOwner }} \
+         isDraft mergeable mergeStateStatus reviewDecision comments {{ totalCount }} \
+         lastCommit: commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ \
+         contexts(first: 50) {{ nodes {{ \
+         ... on CheckRun {{ name status conclusion detailsUrl }} \
+         ... on StatusContext {{ context state targetUrl }} }} }} }} }} }} }} \
          files(first: 100) {{ nodes {{ path viewerViewedState }} }} \
          reviewThreads(first: 100) {{ nodes {{ id isResolved isOutdated path line startLine diffSide \
          comments(first: 100) {{ nodes {{ databaseId author {{ login }} body createdAt }} }} }} }} \
@@ -550,13 +758,22 @@ struct RawDetail {
 #[serde(rename_all = "camelCase")]
 struct RawDetailRepository {
     pull_request: Option<RawPullRequest>,
+    #[serde(default)]
+    merge_commit_allowed: bool,
+    #[serde(default)]
+    squash_merge_allowed: bool,
+    #[serde(default)]
+    rebase_merge_allowed: bool,
+    #[serde(default)]
+    viewer_default_merge_method: Option<String>,
 }
 
 pub fn parse_detail(key: &PrKey, json: &str) -> Result<PrDetail> {
     let raw: RawDetail = parse_response(json)?;
-    let pull_request = raw
-        .repository
-        .and_then(|repository| repository.pull_request)
+    let mut repository = raw.repository.context("pull request not found")?;
+    let pull_request = repository
+        .pull_request
+        .take()
         .context("pull request not found")?;
     let summary = summarize(&key.host, Some(key), &pull_request)?;
     let state = match pull_request.state.as_deref() {
@@ -564,6 +781,7 @@ pub fn parse_detail(key: &PrKey, json: &str) -> Result<PrDetail> {
         Some("CLOSED") => PrState::Closed,
         _ => PrState::Open,
     };
+    let merge = merge_status(&repository, &pull_request);
     let files = pull_request
         .files
         .map(|files| {
@@ -627,7 +845,56 @@ pub fn parse_detail(key: &PrKey, json: &str) -> Result<PrDetail> {
         head_repository: pull_request
             .head_repository
             .map(|repository| repository.name_with_owner),
+        merge,
+        comment_count: pull_request
+            .comments
+            .map_or(0, |comments| comments.total_count),
     })
+}
+
+fn merge_status(repository: &RawDetailRepository, pull_request: &RawPullRequest) -> MergeStatus {
+    let rollup = pull_request
+        .last_commit
+        .nodes
+        .iter()
+        .flatten()
+        .next_back()
+        .and_then(|node| node.commit.status_check_rollup.as_ref());
+    let mut methods: Vec<MergeMethod> = [
+        (MergeMethod::Merge, repository.merge_commit_allowed),
+        (MergeMethod::Squash, repository.squash_merge_allowed),
+        (MergeMethod::Rebase, repository.rebase_merge_allowed),
+    ]
+    .into_iter()
+    .filter_map(|(method, allowed)| allowed.then_some(method))
+    .collect();
+    let default = repository.viewer_default_merge_method.as_deref();
+    if let Some(index) = methods
+        .iter()
+        .position(|method| Some(method.as_str()) == default)
+    {
+        let method = methods.remove(index);
+        methods.insert(0, method);
+    }
+    MergeStatus {
+        is_draft: pull_request.is_draft,
+        mergeable: pull_request.mergeable.clone().unwrap_or_default(),
+        merge_state: pull_request.merge_state_status.clone().unwrap_or_default(),
+        review_decision: pull_request.review_decision.clone(),
+        checks_state: rollup.map(|rollup| rollup.state.clone()),
+        checks: rollup
+            .and_then(|rollup| rollup.contexts.as_ref())
+            .map(|contexts| {
+                contexts
+                    .nodes
+                    .iter()
+                    .flatten()
+                    .filter_map(RawCheckContext::to_check)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        methods,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -804,6 +1071,162 @@ pub fn parse_reply(json: &str) -> Result<ThreadComment> {
         body: comment.body,
         created_at: comment.created_at,
     })
+}
+
+/// Merges only if the head is still the one the user reviewed.
+pub fn merge_request(
+    host: &str,
+    pr_node_id: &str,
+    method: MergeMethod,
+    expected_head: &str,
+) -> GhRequest {
+    graphql_request(
+        host,
+        "mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!, \
+         $expectedHeadOid: GitObjectID!) { mergePullRequest(input: {pullRequestId: \
+         $pullRequestId, mergeMethod: $mergeMethod, expectedHeadOid: $expectedHeadOid}) \
+         { pullRequest { state } } }",
+        serde_json::json!({
+            "pullRequestId": pr_node_id,
+            "mergeMethod": method.as_str(),
+            "expectedHeadOid": expected_head,
+        }),
+    )
+}
+
+pub const HEAD_MOVED_MESSAGE: &str =
+    "The pull request changed since you loaded it. Refresh to review the new commits.";
+
+/// GitHub's refusal, in plain words where GitHub's own are cryptic.
+pub fn merge_error_message(message: &str) -> String {
+    if message.to_lowercase().contains("head branch was modified") {
+        HEAD_MOVED_MESSAGE.to_string()
+    } else {
+        format!("Couldn't merge: {message}")
+    }
+}
+
+pub fn issue_comment_request(key: &PrKey, body: &str) -> GhRequest {
+    rest_request(
+        &key.host,
+        "POST",
+        &format!(
+            "repos/{}/{}/issues/{}/comments",
+            key.owner, key.repo, key.number
+        ),
+        Some(serde_json::json!({ "body": body })),
+    )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TimelineEvent {
+    Comment(ThreadComment),
+    Review {
+        author: String,
+        verb: &'static str,
+        body: String,
+        submitted_at: String,
+    },
+    Commit {
+        short_sha: String,
+        headline: String,
+    },
+}
+
+pub fn timeline_request(key: &PrKey) -> GhRequest {
+    // ponytail: the last 100 events only; page with `before` if long conversations need more.
+    graphql_request(
+        &key.host,
+        "query($owner: String!, $name: String!, $number: Int!) { \
+         repository(owner: $owner, name: $name) { pullRequest(number: $number) { \
+         timelineItems(last: 100, itemTypes: [ISSUE_COMMENT, PULL_REQUEST_REVIEW, \
+         PULL_REQUEST_COMMIT]) { nodes { __typename \
+         ... on IssueComment { databaseId author { login } body createdAt } \
+         ... on PullRequestReview { author { login } state body submittedAt } \
+         ... on PullRequestCommit { commit { abbreviatedOid messageHeadline } } } } } } }",
+        serde_json::json!({ "owner": key.owner, "name": key.repo, "number": key.number }),
+    )
+}
+
+#[derive(Deserialize)]
+struct RawTimeline {
+    repository: Option<RawTimelineRepository>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawTimelineRepository {
+    pull_request: Option<RawTimelinePullRequest>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawTimelinePullRequest {
+    timeline_items: Nodes<RawTimelineItem>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawTimelineItem {
+    #[serde(rename = "__typename")]
+    typename: String,
+    database_id: Option<u64>,
+    author: Option<RawLogin>,
+    body: Option<String>,
+    created_at: Option<String>,
+    state: Option<String>,
+    submitted_at: Option<String>,
+    commit: Option<RawTimelineCommit>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawTimelineCommit {
+    abbreviated_oid: String,
+    message_headline: String,
+}
+
+pub fn parse_timeline(json: &str) -> Result<Vec<TimelineEvent>> {
+    let raw: RawTimeline = parse_partial_response(json)?;
+    let items = raw
+        .repository
+        .and_then(|repository| repository.pull_request)
+        .context("pull request not found")?
+        .timeline_items
+        .nodes;
+    Ok(items
+        .into_iter()
+        .flatten()
+        .filter_map(|item| match item.typename.as_str() {
+            "IssueComment" => Some(TimelineEvent::Comment(ThreadComment {
+                database_id: item.database_id?,
+                author: author_login(item.author.as_ref()),
+                body: item.body.unwrap_or_default(),
+                created_at: item.created_at.unwrap_or_default(),
+            })),
+            "PullRequestReview" => {
+                let verb = match item.state.as_deref() {
+                    Some("APPROVED") => "approved",
+                    Some("CHANGES_REQUESTED") => "requested changes",
+                    Some("COMMENTED") => "commented",
+                    Some("DISMISSED") => "reviewed (dismissed)",
+                    // Pending reviews are the viewer's unsent drafts on github.com.
+                    _ => return None,
+                };
+                Some(TimelineEvent::Review {
+                    author: author_login(item.author.as_ref()),
+                    verb,
+                    body: item.body.unwrap_or_default(),
+                    submitted_at: item.submitted_at.unwrap_or_default(),
+                })
+            }
+            "PullRequestCommit" => item.commit.map(|commit| TimelineEvent::Commit {
+                short_sha: commit.abbreviated_oid,
+                headline: commit.message_headline,
+            }),
+            _ => None,
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -1242,5 +1665,200 @@ mod tests {
             body["variables"],
             serde_json::json!({"owner": "acme", "name": "web", "number": 482, "login": "alice"})
         );
+        let query = body["query"].as_str().expect("query");
+        for field in [
+            "viewerDefaultMergeMethod",
+            "isDraft mergeable mergeStateStatus reviewDecision comments { totalCount }",
+            "... on CheckRun { name status conclusion detailsUrl }",
+        ] {
+            assert!(query.contains(field), "{field} in {query}");
+        }
+        assert_eq!(query.matches('{').count(), query.matches('}').count());
+    }
+
+    fn detail_with(change: impl FnOnce(&mut serde_json::Value)) -> PrDetail {
+        let mut json: serde_json::Value = serde_json::from_str(DETAIL).expect("fixture");
+        change(&mut json["data"]["repository"]["pullRequest"]);
+        parse_detail(&key(), &json.to_string()).expect("parse")
+    }
+
+    #[test]
+    fn detail_reads_merge_status_checks_and_comment_count() {
+        let detail = parse_detail(&key(), DETAIL).expect("parse");
+        assert_eq!(detail.comment_count, 2);
+        let merge = &detail.merge;
+        assert!(!merge.is_draft);
+        assert_eq!(merge.mergeable, "MERGEABLE");
+        assert_eq!(merge.merge_state, "CLEAN");
+        assert_eq!(merge.review_decision.as_deref(), Some("APPROVED"));
+        assert_eq!(merge.checks_state.as_deref(), Some("SUCCESS"));
+        // The default method comes first; rebasing isn't allowed.
+        assert_eq!(merge.methods, [MergeMethod::Squash, MergeMethod::Merge]);
+        assert_eq!(
+            merge.checks,
+            [
+                Check {
+                    name: "build".into(),
+                    outcome: CheckOutcome::Passed,
+                    url: Some("https://github.com/acme/web/runs/1".into()),
+                },
+                Check {
+                    name: "lint".into(),
+                    outcome: CheckOutcome::Running,
+                    url: Some("https://github.com/acme/web/runs/2".into()),
+                },
+                Check {
+                    name: "ci/deploy".into(),
+                    outcome: CheckOutcome::Failed,
+                    url: None,
+                },
+            ]
+        );
+        assert_eq!(detail.readiness(), Readiness::Ready);
+    }
+
+    #[test]
+    fn readiness_says_the_one_thing_that_matters_most() {
+        let cases: Vec<(serde_json::Value, Readiness)> = vec![
+            (
+                serde_json::json!({"state": "MERGED", "isDraft": true}),
+                Readiness::Merged,
+            ),
+            (serde_json::json!({"state": "CLOSED"}), Readiness::Closed),
+            (
+                serde_json::json!({"isDraft": true, "mergeable": "CONFLICTING"}),
+                Readiness::Draft,
+            ),
+            (
+                serde_json::json!({"mergeable": "CONFLICTING"}),
+                Readiness::Conflicts,
+            ),
+            (
+                serde_json::json!({"mergeStateStatus": "DIRTY"}),
+                Readiness::Conflicts,
+            ),
+            (
+                serde_json::json!({"rollup": "FAILURE", "reviewDecision": "CHANGES_REQUESTED"}),
+                Readiness::ChecksFailing,
+            ),
+            (
+                serde_json::json!({"rollup": "ERROR"}),
+                Readiness::ChecksFailing,
+            ),
+            (
+                serde_json::json!({"reviewDecision": "CHANGES_REQUESTED"}),
+                Readiness::ChangesRequested,
+            ),
+            (
+                serde_json::json!({"reviewDecision": "REVIEW_REQUIRED", "rollup": "PENDING"}),
+                Readiness::ReviewRequired,
+            ),
+            (
+                serde_json::json!({"rollup": "EXPECTED"}),
+                Readiness::ChecksRunning,
+            ),
+            (
+                serde_json::json!({"mergeable": "UNKNOWN", "mergeStateStatus": "UNKNOWN"}),
+                Readiness::Checking,
+            ),
+            (
+                serde_json::json!({"mergeStateStatus": "BEHIND"}),
+                Readiness::Behind("main".into()),
+            ),
+            (
+                serde_json::json!({"mergeStateStatus": "UNSTABLE"}),
+                Readiness::Ready,
+            ),
+            (
+                serde_json::json!({"mergeStateStatus": "HAS_HOOKS"}),
+                Readiness::Ready,
+            ),
+        ];
+        for (change, expected) in cases {
+            let detail = detail_with(|pull_request| {
+                for (field, value) in change.as_object().expect("object") {
+                    if field == "rollup" {
+                        pull_request["lastCommit"]["nodes"][0]["commit"]["statusCheckRollup"]
+                            ["state"] = value.clone();
+                    } else {
+                        pull_request[field] = value.clone();
+                    }
+                }
+            });
+            assert_eq!(detail.readiness(), expected, "{change}");
+        }
+        assert_eq!(Readiness::Behind("main".into()).label(), "Behind main");
+    }
+
+    #[test]
+    fn merge_request_sends_the_method_and_expected_head() {
+        let request = merge_request("github.com", "PR_482", MergeMethod::Rebase, "a2");
+        let body = stdin_json(&request);
+        assert_eq!(
+            body["variables"],
+            serde_json::json!({
+                "pullRequestId": "PR_482",
+                "mergeMethod": "REBASE",
+                "expectedHeadOid": "a2",
+            })
+        );
+        assert!(
+            body["query"]
+                .as_str()
+                .expect("query")
+                .contains("expectedHeadOid: $expectedHeadOid")
+        );
+        assert_eq!(
+            merge_error_message("Head branch was modified. Review and try the merge again."),
+            HEAD_MOVED_MESSAGE
+        );
+        assert_eq!(
+            merge_error_message("Required status check \"ci\" is failing"),
+            "Couldn't merge: Required status check \"ci\" is failing"
+        );
+    }
+
+    #[test]
+    fn timeline_lists_comments_reviews_and_commits_in_order() {
+        let events =
+            parse_timeline(include_str!("../test_fixtures/timeline.json")).expect("parse");
+        assert_eq!(
+            events,
+            [
+                TimelineEvent::Commit {
+                    short_sha: "a1b2c3d".into(),
+                    headline: "Retry uploads".into(),
+                },
+                TimelineEvent::Comment(ThreadComment {
+                    database_id: 3001,
+                    author: "bob".into(),
+                    body: "Looks **good** overall.".into(),
+                    created_at: "2026-10-02T09:00:00Z".into(),
+                }),
+                TimelineEvent::Review {
+                    author: "carol".into(),
+                    verb: "requested changes",
+                    body: "Please add a test.".into(),
+                    submitted_at: "2026-10-03T09:00:00Z".into(),
+                },
+                TimelineEvent::Commit {
+                    short_sha: "e4f5a6b".into(),
+                    headline: "Add retry test".into(),
+                },
+                TimelineEvent::Review {
+                    author: "ghost".into(),
+                    verb: "approved",
+                    body: String::new(),
+                    submitted_at: "2026-10-04T09:00:00Z".into(),
+                },
+            ]
+        );
+        assert_eq!(
+            stdin_json(&timeline_request(&key()))["variables"],
+            serde_json::json!({"owner": "acme", "name": "web", "number": 482})
+        );
+        let comment = issue_comment_request(&key(), "Thanks!");
+        assert_eq!(comment.args[5], "repos/acme/web/issues/482/comments");
+        assert_eq!(stdin_json(&comment), serde_json::json!({"body": "Thanks!"}));
     }
 }

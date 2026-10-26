@@ -1,8 +1,17 @@
 {
  "data": {
   "repository": {
+   "squashMergeAllowed": true,
+   "mergeCommitAllowed": true,
+   "rebaseMergeAllowed": false,
+   "viewerDefaultMergeMethod": "SQUASH",
    "pullRequest": {
     "id": "PR_482",
+    "isDraft": false,
+    "mergeable": "MERGEABLE",
+    "mergeStateStatus": "CLEAN",
+    "reviewDecision": "APPROVED",
+    "comments": { "totalCount": 2 },
     "number": 482,
     "title": "Add retry to uploader",
     "headRefName": "retry-uploads",
@@ -111,7 +120,15 @@
       {
        "commit": {
         "statusCheckRollup": {
-         "state": "SUCCESS"
+         "state": "SUCCESS",
+         "contexts": {
+          "nodes": [
+           { "name": "build", "conclusion": "SUCCESS", "status": "COMPLETED", "detailsUrl": "https://github.com/acme/web/runs/1" },
+           { "name": "lint", "conclusion": null, "status": "IN_PROGRESS", "detailsUrl": "https://github.com/acme/web/runs/2" },
+           { "context": "ci/deploy", "state": "FAILURE", "targetUrl": null },
+           {}
+          ]
+         }
         }
        }
       }

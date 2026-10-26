@@ -1,0 +1,18 @@
+{
+ "data": {
+  "repository": {
+   "pullRequest": {
+    "timelineItems": {
+     "nodes": [
+      { "__typename": "PullRequestCommit", "commit": { "abbreviatedOid": "a1b2c3d", "messageHeadline": "Retry uploads" } },
+      { "__typename": "IssueComment", "databaseId": 3001, "author": { "login": "bob" }, "body": "Looks **good** overall.", "createdAt": "2026-10-02T09:00:00Z" },
+      { "__typename": "PullRequestReview", "author": { "login": "carol" }, "state": "CHANGES_REQUESTED", "body": "Please add a test.", "submittedAt": "2026-10-03T09:00:00Z" },
+      { "__typename": "PullRequestReview", "author": { "login": "alice" }, "state": "PENDING", "body": "", "submittedAt": null },
+      { "__typename": "PullRequestCommit", "commit": { "abbreviatedOid": "e4f5a6b", "messageHeadline": "Add retry test" } },
+      { "__typename": "PullRequestReview", "author": null, "state": "APPROVED", "body": "", "submittedAt": "2026-10-04T09:00:00Z" }
+     ]
+    }
+   }
+  }
+ }
+}
