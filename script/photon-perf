@@ -63,6 +63,14 @@ tree_cpu_seconds() {
 # With a root pid, only processes that started after the root; without, a pre-launch baseline.
 webkit_pids() { /usr/bin/python3 -I tooling/photon-perf/responsible.py webkit $responsible_pid ${1:-}; }
 
+source tooling/photon-perf/launch-as-app.zsh
+measure_dir=""
+# The app is not a child of this shell, so it is waited for by polling.
+stop_app() {
+  kill $1 2>/dev/null || true
+  while kill -0 $1 2>/dev/null; do sleep 0.1; done
+}
+
 start_times=()
 footprint_values=()
 cpu_values=()
@@ -72,9 +80,9 @@ for (( run = 1; run <= runs; run++ )); do
   mkdir "$scratch/zdotdir"
   export ZDOTDIR="$scratch/zdotdir"
   launched_ms=$(( int(EPOCHREALTIME * 1000) ))
-  PHOTON_PERF=1 "$binary" --user-data-dir "$scratch/data" tooling/photon-perf/sample \
-    >"$scratch/stdout.log" 2>"$scratch/stderr.log" &
-  pid=$!
+  launch_as_app "$binary" "$scratch/stderr.log" PHOTON_PERF=1 ZDOTDIR="$scratch/zdotdir" \
+    -- --user-data-dir "$scratch/data" "$PWD/tooling/photon-perf/sample" || exit 2
+  pid=$app_pid
   first_frame_ms=""
   for (( wait = 0; wait < 100; wait++ )); do
     first_frame_ms=$(awk '/photon-perf first-frame-epoch-ms/ { print $3; exit }' "$scratch/stderr.log")
@@ -101,7 +109,7 @@ for (( run = 1; run <= runs; run++ )); do
     echo "could not read phys_footprint for pid $pid (is the footprint tool available?)" >&2
     exit 2
   fi
-  kill $pid; wait $pid 2>/dev/null || true
+  stop_app $pid
   start_times+=($(( first_frame_ms - launched_ms )))
   footprint_values+=($(( footprint_bytes / 1048576 )))
   cpu_values+=($(printf '%.2f' $(( (cpu_after - cpu_before) * 100.0 / 10 ))))
@@ -135,14 +143,16 @@ scratch=$(mktemp -d)
 pid=""
 cleanup() {
   [[ -n $pid ]] && kill $(descendants $pid) 2>/dev/null || true
+  [[ -n $measure_dir ]] && rm -rf "$measure_dir"
   rm -rf "$scratch"
 }
 trap cleanup EXIT
 mkdir "$scratch/zdotdir"
-export ZDOTDIR="$scratch/zdotdir"
-"$binary" --user-data-dir "$scratch/data" tooling/photon-perf/sample tooling/photon-perf/sample/diagram.excalidraw \
-  >"$scratch/stdout.log" 2>"$scratch/stderr.log" &
-pid=$!
+launch_as_app "$binary" "$scratch/stderr.log" ZDOTDIR="$scratch/zdotdir" \
+  -- --user-data-dir "$scratch/data" "$PWD/tooling/photon-perf/sample" "$PWD/tooling/photon-perf/sample/diagram.excalidraw" || exit 2
+pid=$app_pid
+# Launched by launchd, the app is its own responsible process.
+responsible_pid=$(/usr/bin/python3 -I tooling/photon-perf/responsible.py owner $pid)
 sleep 15
 new_webkit_pids() {
   local found=() candidate

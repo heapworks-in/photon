@@ -36,9 +36,11 @@ scratch=$(mktemp -d)
 mkdir "$scratch/zdotdir"
 export ZDOTDIR="$scratch/zdotdir"
 if (( ${#command} == 0 )); then
-  command=("$binary" --user-data-dir "$scratch/data" tooling/photon-perf/sample)
-  (( with_diagram )) && command+=(tooling/photon-perf/sample/diagram.excalidraw)
+  app_args=(--user-data-dir "$scratch/data" "$PWD/tooling/photon-perf/sample")
+  (( with_diagram )) && app_args+=("$PWD/tooling/photon-perf/sample/diagram.excalidraw")
 fi
+source tooling/photon-perf/launch-as-app.zsh
+measure_dir=""
 
 descendants() {
   local pid=$1 child
@@ -61,14 +63,24 @@ webkit_flows() {
 }
 preexisting_webkit=" $(webkit_pids | paste -sd' ' -) "
 
-"${command[@]}" >"$scratch/stdout.log" 2>&1 &
-root_pid=$!
 keep_scratch=0
+root_pid=""
 cleanup() {
-  kill $(descendants $root_pid) 2>/dev/null || true
+  [[ -n $root_pid ]] && kill $(descendants $root_pid) 2>/dev/null || true
+  [[ -n $measure_dir ]] && rm -rf "$measure_dir"
   (( keep_scratch )) || rm -rf "$scratch"
 }
 trap cleanup EXIT
+if (( ${#command} )); then
+  "${command[@]}" >"$scratch/stdout.log" 2>&1 &
+  root_pid=$!
+else
+  launch_as_app "$binary" "$scratch/stdout.log" ZDOTDIR="$scratch/zdotdir" -- "${app_args[@]}" || exit 2
+  root_pid=$app_pid
+  # Launched by launchd, the app is its own responsible process.
+  responsible_pid=$(/usr/bin/python3 -I tooling/photon-perf/responsible.py owner $root_pid) \
+    || { echo "could not determine the responsible process of the app" >&2; exit 2; }
+fi
 
 # ponytail: lsof polling still misses connections shorter than one poll; a packet capture would not.
 offending=()
