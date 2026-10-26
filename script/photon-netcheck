@@ -31,6 +31,9 @@ while (( $# )); do
 done
 
 scratch=$(mktemp -d)
+# A fresh data dir has no trust decisions, so Photon would open its "Trust this folder?" dialog,
+# which takes focus (and a diagram tab only starts its web view when focused). Trust the sample.
+mkdir -p "$scratch/data/config" && print -r -- '{ "session": { "trust_all_worktrees": true } }' >"$scratch/data/config/settings.json"
 # The terminal's login shell would otherwise run the user's zsh rc files, whose network
 # calls (plugin managers, version checks) are not Photon's.
 mkdir "$scratch/zdotdir"
