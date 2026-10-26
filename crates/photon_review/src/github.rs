@@ -1501,6 +1501,7 @@ mod tests {
             outdated: false,
             general: false,
             post_state: crate::PostState::Unposted,
+            from_agent: false,
         }
     }
 
@@ -1529,6 +1530,7 @@ mod tests {
             draft("src/upload.rs", 41, 41, "  "),
             crate::Draft {
                 post_state: crate::PostState::Sending,
+                from_agent: false,
                 ..draft("src/upload.rs", 41, 41, "Maybe posted")
             },
         ];

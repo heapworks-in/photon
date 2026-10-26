@@ -212,6 +212,7 @@ mod tests {
             outdated: false,
             general: false,
             post_state: crate::PostState::Unposted,
+            from_agent: false,
         }
     }
 

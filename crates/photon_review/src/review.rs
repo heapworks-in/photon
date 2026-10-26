@@ -41,8 +41,8 @@ use workspace::{
 use settings::{PrReviewChecklistContent, Settings as _, SettingsStore};
 
 use crate::{
-    AgentComment, PromptInput, agent_config_paths, parse_agent_comments, review_agent,
-    review_prompt,
+    AgentComment, DismissReason, Dismissal, PromptInput, Verdict, agent_config_paths,
+    parse_agent_comments, parse_verdicts, review_agent, review_prompt, verify_prompt,
 };
 use crate::{
     Answer, AutoCheck, AutoInputs, AutoResult, ChecklistItem, ChecklistSource, LocalRun,
@@ -338,6 +338,9 @@ pub struct ReviewItem {
     /// The agent pre-review: running, and what came of the last one.
     agent_reviewing: bool,
     agent_review_note: Option<(SharedString, Color)>,
+    /// Findings the agent's check couldn't confirm, with its reason, until the next pre-review.
+    dropped_findings: Vec<(AgentComment, String)>,
+    dropped_open: bool,
     _agent_review_task: Task<()>,
     workspace: Option<WeakEntity<Workspace>>,
     suggestion_notes: HashMap<String, SharedString>,
@@ -844,6 +847,39 @@ fn comment_card(id: ElementId, block: &BlockContext) -> Stateful<Div> {
         .bg(colors.panel_background)
 }
 
+/// Deleting an agent draft asks why in one small menu, so later pre-reviews learn from it.
+fn dismiss_menu(
+    item: WeakEntity<ReviewItem>,
+    local_id: usize,
+    group: SharedString,
+) -> impl IntoElement {
+    ui::PopoverMenu::new(("photon-review-dismiss", local_id))
+        .trigger_with_tooltip(
+            IconButton::new("delete", IconName::Trash)
+                .icon_size(IconSize::Small)
+                .visible_on_hover(group),
+            Tooltip::text("Dismiss"),
+        )
+        .anchor(gpui::Anchor::TopRight)
+        .menu(move |window, cx| {
+            let item = item.clone();
+            Some(ui::ContextMenu::build(window, cx, move |menu, _, _| {
+                DismissReason::ALL.into_iter().fold(
+                    menu.header("Dismiss because"),
+                    |menu, reason| {
+                        let item = item.clone();
+                        menu.entry(reason.label(), None, move |_, cx| {
+                            item.update(cx, |item, cx| {
+                                item.dismiss_agent_draft(local_id, reason, cx)
+                            })
+                            .log_err();
+                        })
+                    },
+                )
+            }))
+        })
+}
+
 fn draft_renderer(
     item: WeakEntity<ReviewItem>,
     local_id: usize,
@@ -854,6 +890,7 @@ fn draft_renderer(
     composer: Option<Entity<Editor>>,
     sync: Arc<Mutex<DraftSync>>,
     can_suggest: bool,
+    from_agent: bool,
 ) -> RenderBlock {
     Arc::new(move |block: &mut BlockContext| {
         let error = sync.lock().error.clone();
@@ -906,19 +943,31 @@ fn draft_renderer(
                                         .debug_selector(move || {
                                             format!("photon-review-draft-delete-{local_id}")
                                         })
-                                        .child(
-                                            IconButton::new("delete", IconName::Trash)
-                                                .icon_size(IconSize::Small)
-                                                .visible_on_hover(group.clone())
-                                                .tooltip(Tooltip::text("Delete"))
-                                                .on_click(move |_, window, cx| {
-                                                    delete_item
-                                                        .update(cx, |item, cx| {
-                                                            item.cancel_draft(local_id, window, cx)
-                                                        })
-                                                        .log_err();
-                                                }),
-                                        ),
+                                        .map(|this| {
+                                            if from_agent {
+                                                this.child(dismiss_menu(
+                                                    delete_item.clone(),
+                                                    local_id,
+                                                    group.clone(),
+                                                ))
+                                            } else {
+                                                this.child(
+                                                    IconButton::new("delete", IconName::Trash)
+                                                        .icon_size(IconSize::Small)
+                                                        .visible_on_hover(group.clone())
+                                                        .tooltip(Tooltip::text("Delete"))
+                                                        .on_click(move |_, window, cx| {
+                                                            delete_item
+                                                                .update(cx, |item, cx| {
+                                                                    item.cancel_draft(
+                                                                        local_id, window, cx,
+                                                                    )
+                                                                })
+                                                                .log_err();
+                                                        }),
+                                                )
+                                            }
+                                        }),
                                 ),
                         )
                     }),
@@ -1403,6 +1452,8 @@ impl ReviewItem {
             finishing_threads: HashSet::new(),
             agent_reviewing: false,
             agent_review_note: None,
+            dropped_findings: Vec::new(),
+            dropped_open: false,
             _agent_review_task: Task::ready(()),
             workspace: None,
             suggestion_notes: HashMap::new(),
@@ -2112,6 +2163,7 @@ impl ReviewItem {
                 unmarked |= state.error.is_some() || state.id.is_none();
                 drafts.push(Draft {
                     post_state: PostState::Unposted,
+                    from_agent: false,
                     ..latest.clone()
                 });
                 sent.push((*local_id, sync.clone(), latest.body.clone()));
@@ -2613,6 +2665,12 @@ impl ReviewItem {
             .iter()
             .map(|file| file.diff.path.clone())
             .collect();
+        let thoroughness = PrReviewSettings::get_global(cx).thoroughness;
+        let dismissals = self
+            .database
+            .dismissals(&self.detail.summary.key)
+            .log_err()
+            .unwrap_or_default();
         let prompt = review_prompt(&PromptInput {
             number: self.detail.summary.key.number,
             title: &self.detail.summary.title,
@@ -2625,53 +2683,222 @@ impl ReviewItem {
                 .filter(|item| item.paths.is_none() || item.matches_any(&paths))
                 .map(|item| item.text.as_str())
                 .collect(),
+            thoroughness,
+            dismissals: &dismissals,
         });
-        let reply = agent.review(
-            workspace,
-            prompt,
-            self.checkout.worktree.clone(),
-            window,
-            cx,
-        );
+        let work_dir = self.checkout.worktree.clone();
+        let reply = agent.review(workspace.clone(), prompt, work_dir.clone(), window, cx);
         self.agent_reviewing = true;
+        self.dropped_findings.clear();
         self.set_agent_note(
             "The agent is reviewing; follow it in the agent panel.".into(),
             Color::Muted,
             cx,
         );
-        self._agent_review_task = cx.spawn(async move |this, cx| {
-            let comments = reply
-                .await
-                .and_then(|reply| parse_agent_comments(&reply));
-            this.update(cx, |this, cx| {
-                this.agent_reviewing = false;
-                let (note, color) = match comments {
-                    Ok(comments) if comments.is_empty() => {
-                        ("The agent found nothing to comment on.".into(), Color::Muted)
-                    }
-                    Ok(comments) => {
-                        let count = comments.len();
-                        for comment in comments {
-                            let draft = this.agent_draft(comment, cx);
-                            let local_id = this.push_draft(draft);
-                            this.queue_save(local_id, cx);
-                        }
-                        this.show_comments(cx);
-                        (
-                            format!(
-                                "The agent added {count} draft comment{}. Read each one before you submit.",
-                                if count == 1 { "" } else { "s" }
-                            )
-                            .into(),
-                            Color::Accent,
+        let number = self.detail.summary.key.number;
+        let title = self.detail.summary.title.clone();
+        self._agent_review_task = cx.spawn_in(window, async move |this, cx| {
+            let findings = reply.await.and_then(|reply| parse_agent_comments(&reply));
+            let findings: Vec<AgentComment> = match findings {
+                Ok(findings) => findings
+                    .into_iter()
+                    .filter(|finding| finding.wanted_at(thoroughness))
+                    .collect(),
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        this.agent_reviewing = false;
+                        this.set_agent_note(format!("{error:#}").into(), Color::Error, cx);
+                    })
+                    .log_err();
+                    return;
+                }
+            };
+            if findings.is_empty() {
+                this.update(cx, |this, cx| {
+                    this.agent_reviewing = false;
+                    this.set_agent_note(
+                        "The agent found nothing to comment on.".into(),
+                        Color::Muted,
+                        cx,
+                    );
+                })
+                .log_err();
+                return;
+            }
+            let count = findings.len();
+            let Some(check) = this
+                .update_in(cx, |this, window, cx| {
+                    this.set_agent_note(
+                        format!(
+                            "The agent is checking its {count} finding{} against the code.",
+                            if count == 1 { "" } else { "s" }
                         )
-                    }
-                    Err(error) => (format!("{error:#}").into(), Color::Error),
-                };
-                this.set_agent_note(note, color, cx);
+                        .into(),
+                        Color::Muted,
+                        cx,
+                    );
+                    agent.review(
+                        workspace,
+                        verify_prompt(number, &title, &findings),
+                        work_dir,
+                        window,
+                        cx,
+                    )
+                })
+                .log_err()
+            else {
+                return;
+            };
+            let verdicts = check
+                .await
+                .and_then(|reply| parse_verdicts(&reply, findings.len()));
+            this.update(cx, |this, cx| {
+                this.add_checked_findings(findings, verdicts, cx)
             })
             .log_err();
         });
+    }
+
+    /// Kept findings become drafts; dropped ones are listed in the map. When the check itself
+    /// failed, every finding is added and the note says they weren't checked.
+    fn add_checked_findings(
+        &mut self,
+        findings: Vec<AgentComment>,
+        verdicts: Result<Vec<Verdict>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.agent_reviewing = false;
+        let total = findings.len();
+        let plural = |count: usize| if count == 1 { "" } else { "s" };
+        let (kept, note, color) = match verdicts {
+            Ok(verdicts) => {
+                let mut kept = Vec::new();
+                for (finding, verdict) in findings.into_iter().zip(verdicts) {
+                    if verdict.keep {
+                        kept.push(finding);
+                    } else {
+                        self.dropped_findings.push((finding, verdict.reason));
+                    }
+                }
+                let dropped = total - kept.len();
+                let summary = if dropped == 0 {
+                    format!(
+                        "Kept all {total} finding{} after checking them against the code.",
+                        plural(total)
+                    )
+                } else {
+                    format!(
+                        "Kept {} of {total} finding{}; dropped {dropped} it couldn't confirm.",
+                        kept.len(),
+                        plural(total)
+                    )
+                };
+                let note = if kept.is_empty() {
+                    summary
+                } else {
+                    format!("{summary} Read each draft before you submit.")
+                };
+                (kept, note, Color::Accent)
+            }
+            Err(error) => (
+                findings,
+                format!(
+                    "Couldn't check the findings ({error:#}), so all {total} are added unchecked. \
+                     Read each draft before you submit."
+                ),
+                Color::Warning,
+            ),
+        };
+        let added = !kept.is_empty();
+        for comment in kept {
+            let draft = self.agent_draft(comment, cx);
+            let local_id = self.push_draft(draft);
+            self.queue_save(local_id, cx);
+        }
+        if added {
+            self.show_comments(cx);
+        }
+        self.set_agent_note(note.into(), color, cx);
+    }
+
+    /// Deletes an agent draft and remembers why, so later pre-reviews of the repository don't
+    /// repeat it.
+    pub fn dismiss_agent_draft(
+        &mut self,
+        local_id: usize,
+        reason: DismissReason,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.draft_index(local_id) else {
+            return;
+        };
+        let draft = &self.drafts[index];
+        let dismissal = Dismissal {
+            path: draft.path.clone(),
+            body: draft.body.clone(),
+            reason,
+        };
+        let database = self.database.clone();
+        let key = self.detail.summary.key.clone();
+        cx.background_spawn(async move { database.add_dismissal(key, dismissal).await })
+            .detach_and_log_err(cx);
+        self.discard_draft(local_id, cx);
+    }
+
+    /// The findings the agent's check dropped, folded to one line.
+    fn render_dropped_findings(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let count = self.dropped_findings.len();
+        if count == 0 {
+            return None;
+        }
+        let colors = cx.theme().colors();
+        let section = v_flex().pb_2().gap_1().child(self.render_fold_line(
+            "photon-review-dropped",
+            self.dropped_open,
+            format!(
+                "Dropped {count} finding{} the agent couldn't confirm",
+                if count == 1 { "" } else { "s" }
+            ),
+            |this| &mut this.dropped_open,
+            cx,
+        ));
+        if !self.dropped_open {
+            return Some(section.into_any_element());
+        }
+        Some(
+            section
+                .child(
+                    v_flex()
+                        .debug_selector(|| "photon-review-dropped-list".into())
+                        .gap_1()
+                        .children(self.dropped_findings.iter().map(|(finding, reason)| {
+                            v_flex()
+                                .gap_0p5()
+                                .p_1()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(colors.border_variant)
+                                .child(
+                                    Label::new(match finding.line {
+                                        Some(line) => format!("{}:{line}", finding.path),
+                                        None => finding.path.clone(),
+                                    })
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted)
+                                    .truncate(),
+                                )
+                                .child(Label::new(finding.draft_text()).size(LabelSize::Small))
+                                .when(!reason.is_empty(), |this| {
+                                    this.child(
+                                        Label::new(format!("Why dropped: {reason}"))
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                    )
+                                })
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 
     pub fn agent_review_note(&self) -> Option<&(SharedString, Color)> {
@@ -2870,6 +3097,7 @@ impl ReviewItem {
             outdated: false,
             general,
             post_state: PostState::Unposted,
+            from_agent: true,
         }
     }
 
@@ -3474,6 +3702,7 @@ impl ReviewItem {
             outdated: false,
             general: false,
             post_state: crate::PostState::Unposted,
+            from_agent: false,
         };
         let local_id = self.push_draft(draft);
         self.open_composer(local_id, window, cx);
@@ -3678,6 +3907,7 @@ impl ReviewItem {
                     view.composer.clone(),
                     view.sync.clone(),
                     draft.side == Side::Right && !draft.general,
+                    draft.from_agent,
                 ),
                 priority: 0,
             });
@@ -5510,6 +5740,7 @@ impl ReviewItem {
             .child(div().children(self.render_checklist(cx)));
         map = map.children(self.render_feedback(cx));
         map = map.children(self.render_outdated_drafts(cx));
+        map = map.children(self.render_dropped_findings(cx));
         map = map.children(self.render_unplaced_threads(cx));
         let comments = self.detail.comment_count;
         map = map.child(
@@ -7877,6 +8108,7 @@ fn verify_password(user: &str, password: &str) -> bool {
             outdated: false,
             general: false,
             post_state: crate::PostState::Unposted,
+            from_agent: false,
         }
     }
 
@@ -9437,7 +9669,7 @@ fn verify_password(user: &str, password: &str) -> bool {
     }
 
     struct FakeAgent {
-        reply: std::cell::RefCell<Option<Result<String>>>,
+        replies: std::cell::RefCell<std::collections::VecDeque<Result<String>>>,
         prompts: std::cell::RefCell<Vec<(String, PathBuf)>>,
     }
 
@@ -9452,17 +9684,25 @@ fn verify_password(user: &str, password: &str) -> bool {
         ) -> Task<Result<String>> {
             self.prompts.borrow_mut().push((prompt, work_dir));
             Task::ready(
-                self.reply
+                self.replies
                     .borrow_mut()
-                    .take()
+                    .pop_front()
                     .unwrap_or_else(|| Err(anyhow!("no reply"))),
             )
         }
     }
 
     fn install_agent(reply: Result<String>, cx: &mut VisualTestContext) -> std::rc::Rc<FakeAgent> {
+        install_agent_replies(vec![reply], cx)
+    }
+
+    /// The agent answers each prompt with the next reply: the review, then the check.
+    fn install_agent_replies(
+        replies: Vec<Result<String>>,
+        cx: &mut VisualTestContext,
+    ) -> std::rc::Rc<FakeAgent> {
         let agent = std::rc::Rc::new(FakeAgent {
-            reply: std::cell::RefCell::new(Some(reply)),
+            replies: std::cell::RefCell::new(replies.into()),
             prompts: Default::default(),
         });
         cx.update(|_, cx| crate::set_review_agent(agent.clone(), cx));
@@ -9472,8 +9712,11 @@ fn verify_password(user: &str, password: &str) -> bool {
     #[gpui::test]
     async fn agent_findings_become_drafts(cx: &mut TestAppContext) {
         let (item, mut cx, database) = open_with_drafts(cx, Vec::new()).await;
-        let agent = install_agent(
-            Ok("Here you go:\n```json\n[\n {\"path\": \"src/login.rs\", \"line\": 3, \"body\": \"Audit before the check?\"},\n {\"path\": \"src/other.rs\", \"line\": 7, \"body\": \"Not in this PR.\"}\n]\n```".into()),
+        let agent = install_agent_replies(
+            vec![
+                Ok("Here you go:\n```json\n[\n {\"path\": \"src/login.rs\", \"line\": 3, \"body\": \"Audit before the check?\"},\n {\"path\": \"src/other.rs\", \"line\": 7, \"body\": \"Not in this PR.\"}\n]\n```".into()),
+                Ok("```json\n[{\"finding\": 1, \"verdict\": \"keep\"}, {\"finding\": 2, \"verdict\": \"keep\"}]\n```".into()),
+            ],
             &mut cx,
         );
         item.update_in(&mut cx, |item, window, cx| {
@@ -9483,9 +9726,10 @@ fn verify_password(user: &str, password: &str) -> bool {
         cx.run_until_parked();
 
         let prompts = agent.prompts.borrow();
-        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts.len(), 2, "the review, then the check");
         assert!(prompts[0].0.contains("--- a/src/login.rs"));
         assert_eq!(prompts[0].1, PathBuf::from(path!("/repo")));
+        assert_eq!(prompts[1].1, PathBuf::from(path!("/repo")));
         item.read_with(&cx, |item, _| {
             let drafts = item.drafts();
             assert_eq!(drafts.len(), 2);
@@ -9504,10 +9748,170 @@ fn verify_password(user: &str, password: &str) -> bool {
             assert!(!item.agent_reviewing);
             assert!(
                 item.agent_review_note()
-                    .is_some_and(|(note, _)| note.contains("added 2 draft comments"))
+                    .is_some_and(|(note, _)| note.starts_with("Kept all 2 findings"))
             );
         });
         assert_eq!(bodies(&database).len(), 2);
+    }
+
+    const THREE_FINDINGS: &str = "```json\n[\n {\"path\": \"src/login.rs\", \"line\": 3, \"severity\": \"must fix\", \"category\": \"security\", \"body\": \"Audit before the check?\"},\n {\"path\": \"src/login.rs\", \"line\": 2, \"severity\": \"should fix\", \"category\": \"logic\", \"body\": \"Trim drops tabs.\"},\n {\"path\": \"src/login.rs\", \"line\": 4, \"severity\": \"must fix\", \"category\": \"logic\", \"body\": \"Wrong order.\"}\n]\n```";
+
+    fn start_pre_review(item: &Entity<ReviewItem>, cx: &mut VisualTestContext) {
+        set_login(item, false, cx);
+        item.update(cx, |item, _| {
+            item.workspace = Some(WeakEntity::new_invalid())
+        });
+        click("photon-review-more", cx);
+        click("MENU_ITEM-Pre-review with agent", cx);
+    }
+
+    #[gpui::test]
+    async fn the_check_keeps_only_confirmed_findings_and_lists_the_rest(cx: &mut TestAppContext) {
+        let (item, mut cx, database) = open_with_drafts(cx, Vec::new()).await;
+        let agent = install_agent_replies(
+            vec![
+                Ok(THREE_FINDINGS.into()),
+                Ok("```json\n[{\"finding\": 1, \"verdict\": \"keep\", \"reason\": \"Seen.\"}, {\"finding\": 2, \"verdict\": \"drop\", \"reason\": \"Tabs are trimmed too.\"}]\n```".into()),
+            ],
+            &mut cx,
+        );
+        start_pre_review(&item, &mut cx);
+
+        let check = agent.prompts.borrow()[1].0.clone();
+        assert!(
+            check.contains("1. src/login.rs:3 (must fix, security)\nAudit before the check?"),
+            "{check}"
+        );
+        assert!(check.contains("3. src/login.rs:4 (must fix, logic)\nWrong order."));
+        item.read_with(&cx, |item, _| {
+            assert_eq!(item.drafts().len(), 1);
+            assert!(item.drafts()[0].from_agent);
+            assert_eq!(
+                item.agent_review_note().map(|(note, _)| note.as_ref()),
+                Some(
+                    "Kept 1 of 3 findings; dropped 2 it couldn't confirm. Read each draft \
+                     before you submit."
+                )
+            );
+        });
+        assert_eq!(bodies(&database).len(), 1, "dropped findings aren't drafts");
+        assert!(drawn("photon-review-dropped", &mut cx));
+        assert!(!drawn("photon-review-dropped-list", &mut cx));
+        click("photon-review-dropped", &mut cx);
+        assert!(drawn("photon-review-dropped-list", &mut cx));
+        item.read_with(&cx, |item, _| {
+            let reasons: Vec<&str> = item
+                .dropped_findings
+                .iter()
+                .map(|(_, reason)| reason.as_str())
+                .collect();
+            assert_eq!(
+                reasons,
+                ["Tabs are trimmed too.", "The check didn't mention it."]
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn a_failed_check_adds_every_finding_with_a_warning(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        install_agent_replies(
+            vec![Ok(THREE_FINDINGS.into()), Ok("I looked; all fine.".into())],
+            &mut cx,
+        );
+        start_pre_review(&item, &mut cx);
+        item.read_with(&cx, |item, _| {
+            assert_eq!(item.drafts().len(), 3);
+            let (note, color) = item.agent_review_note().expect("note");
+            assert!(note.starts_with("Couldn't check the findings"), "{note}");
+            assert_eq!(*color, Color::Warning);
+        });
+    }
+
+    #[gpui::test]
+    async fn quiet_asks_for_and_keeps_only_must_fix_correctness(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        cx.update(|_, cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings
+                        .project
+                        .pr_review
+                        .get_or_insert_default()
+                        .agent_review
+                        .get_or_insert_default()
+                        .thoroughness = Some(settings::ReviewThoroughness::Quiet);
+                });
+            });
+        });
+        let agent = install_agent_replies(
+            vec![
+                Ok(THREE_FINDINGS.into()),
+                Ok("```json\n[{\"finding\": 1, \"verdict\": \"keep\"}, {\"finding\": 2, \"verdict\": \"keep\"}]\n```".into()),
+            ],
+            &mut cx,
+        );
+        start_pre_review(&item, &mut cx);
+        let prompts = agent.prompts.borrow();
+        assert!(prompts[0].0.contains("Report only must-fix problems"));
+        assert!(
+            !prompts[1].0.contains("Trim drops tabs."),
+            "{}",
+            prompts[1].0
+        );
+        item.read_with(&cx, |item, _| {
+            let bodies: Vec<&str> = item
+                .drafts()
+                .iter()
+                .map(|draft| draft.body.as_str())
+                .collect();
+            assert_eq!(
+                bodies,
+                [
+                    "**Security** (must fix): Audit before the check?",
+                    "**Logic** (must fix): Wrong order."
+                ]
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn dismissing_an_agent_draft_asks_why_and_feeds_the_next_review(cx: &mut TestAppContext) {
+        let (item, mut cx, database) = open_with_drafts(
+            cx,
+            vec![Draft {
+                body: "**Logic** (must fix): Audit before the check?".into(),
+                from_agent: true,
+                ..current_draft("src/login.rs", 3, "    audit(user);")
+            }],
+        )
+        .await;
+        hover("photon-review-draft-delete-0", &mut cx);
+        click("photon-review-draft-delete-0", &mut cx);
+        assert!(drawn("MENU_ITEM-Intentional", &mut cx));
+        assert!(drawn("MENU_ITEM-Not worth it", &mut cx));
+        click("MENU_ITEM-Wrong", &mut cx);
+        item.read_with(&cx, |item, _| assert!(item.drafts().is_empty()));
+        assert!(bodies(&database).is_empty());
+        assert_eq!(
+            database.dismissals(&key()).expect("dismissals"),
+            [Dismissal {
+                path: "src/login.rs".into(),
+                body: "**Logic** (must fix): Audit before the check?".into(),
+                reason: DismissReason::Wrong,
+            }]
+        );
+
+        let agent = install_agent(Ok("```json\n[]\n```".into()), &mut cx);
+        start_pre_review(&item, &mut cx);
+        let prompt = agent.prompts.borrow()[0].0.clone();
+        assert!(
+            prompt.contains("Past dismissals in this repository — don't repeat these.",),
+            "{prompt}"
+        );
+        assert!(prompt.contains(
+            "```text\n- src/login.rs [Wrong]: **Logic** (must fix): Audit before the check?\n```"
+        ));
     }
 
     #[gpui::test]
@@ -9858,6 +10262,7 @@ fn verify_password(user: &str, password: &str) -> bool {
     async fn sending_row_reopens_marked_and_is_not_sent(cx: &mut TestAppContext) {
         let maybe_posted = Draft {
             post_state: crate::PostState::Sending,
+            from_agent: false,
             ..current_draft("src/login.rs", 3, "    audit(user);")
         };
         let (item, mut cx, database) = open_with_drafts(
@@ -9945,6 +10350,7 @@ fn verify_password(user: &str, password: &str) -> bool {
             outdated: true,
             general: true,
             post_state: PostState::Sending,
+            from_agent: false,
             ..stored_draft("src/login.rs", 2, "    gone();")
         };
         let (item, mut cx, database) = open_with_drafts(cx, vec![stuck.clone(), stuck]).await;

@@ -28,6 +28,7 @@ pub struct PrReviewSettings {
     pub auto_checks: Vec<AutoCheck>,
     /// Names in `auto_checks` that aren't checks, so a typo is shown instead of ignored.
     pub unknown_auto_checks: Vec<String>,
+    pub thoroughness: settings::ReviewThoroughness,
 }
 
 impl Settings for PrReviewSettings {
@@ -61,6 +62,10 @@ impl Settings for PrReviewSettings {
                 .filter(|name| AutoCheck::from_name(name).is_none())
                 .cloned()
                 .collect(),
+            thoroughness: pr_review
+                .and_then(|settings| settings.agent_review.as_ref())
+                .and_then(|agent_review| agent_review.thoroughness)
+                .unwrap_or_default(),
         }
     }
 }

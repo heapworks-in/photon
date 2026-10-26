@@ -1792,7 +1792,11 @@
       }
     ],
     // photon: checks Photon answers itself from evidence.
-    "auto_checks": ["checks_pass", "threads_resolved", "tests_changed", "ran_locally", "no_debug_leftovers"]
+    "auto_checks": ["checks_pass", "threads_resolved", "tests_changed", "ran_locally", "no_debug_leftovers"],
+    // photon: the agent pre-review. "thoroughness" is what it reports: "quiet" (must-fix
+    // correctness and security problems only), "normal" (must fix and should fix) or
+    // "thorough" (everything, small improvements included).
+    "agent_review": { "thoroughness": "normal" }
   },
   // Automatically update Photon. This setting may be ignored on Linux if
   // installed through a package manager.
