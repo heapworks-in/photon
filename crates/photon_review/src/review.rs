@@ -16,9 +16,9 @@ use editor::{
 use futures::future::{FutureExt as _, Shared, join_all, try_join_all};
 use gpui::{
     Action as _, AnyWindowHandle, App, AsyncApp, AsyncWindowContext, BackgroundExecutor, Context,
-    DismissEvent, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Global, MouseButton,
-    PromptLevel, Render, ScrollHandle, SharedString, Stateful, Subscription, Task, WeakEntity,
-    Window, actions, rgb,
+    DismissEvent, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Global,
+    MouseButton, Pixels, PromptLevel, Render, ScrollHandle, SharedString, Stateful, Subscription,
+    Task, WeakEntity, Window, actions, px, rgb,
 };
 use language::{Buffer, Capability, Point};
 use multi_buffer::{ToPoint as _, build_excerpt_ranges};
@@ -87,6 +87,10 @@ const SIMPLIFIED_LEFT_COMMENT_NOTE: &str =
 const VIEWED_DISABLED_TOOLTIP: &str = "Switch to the full diff to mark things viewed";
 const HUNK_CONTEXT_LINES: u32 = 3;
 const COMPOSER_MAX_LINES: u32 = 4;
+const DEFAULT_MAP_WIDTH: Pixels = px(320.);
+const MIN_MAP_WIDTH: Pixels = px(200.);
+const MIN_CODE_WIDTH: Pixels = px(320.);
+const MAP_RESIZE_HANDLE_WIDTH: Pixels = px(6.);
 const TRUST_REASON: &str = "Trust this worktree to find callers";
 const UNCHANGED_BACKGROUND: u32 = 0x07090b;
 const INTERRUPTED_NOTE: &str =
@@ -304,6 +308,7 @@ pub struct ReviewItem {
     show_hidden: bool,
     verdict: ReviewEvent,
     map_scroll: ScrollHandle,
+    map_width: Pixels,
     /// Each file's real base text, kept while the diff shows a simplified one.
     original_bases: HashMap<EntityId, Option<String>>,
     moves: Vec<Move>,
@@ -743,6 +748,33 @@ fn label_renderer(
                         .log_err();
                 })
             })
+            .into_any_element()
+    })
+}
+
+/// The number of open comments, shown on a step or file row; nothing when there are none.
+fn comment_badge(selector: String, count: usize) -> Option<AnyElement> {
+    (count > 0).then(|| {
+        h_flex()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector)
+            .flex_none()
+            .gap_0p5()
+            .child(
+                Icon::new(IconName::Chat)
+                    .size(IconSize::XSmall)
+                    .color(Color::Accent),
+            )
+            .child(
+                Label::new(count.to_string())
+                    .size(LabelSize::XSmall)
+                    .color(Color::Accent),
+            )
+            .tooltip(Tooltip::text(if count == 1 {
+                "1 open comment".to_string()
+            } else {
+                format!("{count} open comments")
+            }))
             .into_any_element()
     })
 }
@@ -1327,6 +1359,7 @@ impl ReviewItem {
             show_hidden: false,
             verdict: ReviewEvent::Comment,
             map_scroll: ScrollHandle::new(),
+            map_width: DEFAULT_MAP_WIDTH,
             original_bases: HashMap::new(),
             moves: Vec::new(),
             _diff_view_task: Task::ready(()),
@@ -2307,12 +2340,23 @@ impl ReviewItem {
         let (Some(agent), Some(workspace)) = (review_agent(cx), self.workspace.clone()) else {
             return;
         };
+        let paths: Vec<String> = self
+            .all_files()
+            .iter()
+            .map(|file| file.diff.path.clone())
+            .collect();
         let prompt = review_prompt(&PromptInput {
             number: self.detail.summary.key.number,
             title: &self.detail.summary.title,
             description: &self.detail.body,
             steps: &self.steps,
             files: self.all_files().iter().map(|file| &file.diff).collect(),
+            checklist: self
+                .checklist_items
+                .iter()
+                .filter(|item| item.paths.is_none() || item.matches_any(&paths))
+                .map(|item| item.text.as_str())
+                .collect(),
         });
         let reply = agent.review(
             workspace,
@@ -2453,7 +2497,7 @@ impl ReviewItem {
             })
         });
         let (line, anchor_text, general, body) = match (comment.line, line_text) {
-            (Some(line), Some(text)) => (line, text, false, comment.body),
+            (Some(line), Some(text)) => (line, text, false, comment.draft_text()),
             (line, _) => {
                 let place = match line {
                     Some(line) => format!("{}:{line}", comment.path),
@@ -2463,7 +2507,7 @@ impl ReviewItem {
                     1,
                     String::new(),
                     true,
-                    format!("`{place}`: {}", comment.body),
+                    format!("`{place}`: {}", comment.draft_text()),
                 )
             }
         };
@@ -4627,12 +4671,69 @@ impl ReviewItem {
             .into_any_element()
     }
 
+    /// `width` is measured from the review's left edge; the code keeps at least
+    /// `MIN_CODE_WIDTH`.
+    fn set_map_width(&mut self, width: Pixels, available: Pixels, cx: &mut Context<Self>) {
+        let widest = (available - MIN_CODE_WIDTH).max(MIN_MAP_WIDTH);
+        self.map_width = width.clamp(MIN_MAP_WIDTH, widest);
+        cx.notify();
+    }
+
+    pub fn map_width(&self) -> Pixels {
+        self.map_width
+    }
+
+    fn render_map_resize_handle(&self, cx: &Context<Self>) -> impl IntoElement {
+        let item = cx.weak_entity();
+        // Inside the map's edge: the code, drawn after the map, would cover anything past it.
+        div()
+            .id("photon-review-map-resize")
+            .debug_selector(|| "photon-review-map-resize".into())
+            .absolute()
+            .top_0()
+            .right_0()
+            .h_full()
+            .w(MAP_RESIZE_HANDLE_WIDTH)
+            .cursor_col_resize()
+            .on_drag(DraggedReviewMap, |dragged, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| dragged.clone())
+            })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_up(MouseButton::Left, move |event, _, cx| {
+                if event.click_count == 2 {
+                    item.update(cx, |item, cx| {
+                        item.map_width = DEFAULT_MAP_WIDTH;
+                        cx.notify();
+                    })
+                    .log_err();
+                    cx.stop_propagation();
+                }
+            })
+    }
+
+    /// Unresolved threads and drafts on these files, wherever they sit in the review.
+    fn comment_count(&self, paths: &[String]) -> usize {
+        let threads = self
+            .detail
+            .threads
+            .iter()
+            .filter(|thread| !thread.is_resolved && paths.contains(&thread.path))
+            .count();
+        let drafts = self
+            .drafts
+            .iter()
+            .filter(|draft| !draft.general && paths.contains(&draft.path))
+            .count();
+        threads + drafts
+    }
+
     fn render_map(&self, cx: &Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let mut map = v_flex()
             .id("photon-review-map")
             .track_scroll(&self.map_scroll)
-            .w(px(320.))
+            .w(self.map_width)
             .flex_none()
             .h_full()
             .p_2()
@@ -4653,6 +4754,7 @@ impl ReviewItem {
             .child(div().children(self.render_checklist(cx)));
         map = map.children(self.render_feedback(cx));
         map = map.children(self.render_outdated_drafts(cx));
+        map = map.children(self.render_unplaced_threads(cx));
         for (index, step) in self.steps.iter().enumerate() {
             let selected = index == self.selected;
             let viewed = self.step_viewed(step);
@@ -4695,6 +4797,7 @@ impl ReviewItem {
                     .child(
                         v_flex()
                             .min_w_0()
+                            .flex_1()
                             .child(
                                 Label::new(step.title.clone())
                                     .truncate()
@@ -4708,7 +4811,11 @@ impl ReviewItem {
                                         .truncate(),
                                 )
                             }),
-                    ),
+                    )
+                    .children(comment_badge(
+                        format!("photon-review-step-comments-{index}"),
+                        self.comment_count(&step.files),
+                    )),
             );
             if !selected {
                 continue;
@@ -4736,6 +4843,10 @@ impl ReviewItem {
                                 .child(Icon::new(icon).size(IconSize::Small).color(color))
                                 .child(div().min_w_0().flex_1().child(
                                     Label::new(path.clone()).size(LabelSize::Small).truncate(),
+                                ))
+                                .children(comment_badge(
+                                    format!("photon-review-file-comments-{path}"),
+                                    self.comment_count(std::slice::from_ref(path)),
                                 ))
                                 .child(
                                     ui::DiffStat::new(
@@ -4822,6 +4933,86 @@ impl ReviewItem {
             }
         }
         map
+    }
+
+    /// Open threads the code can't show: outdated ones, and ones on a whole file.
+    fn render_unplaced_threads(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let threads: Vec<_> = self
+            .detail
+            .threads
+            .iter()
+            .filter(|thread| !thread.is_resolved && thread.line.is_none())
+            .collect();
+        if threads.is_empty() {
+            return None;
+        }
+        let colors = cx.theme().colors();
+        let count = threads.len();
+        Some(
+            v_flex()
+                .debug_selector(|| "photon-review-unplaced-threads".into())
+                .gap_1()
+                .pb_2()
+                .child(
+                    Label::new(if count == 1 {
+                        "1 comment not on a line of this diff".to_string()
+                    } else {
+                        format!("{count} comments not on a line of this diff")
+                    })
+                    .size(LabelSize::Small)
+                    .color(Color::Accent),
+                )
+                .children(threads.into_iter().enumerate().map(|(index, thread)| {
+                    let item = cx.weak_entity();
+                    let thread_id = thread.id.clone();
+                    let pending = self.resolving.contains(&thread.id);
+                    v_flex()
+                        .id(("photon-review-unplaced", index))
+                        .gap_0p5()
+                        .p_1()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(colors.border_variant)
+                        .child(
+                            Label::new(format!(
+                                "{} · {}",
+                                thread.path,
+                                if thread.is_outdated {
+                                    "outdated"
+                                } else {
+                                    "whole file"
+                                }
+                            ))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted)
+                            .truncate(),
+                        )
+                        .children(thread.comments.iter().map(|comment| {
+                            v_flex()
+                                .child(
+                                    Label::new(comment.author.clone())
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                )
+                                .child(Label::new(comment.body.clone()).size(LabelSize::Small))
+                        }))
+                        .child(
+                            h_flex().child(
+                                crate::button(("photon-review-unplaced-resolve", index), "Resolve")
+                                    .style(ButtonStyle::Subtle)
+                                    .disabled(pending)
+                                    .on_click(move |_, _, cx| {
+                                        item.update(cx, |item, cx| {
+                                            item.set_thread_resolved(&thread_id, true, cx)
+                                                .detach_and_log_err(cx)
+                                        })
+                                        .log_err();
+                                    }),
+                            ),
+                        )
+                }))
+                .into_any_element(),
+        )
     }
 
     fn render_outdated_drafts(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
@@ -5121,9 +5312,34 @@ impl Render for ReviewItem {
                     .flex_1()
                     .min_h_0()
                     .items_start()
-                    .child(self.render_map(cx))
+                    .on_drag_move(cx.listener(
+                        |this, event: &DragMoveEvent<DraggedReviewMap>, _, cx| {
+                            this.set_map_width(
+                                event.event.position.x - event.bounds.left(),
+                                event.bounds.size.width,
+                                cx,
+                            );
+                        },
+                    ))
+                    .child(
+                        div()
+                            .relative()
+                            .h_full()
+                            .flex_none()
+                            .child(self.render_map(cx))
+                            .child(self.render_map_resize_handle(cx)),
+                    )
                     .child(self.render_code(cx)),
             )
+    }
+}
+
+#[derive(Clone)]
+struct DraggedReviewMap;
+
+impl Render for DraggedReviewMap {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
     }
 }
 
@@ -7401,6 +7617,124 @@ fn verify_password(user: &str, password: &str) -> bool {
             composer.read_with(&cx, |editor, cx| editor.text(cx)),
             "about     audit(user);\n\n```suggestion\n    audit(user);\n```"
         );
+    }
+
+    #[gpui::test]
+    async fn open_comments_are_counted_on_their_step_and_file(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        assert!(!drawn("photon-review-step-comments-0", &mut cx));
+        assert!(!drawn("photon-review-file-comments-src/login.rs", &mut cx));
+        item.update(&mut cx, |item, cx| {
+            let mut resolved = suggestion_thread(false);
+            resolved.id = "T_resolved".into();
+            resolved.is_resolved = true;
+            item.detail.threads.push(suggestion_thread(false));
+            item.detail.threads.push(resolved);
+            cx.notify();
+        });
+        assert!(drawn("photon-review-step-comments-0", &mut cx));
+        assert!(drawn("photon-review-file-comments-src/login.rs", &mut cx));
+        item.read_with(&cx, |item, _| {
+            assert_eq!(item.comment_count(&["src/login.rs".into()]), 1);
+            assert_eq!(item.comment_count(&["src/other.rs".into()]), 0);
+        });
+    }
+
+    #[gpui::test]
+    async fn drafts_count_as_open_comments(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(
+            cx,
+            vec![current_draft("src/login.rs", 3, "    audit(user);")],
+        )
+        .await;
+        assert!(drawn("photon-review-step-comments-0", &mut cx));
+        item.read_with(&cx, |item, _| {
+            assert_eq!(item.comment_count(&["src/login.rs".into()]), 1)
+        });
+    }
+
+    #[gpui::test]
+    async fn comments_without_a_line_are_listed_in_the_map(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        assert!(!drawn("photon-review-unplaced-threads", &mut cx));
+        item.update(&mut cx, |item, cx| {
+            let mut outdated = suggestion_thread(true);
+            outdated.line = None;
+            item.detail.threads.push(outdated);
+            cx.notify();
+        });
+        assert!(drawn("photon-review-unplaced-threads", &mut cx));
+        item.update(&mut cx, |item, cx| {
+            if let Some(thread) = item.detail.threads.last_mut() {
+                thread.is_resolved = true;
+            }
+            cx.notify();
+        });
+        assert!(!drawn("photon-review-unplaced-threads", &mut cx));
+    }
+
+    fn drag_map_edge(by: Pixels, cx: &mut VisualTestContext) {
+        let start = cx
+            .debug_bounds("photon-review-map-resize")
+            .expect("resize handle is drawn")
+            .center();
+        let end = gpui::point(start.x + by, start.y);
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_move(
+            gpui::point(start.x + by / 2., start.y),
+            MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        cx.simulate_mouse_move(end, MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(end, MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn dragging_the_map_edge_resizes_the_steps(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        let width = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.debug_bounds("photon-review-progress")
+                .expect("map is drawn");
+            item.read_with(cx, |item, _| item.map_width())
+        };
+        assert_eq!(width(&mut cx), DEFAULT_MAP_WIDTH);
+
+        drag_map_edge(px(150.), &mut cx);
+        let wider = width(&mut cx);
+        assert!(
+            (wider - (DEFAULT_MAP_WIDTH + px(150.))).abs() <= px(4.),
+            "{wider:?}"
+        );
+
+        drag_map_edge(px(-1000.), &mut cx);
+        assert_eq!(
+            width(&mut cx),
+            MIN_MAP_WIDTH,
+            "never narrower than the minimum"
+        );
+
+        let handle = cx
+            .debug_bounds("photon-review-map-resize")
+            .expect("handle")
+            .center();
+        for click_count in [1, 2] {
+            cx.simulate_event(gpui::MouseDownEvent {
+                position: handle,
+                button: MouseButton::Left,
+                modifiers: gpui::Modifiers::none(),
+                click_count,
+                first_mouse: false,
+            });
+            cx.simulate_event(gpui::MouseUpEvent {
+                position: handle,
+                button: MouseButton::Left,
+                modifiers: gpui::Modifiers::none(),
+                click_count,
+            });
+        }
+        assert_eq!(width(&mut cx), DEFAULT_MAP_WIDTH, "double-click resets");
     }
 
     fn suggestion_thread(outdated: bool) -> ReviewThread {
