@@ -50,8 +50,8 @@ use crate::{
     parse_author_boxes, read_team_checklists, review_block,
 };
 use crate::{
-    CallerMark, ChangedFunction, Checkout, ChecksState, ContextCache, ContextError, ContextExcerpt,
-    Draft, FetchedCheckout, FileAnalysis, FileDiff, FileKind, FileStatus, FunctionContext, GhError,
+    CallerMark, ChangedFunction, Checkout, ContextCache, ContextError, ContextExcerpt, Draft,
+    FetchedCheckout, FileAnalysis, FileDiff, FileKind, FileStatus, FunctionContext, GhError,
     GhRunner, LoadedFile, MapFile, MapFunction, PostState, PrDetail, PrKey, PrSummary, Reanchor,
     RepoId, ReviewDb, ReviewEvent, ReviewThread, SUMMARY_SLOT, Side, SinceReviewPlan, Step,
     ToggleChangesSinceReview, Tracked, analyse_loaded_file, auth_status_request, base_text,
@@ -4207,12 +4207,6 @@ impl ReviewItem {
 
     fn render_header(&self, cx: &Context<Self>) -> impl IntoElement {
         let summary = &self.detail.summary;
-        let checks = match summary.checks {
-            ChecksState::Passing => Some((IconName::Check, Color::Success, "Checks passing")),
-            ChecksState::Failing => Some((IconName::XCircle, Color::Error, "Checks failing")),
-            ChecksState::Pending => Some((IconName::Circle, Color::Warning, "Checks pending")),
-            ChecksState::Unknown => None,
-        };
         let files = self.all_files().len();
         h_flex()
             .gap_2()
@@ -4235,13 +4229,6 @@ impl ReviewItem {
                                 .color(Color::Accent),
                         ),
                     )
-                    .children(checks.map(|(icon, color, text)| {
-                        div()
-                            .id("photon-review-checks")
-                            .flex_none()
-                            .tooltip(Tooltip::text(text))
-                            .child(Icon::new(icon).size(IconSize::Small).color(color))
-                    }))
                     .child(
                         ui::DiffStat::new(
                             "photon-review-diff-stat",
