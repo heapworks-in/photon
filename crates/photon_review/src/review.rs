@@ -58,11 +58,13 @@ use crate::{
     build_loaded_file, build_review_map, call_edges, caller_touched, candidate_repos,
     classify_caller, classify_path, commentable_lines, context::buffer_path, context_excerpts,
     deleted_lines, detail_request, fetch_checkout, fetch_url, find_clone, finish_checkout,
-    functions, gh_runner, git_diff, is_sendable, landing_note, parse_auth_status, parse_detail,
+    functions, gh_runner, git_diff, is_sendable, landing_note, merge_error_message, merge_request,
+    parse_auth_status, parse_detail,
     parse_mutation, parse_reply, place, plan_since_review, reanchor,
     refuse_head_change_under_open_window, reply_request, reply_slot, resolve_request,
     review_request, review_root, since_review_files, viewed_request,
 };
+use crate::{CheckOutcome, MergeMethod, PrState, Readiness, remove_from_inbox};
 use crate::{Move, ViewFile, is_generated, open_feedback, push_command, simplified_bases};
 use crate::{
     apply_suggestion, commit_file_request, file_at_commit_request, parse_file_contents,
@@ -280,6 +282,8 @@ pub struct ReviewItem {
     summary_editor: Entity<Editor>,
     submitting: bool,
     submit_error: Option<SharedString>,
+    merging: bool,
+    merge_error: Option<SharedString>,
     thread_errors: HashMap<String, SharedString>,
     file_errors: HashMap<String, SharedString>,
     submit_note: Option<SharedString>,
@@ -1335,6 +1339,8 @@ impl ReviewItem {
             summary_editor,
             submitting: false,
             submit_error: None,
+            merging: false,
+            merge_error: None,
             thread_errors: HashMap::new(),
             file_errors: HashMap::new(),
             submit_note: None,
@@ -2466,6 +2472,85 @@ impl ReviewItem {
         workspace.update(cx, |workspace, cx| {
             crate::run_locally(summary, workspace, window, cx).detach_and_log_err(cx)
         });
+    }
+
+    /// Asks first, then merges the head this review shows, so newer commits never go in unseen.
+    pub fn merge(&mut self, method: MergeMethod, window: &mut Window, cx: &mut Context<Self>) {
+        if self.merging {
+            return;
+        }
+        let summary = &self.detail.summary;
+        let number = summary.key.number;
+        let message = format!("{} #{number} into {}?", method.verb(), summary.base_ref);
+        let unsent = self
+            .drafts
+            .iter()
+            .filter(|draft| !draft.body.trim().is_empty())
+            .count();
+        let detail = (unsent > 0).then(|| {
+            format!(
+                "Your {unsent} unsent comment{} won't be posted.",
+                if unsent == 1 { "" } else { "s" }
+            )
+        });
+        let answer = window.prompt(
+            PromptLevel::Info,
+            &message,
+            detail.as_deref(),
+            &["Merge", "Cancel"],
+            cx,
+        );
+        let request = merge_request(
+            &summary.key.host,
+            &summary.node_id,
+            method,
+            &self.checkout.head_sha,
+        );
+        let runner = gh_runner(cx);
+        // Detached: a merge under way finishes even if the review closes.
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return Ok(());
+            }
+            this.update(cx, |this, cx| {
+                this.merging = true;
+                this.merge_error = None;
+                cx.notify();
+            })?;
+            let result = match runner.run(request).await {
+                Ok(output) => parse_mutation(&output),
+                Err(error) => Err(error.into()),
+            };
+            this.update_in(cx, |this, window, cx| {
+                this.merging = false;
+                match result {
+                    Ok(()) => this.merged(window, cx),
+                    Err(error) => {
+                        this.merge_error =
+                            Some(merge_error_message(&format!("{error:#}")).into());
+                    }
+                }
+                cx.notify();
+            })
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn merged(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.detail.state = PrState::Merged;
+        let key = self.detail.summary.key.clone();
+        self.show_toast(
+            Toast::new(
+                NotificationId::unique::<NoteToast>(),
+                format!("Merged #{}", key.number),
+            )
+            .autohide(),
+            cx,
+        );
+        if let Some(workspace) = self.workspace.as_ref().and_then(WeakEntity::upgrade) {
+            workspace.update(cx, |workspace, cx| remove_from_inbox(workspace, &key, cx));
+        }
+        self.refresh_detail(window, cx).detach_and_log_err(cx);
     }
 
     /// After a submit from the popover: what came of it, as a toast.
@@ -3999,6 +4084,8 @@ impl ReviewItem {
                     .gap_1()
                     .child(self.render_view_menu(cx))
                     .child(self.render_more_menu(cx))
+                    .child(self.render_readiness())
+                    .children(self.render_merge(cx))
                     .child(self.render_submit_controls(cx)),
             )
     }
@@ -4312,6 +4399,158 @@ impl ReviewItem {
         div()
             .debug_selector(|| "photon-review-more".into())
             .child(menu)
+    }
+
+    /// What matters most about merging, opening the checks, review decision and mergeability.
+    fn render_readiness(&self) -> impl IntoElement {
+        let readiness = self.detail.readiness();
+        let color = match readiness {
+            Readiness::Merged => Color::Accent,
+            Readiness::Conflicts | Readiness::ChecksFailing => Color::Error,
+            Readiness::ChangesRequested | Readiness::ReviewRequired | Readiness::Behind(_) => {
+                Color::Warning
+            }
+            Readiness::Ready => Color::Success,
+            Readiness::Closed
+            | Readiness::Draft
+            | Readiness::ChecksRunning
+            | Readiness::Checking => Color::Muted,
+        };
+        let merge = self.detail.merge.clone();
+        let base = self.detail.summary.base_ref.clone();
+        let menu = ui::PopoverMenu::new("photon-review-readiness")
+            .trigger(
+                ui::ButtonLike::new("photon-review-readiness-trigger").child(
+                    ui::Chip::new(readiness.label())
+                        .label_color(color)
+                        .label_size(LabelSize::Small),
+                ),
+            )
+            .anchor(gpui::Anchor::TopRight)
+            .menu(move |window, cx| {
+                let merge = merge.clone();
+                let base = base.clone();
+                Some(ui::ContextMenu::build(window, cx, move |mut menu, _, _| {
+                    if !merge.checks.is_empty() {
+                        menu = menu.header("Checks");
+                    }
+                    for check in &merge.checks {
+                        let (icon, color) = match check.outcome {
+                            CheckOutcome::Passed => (IconName::Check, Color::Success),
+                            CheckOutcome::Failed => (IconName::XCircle, Color::Error),
+                            CheckOutcome::Running => (IconName::Circle, Color::Warning),
+                        };
+                        let url = check.url.clone();
+                        menu = menu.item(
+                            ui::ContextMenuEntry::new(format!(
+                                "{}: {}",
+                                check.name,
+                                check.outcome.label()
+                            ))
+                            .icon(icon)
+                            .icon_color(color)
+                            .disabled(url.is_none())
+                            .handler(move |_, cx| {
+                                if let Some(url) = &url {
+                                    cx.open_url(url);
+                                }
+                            }),
+                        );
+                    }
+                    let review = match merge.review_decision.as_deref() {
+                        Some("APPROVED") => "Approved",
+                        Some("CHANGES_REQUESTED") => "Changes requested",
+                        Some("REVIEW_REQUIRED") => "Review required",
+                        _ => "No review required",
+                    };
+                    let mergeability = match merge.mergeable.as_str() {
+                        "CONFLICTING" => format!("Conflicts with {base}"),
+                        "MERGEABLE" if merge.merge_state == "BEHIND" => {
+                            format!("No conflicts, behind {base}")
+                        }
+                        "MERGEABLE" => "No conflicts".to_string(),
+                        _ => "Checking…".to_string(),
+                    };
+                    menu.header("Review")
+                        .label(review)
+                        .header("Merge")
+                        .label(mergeability)
+                }))
+            });
+        div()
+            .debug_selector(|| "photon-review-readiness".into())
+            .child(menu)
+    }
+
+    /// Merge with the repository's default method, the other allowed ones in the menu. Blocks
+    /// other than drafts and conflicts are GitHub's to report when the merge is tried.
+    fn render_merge(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if self.detail.state != PrState::Open {
+            return None;
+        }
+        let (primary, others) = self.detail.merge.methods.split_first()?;
+        let primary = *primary;
+        let blocked = match self.detail.readiness() {
+            Readiness::Draft => {
+                Some("A draft can't be merged. Mark it ready for review first.".to_string())
+            }
+            Readiness::Conflicts => Some(format!(
+                "Resolve the conflicts with {} first",
+                self.detail.summary.base_ref
+            )),
+            _ => None,
+        };
+        let disabled = blocked.is_some() || self.merging;
+        let button = crate::button("photon-review-merge-button", primary.label())
+            .disabled(disabled)
+            .when_some(blocked, |button, reason| {
+                button.tooltip(Tooltip::text(reason))
+            })
+            .on_click(cx.listener(move |this, _, window, cx| this.merge(primary, window, cx)));
+        let control = if others.is_empty() {
+            button.style(ButtonStyle::Outlined).into_any_element()
+        } else {
+            let item = cx.weak_entity();
+            let others = others.to_vec();
+            let menu = ui::PopoverMenu::new("photon-review-merge-methods")
+                .trigger_with_tooltip(
+                    IconButton::new("photon-review-merge-methods-trigger", IconName::ChevronDown)
+                        .icon_size(IconSize::XSmall)
+                        .disabled(disabled),
+                    Tooltip::text("Other ways to merge"),
+                )
+                .anchor(gpui::Anchor::TopRight)
+                .menu(move |window, cx| {
+                    let item = item.clone();
+                    let others = others.clone();
+                    Some(ui::ContextMenu::build(window, cx, move |mut menu, _, _| {
+                        for method in &others {
+                            let item = item.clone();
+                            let method = *method;
+                            menu = menu.entry(method.label(), None, move |window, cx| {
+                                item.update(cx, |item, cx| item.merge(method, window, cx))
+                                    .log_err();
+                            });
+                        }
+                        menu
+                    }))
+                });
+            ui::SplitButton::new(
+                button,
+                div()
+                    .debug_selector(|| "photon-review-merge-methods".into())
+                    .child(menu)
+                    .into_any_element(),
+            )
+            .style(ui::SplitButtonStyle::Outlined)
+            .into_any_element()
+        };
+        Some(
+            div()
+                .debug_selector(|| "photon-review-merge".into())
+                .child(control)
+                .into_any_element(),
+        )
     }
 
     /// The one primary action: Submit review, or Push changes… on your own PR, where Submit
@@ -5307,6 +5546,15 @@ impl Render for ReviewItem {
             .on_action(cx.listener(Self::add_comment))
             .on_action(cx.listener(Self::toggle_changes_since_review))
             .child(self.render_header(cx))
+            .children(self.merge_error.clone().map(|error| {
+                div()
+                    .debug_selector(|| "photon-review-merge-error".into())
+                    .px_2()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border)
+                    .child(Label::new(error).size(LabelSize::Small).color(Color::Error))
+            }))
             .child(
                 h_flex()
                     .flex_1()
@@ -9649,5 +9897,152 @@ fn verify_password(user: &str, password: &str) -> bool {
         item.read_with(&cx, |item, _| {
             assert_eq!(item.submit_error.as_deref(), Some("gh: HTTP 422"))
         });
+    }
+
+    fn is_merge(request: &crate::GhRequest) -> bool {
+        request
+            .stdin
+            .as_deref()
+            .is_some_and(|stdin| stdin.contains("mergePullRequest"))
+    }
+
+    const MERGED: &str = r#"{"data":{"mergePullRequest":{"pullRequest":{"state":"MERGED"}}}}"#;
+
+    fn merged_detail() -> String {
+        DETAIL.replace(r#""state": "OPEN""#, r#""state": "MERGED""#)
+    }
+
+    fn readiness(item: &Entity<ReviewItem>, cx: &mut VisualTestContext) -> String {
+        item.read_with(cx, |item, _| item.detail.readiness().label())
+    }
+
+    #[gpui::test]
+    async fn the_readiness_pill_lists_checks_and_opens_one(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        assert_eq!(readiness(&item, &mut cx), "Ready to merge");
+        click("photon-review-readiness", &mut cx);
+        assert!(drawn("MENU_ITEM-build: passed", &mut cx));
+        assert!(drawn("MENU_ITEM-lint: running", &mut cx));
+        assert!(drawn("MENU_ITEM-ci/deploy: failed", &mut cx));
+        click("MENU_ITEM-lint: running", &mut cx);
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some("https://github.com/acme/web/runs/2")
+        );
+    }
+
+    #[gpui::test]
+    async fn the_pill_follows_each_refresh(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        let fake = install_fake(&mut cx);
+        fake.respond(
+            is_detail,
+            Ok(DETAIL.replace(r#""mergeable": "MERGEABLE""#, r#""mergeable": "UNKNOWN""#)),
+        );
+        let refresh = item.update_in(&mut cx, |item, window, cx| item.refresh_detail(window, cx));
+        cx.run_until_parked();
+        refresh.now_or_never().expect("refreshed").expect("refresh");
+        assert_eq!(readiness(&item, &mut cx), "Checking…");
+        assert!(drawn("photon-review-readiness", &mut cx));
+        fake.respond(is_detail, Ok(DETAIL.into()));
+        let refresh = item.update_in(&mut cx, |item, window, cx| item.refresh_detail(window, cx));
+        cx.run_until_parked();
+        refresh.now_or_never().expect("refreshed").expect("refresh");
+        assert_eq!(readiness(&item, &mut cx), "Ready to merge");
+    }
+
+    #[gpui::test]
+    async fn merge_asks_then_merges_the_reviewed_head(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, submit_drafts()).await;
+        let fake = install_fake(&mut cx);
+
+        click("photon-review-merge", &mut cx);
+        assert_eq!(
+            cx.pending_prompt(),
+            Some((
+                "Squash and merge #482 into main?".to_string(),
+                "Your 3 unsent comments won't be posted.".to_string()
+            ))
+        );
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert!(fake.requests().is_empty());
+
+        fake.respond(is_merge, Ok(MERGED.into()));
+        fake.respond(is_detail, Ok(merged_detail()));
+        click("photon-review-merge", &mut cx);
+        cx.simulate_prompt_answer("Merge");
+        cx.run_until_parked();
+        let merges: Vec<_> = fake.requests().into_iter().filter(is_merge).collect();
+        assert_eq!(merges.len(), 1);
+        assert_eq!(
+            request_json(&merges[0])["variables"],
+            json!({
+                "pullRequestId": "PR_482",
+                "mergeMethod": "SQUASH",
+                "expectedHeadOid": "head",
+            })
+        );
+        assert_eq!(readiness(&item, &mut cx), "Merged");
+        assert!(!drawn("photon-review-merge", &mut cx));
+        assert!(!drawn("photon-review-merge-error", &mut cx));
+    }
+
+    #[gpui::test]
+    async fn the_merge_menu_offers_only_the_other_allowed_methods(cx: &mut TestAppContext) {
+        let (_item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        let fake = install_fake(&mut cx);
+        click("photon-review-merge-methods", &mut cx);
+        assert!(drawn("MENU_ITEM-Merge", &mut cx));
+        assert!(!drawn("MENU_ITEM-Squash and Merge", &mut cx));
+        assert!(!drawn("MENU_ITEM-Rebase and Merge", &mut cx));
+        fake.respond(is_merge, Ok(MERGED.into()));
+        fake.respond(is_detail, Ok(merged_detail()));
+        click("MENU_ITEM-Merge", &mut cx);
+        let (message, _) = cx.pending_prompt().expect("prompt");
+        assert_eq!(message, "Merge #482 into main?");
+        cx.simulate_prompt_answer("Merge");
+        cx.run_until_parked();
+        let merges: Vec<_> = fake.requests().into_iter().filter(is_merge).collect();
+        assert_eq!(request_json(&merges[0])["variables"]["mergeMethod"], "MERGE");
+    }
+
+    #[gpui::test]
+    async fn a_moved_head_is_explained_and_nothing_merges(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        let fake = install_fake(&mut cx);
+        fake.respond(
+            is_merge,
+            Ok(r#"{"data":null,"errors":[{"message":"Head branch was modified. Review and try the merge again."}]}"#.into()),
+        );
+        click("photon-review-merge", &mut cx);
+        cx.simulate_prompt_answer("Merge");
+        cx.run_until_parked();
+        assert!(drawn("photon-review-merge-error", &mut cx));
+        item.read_with(&cx, |item, _| {
+            assert_eq!(item.merge_error.as_deref(), Some(crate::HEAD_MOVED_MESSAGE));
+            assert_eq!(item.detail.state, PrState::Open);
+        });
+        assert!(drawn("photon-review-merge", &mut cx));
+    }
+
+    #[gpui::test]
+    async fn drafts_and_conflicts_cannot_be_merged(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        install_fake(&mut cx);
+        for block in ["draft", "conflicts"] {
+            item.update(&mut cx, |item, cx| {
+                item.detail.merge.is_draft = block == "draft";
+                item.detail.merge.mergeable = if block == "conflicts" {
+                    "CONFLICTING".into()
+                } else {
+                    "MERGEABLE".into()
+                };
+                cx.notify();
+            });
+            click("photon-review-merge", &mut cx);
+            assert!(!cx.has_pending_prompt(), "{block}");
+        }
+        assert_eq!(readiness(&item, &mut cx), "Conflicts");
     }
 }

@@ -74,6 +74,12 @@ pub(crate) fn init_inbox(cx: &mut App) {
     .detach();
 }
 
+pub fn remove_from_inbox(workspace: &Workspace, key: &PrKey, cx: &mut App) {
+    if let Some(panel) = workspace.panel::<InboxPanel>(cx) {
+        panel.update(cx, |panel, cx| panel.remove_pull_request(key, cx));
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct HostInbox {
     pub host: String,
@@ -269,6 +275,19 @@ impl InboxPanel {
             })
             .log_err();
         });
+        cx.notify();
+    }
+
+    /// Drops a pull request merged from its review, as a reload would, without asking GitHub.
+    pub fn remove_pull_request(&mut self, key: &PrKey, cx: &mut Context<Self>) {
+        let InboxState::Loaded(hosts) = &mut self.state else {
+            return;
+        };
+        for inbox in hosts.iter_mut().filter_map(|host| host.result.as_mut().ok()) {
+            for (_, rows) in &mut inbox.sections {
+                rows.retain(|row| row.key != *key);
+            }
+        }
         cx.notify();
     }
 
@@ -1868,5 +1887,37 @@ mod tests {
         cx.run_until_parked();
         let (_, action) = panel.read_with(&cx, |panel, _| first_row(panel));
         assert_eq!(action, "Continue review");
+    }
+
+    #[gpui::test]
+    async fn a_merged_pull_request_leaves_the_inbox_without_a_reload(cx: &mut TestAppContext) {
+        let fake = FakeGh::new();
+        init_test(cx, &fake);
+        respond_auth(&fake, AUTH_ONE_HOST);
+        respond_inbox(&fake, "github.com");
+        let (workspace, panel, mut cx) = add_panel(cx, &[ORIGIN]).await;
+        set_active(&panel, true, &mut cx);
+        let keys = |panel: &InboxPanel| {
+            let InboxState::Loaded(hosts) = panel.state() else {
+                panic!("expected Loaded");
+            };
+            let inbox = hosts[0].result.as_ref().expect("inbox");
+            inbox
+                .sections
+                .iter()
+                .flat_map(|(_, rows)| rows.iter().map(|row| row.key.clone()))
+                .collect::<Vec<_>>()
+        };
+        let merged = panel.read_with(&cx, |panel, _| keys(panel)[0].clone());
+        let requests = fake.requests().len();
+        workspace.update(&mut cx, |workspace, cx| {
+            remove_from_inbox(workspace, &merged, cx)
+        });
+        panel.read_with(&cx, |panel, _| {
+            let left = keys(panel);
+            assert!(!left.is_empty());
+            assert!(!left.contains(&merged));
+        });
+        assert_eq!(fake.requests().len(), requests);
     }
 }
