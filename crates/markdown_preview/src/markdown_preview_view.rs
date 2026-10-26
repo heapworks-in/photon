@@ -203,7 +203,29 @@ impl MarkdownPreviewView {
                 && Self::is_markdown_file(&editor, cx)
                 && let Some(pane) = workspace.pane_for_item_id(item.item_id())
             {
-                Self::open_preview_in_pane(workspace, editor, pane, window, cx);
+                // photon: the preview takes the editor's tab, so ⌘⇧V flips one tab between source
+                // and preview. A dirty editor keeps its tab, as when Markdown opens in preview.
+                let replaces_editor = !item.is_dirty(cx);
+                let replaces_temporary_editor =
+                    replaces_editor && pane.read(cx).is_active_preview_item(item.item_id());
+                let preview = Self::activate_or_add_preview(
+                    workspace,
+                    editor,
+                    pane.clone(),
+                    true,
+                    true,
+                    window,
+                    cx,
+                );
+                if replaces_editor {
+                    pane.update(cx, |pane, cx| {
+                        if replaces_temporary_editor {
+                            pane.replace_preview_item_id(preview.entity_id(), window, cx);
+                        } else {
+                            pane.remove_item(item.item_id(), false, false, window, cx);
+                        }
+                    });
+                }
             }
         });
 
@@ -1137,6 +1159,8 @@ impl MarkdownPreviewView {
                         PathStyle::local(),
                         cx,
                     )
+                    // photon: a missing image shows the "Failed to load" card instead of nothing.
+                    .or_else(|| (!dest_url.starts_with("data:")).then(missing_image_source))
                 }
             })
             .on_url_click({
@@ -1172,17 +1196,40 @@ impl MarkdownPreviewView {
             let editor_for_checkbox = active_editor.clone();
             let view_handle = cx.entity().downgrade();
             markdown_element = markdown_element
-                .on_source_click(move |source_index, click_count, window, cx| {
-                    if click_count == 1 {
-                        Self::change_selection_to_source_index(
-                            &active_editor,
-                            source_index,
-                            false,
-                            window,
-                            cx,
-                        );
+                .on_source_click({
+                    let view_handle = view_handle.clone();
+                    move |source_index, click_count, window, cx| {
+                        if click_count == 1 {
+                            Self::change_selection_to_source_index(
+                                &active_editor,
+                                source_index,
+                                false,
+                                window,
+                                cx,
+                            );
+                        }
+                        // photon: double-click edits the source where you're reading.
+                        if click_count == 2 {
+                            Self::change_selection_to_source_index(
+                                &active_editor,
+                                source_index,
+                                false,
+                                window,
+                                cx,
+                            );
+                            view_handle
+                                .update(cx, |view, cx| {
+                                    view.close_and_return_to_editor(
+                                        &CloseAndReturnToEditor,
+                                        window,
+                                        cx,
+                                    )
+                                })
+                                .log_err();
+                            return true;
+                        }
+                        false
                     }
-                    false
                 })
                 .on_checkbox_toggle(move |source_range, new_checked, window, cx| {
                     Self::apply_checkbox_toggle_to_editor(
@@ -1521,6 +1568,15 @@ fn open_preview_path_with_position(
         anyhow::Ok(())
     });
     task.detach_and_notify_err(workspace_for_error, window, cx);
+}
+
+// photon: an image source that fails to load, so the image's fallback card shows.
+fn missing_image_source() -> ImageSource {
+    ImageSource::Custom(Arc::new(|_, _| {
+        Some(Err(gpui::ImageCacheError::Other(Arc::new(
+            anyhow::anyhow!("image not found"),
+        ))))
+    }))
 }
 
 fn resolve_preview_image(
@@ -3404,6 +3460,155 @@ mod tests {
         );
     }
 
+    async fn open_markdown_source(
+        cx: &mut TestAppContext,
+        contents: &str,
+    ) -> (WindowHandle<MultiWorkspace>, Entity<Editor>) {
+        let (project, _, multi_workspace) =
+            markdown_workspace(cx, json!({ "note.md": contents }), false).await;
+        let editor = open_project_file(cx, &project, &multi_workspace, "note.md", None, true)
+            .await
+            .downcast::<Editor>()
+            .expect("an editor");
+        cx.run_until_parked();
+        (multi_workspace, editor)
+    }
+
+    fn pane_item_ids(
+        cx: &mut TestAppContext,
+        multi_workspace: &WindowHandle<MultiWorkspace>,
+    ) -> Vec<gpui::EntityId> {
+        multi_workspace
+            .update(cx, |multi_workspace, _, cx| {
+                let workspace = multi_workspace.workspace().read(cx);
+                workspace
+                    .active_pane()
+                    .read(cx)
+                    .items()
+                    .map(|item| item.item_id())
+                    .collect()
+            })
+            .unwrap()
+    }
+
+    fn dispatch_open_preview(
+        cx: &mut TestAppContext,
+        multi_workspace: &WindowHandle<MultiWorkspace>,
+    ) {
+        multi_workspace
+            .update(cx, |_, window, cx| {
+                window.dispatch_action(Box::new(crate::OpenPreview), cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    fn active_preview(
+        cx: &mut TestAppContext,
+        multi_workspace: &WindowHandle<MultiWorkspace>,
+    ) -> Entity<MarkdownPreviewView> {
+        multi_workspace
+            .update(cx, |multi_workspace, _, cx| {
+                multi_workspace
+                    .workspace()
+                    .read(cx)
+                    .active_item_as::<MarkdownPreviewView>(cx)
+                    .expect("the preview is the active item")
+            })
+            .unwrap()
+    }
+
+    #[gpui::test]
+    async fn photon_open_preview_flips_one_tab_between_source_and_preview(cx: &mut TestAppContext) {
+        let (multi_workspace, editor) = open_markdown_source(cx, "# Note\n\nBody text\n").await;
+        dispatch_open_preview(cx, &multi_workspace);
+        let preview = active_preview(cx, &multi_workspace);
+        assert_eq!(
+            pane_item_ids(cx, &multi_workspace),
+            [preview.entity_id()],
+            "the preview takes the editor's tab"
+        );
+
+        dispatch_close_and_return_to_editor(cx, &multi_workspace, &preview);
+        cx.run_until_parked();
+        assert_editor_is_active_and_focused(cx, &multi_workspace, &editor);
+        assert_eq!(pane_item_ids(cx, &multi_workspace), [editor.entity_id()]);
+
+        dispatch_open_preview(cx, &multi_workspace);
+        let preview = active_preview(cx, &multi_workspace);
+        assert_eq!(pane_item_ids(cx, &multi_workspace), [preview.entity_id()]);
+    }
+
+    #[gpui::test]
+    async fn photon_open_preview_keeps_a_dirty_editor_tab(cx: &mut TestAppContext) {
+        let (multi_workspace, editor) = open_markdown_source(cx, "# Note\n").await;
+        editor.update(cx, |editor, cx| {
+            let end = editor.buffer().read(cx).snapshot(cx).len();
+            editor.edit([(end..end, "unsaved\n")], cx);
+        });
+        dispatch_open_preview(cx, &multi_workspace);
+        let preview = active_preview(cx, &multi_workspace);
+        assert_eq!(
+            pane_item_ids(cx, &multi_workspace),
+            [editor.entity_id(), preview.entity_id()]
+        );
+    }
+
+    #[gpui::test]
+    async fn photon_double_click_in_preview_edits_the_source_there(cx: &mut TestAppContext) {
+        let source = "# Note\n\nIntro\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let (multi_workspace, editor) = open_markdown_source(cx, source).await;
+        dispatch_open_preview(cx, &multi_workspace);
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        cx.run_until_parked();
+        let table = cx
+            .debug_bounds("markdown_table")
+            .expect("the table is drawn")
+            .center();
+        for click_count in [1, 2] {
+            cx.simulate_event(MouseDownEvent {
+                position: table,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+                click_count,
+                first_mouse: false,
+            });
+            cx.simulate_event(MouseUpEvent {
+                position: table,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+                click_count,
+            });
+        }
+        cx.run_until_parked();
+
+        assert_editor_is_active_and_focused(cx, &multi_workspace, &editor);
+        let table_start = source.find('|').expect("table") as u32;
+        editor.update_in(cx, |editor, window, cx| {
+            let snapshot = editor.snapshot(window, cx);
+            let head = editor.selections.newest::<Point>(&snapshot).head();
+            assert!(
+                head.row >= 4,
+                "the cursor lands in the table (from byte {table_start}), got {head:?}"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn photon_missing_image_shows_its_fallback(cx: &mut TestAppContext) {
+        let source = "# Note\n\n![diagram](missing.png)\n";
+        let (multi_workspace, _) = open_markdown_source(cx, source).await;
+        dispatch_open_preview(cx, &multi_workspace);
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        cx.run_until_parked();
+        let image_start = source.find('!').expect("image");
+        assert!(
+            cx.debug_bounds(format!("markdown_image_{image_start}").leak())
+                .is_some(),
+            "a missing image is still drawn, as its fallback card"
+        );
+    }
+
     #[gpui::test]
     async fn double_click_editor_and_preview_tabs(cx: &mut TestAppContext) {
         let (multi_workspace, _) = open_markdown_file(cx, "note.md", "# Note\n").await;
@@ -4771,8 +4976,22 @@ mod tests {
             let state = AppState::test(cx);
             editor::init(cx);
             crate::init(cx);
+            // photon: Photon opens Markdown in preview by default; these tests start from Zed's
+            // default and turn it on themselves.
+            set_auto_preview_enabled(cx, false);
             state
         })
+    }
+
+    #[gpui::test]
+    fn photon_markdown_opens_in_preview_by_default(cx: &mut App) {
+        cx.set_global(db::AppDatabase::test_new());
+        AppState::test(cx);
+        crate::init(cx);
+        assert!(
+            <crate::markdown_preview_settings::MarkdownPreviewSettings as settings::Settings>::get_global(cx)
+                .open_markdown_files_in_preview
+        );
     }
 
     async fn markdown_workspace(
