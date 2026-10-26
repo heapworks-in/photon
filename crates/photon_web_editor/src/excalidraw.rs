@@ -340,6 +340,8 @@ fn excalidraw_ships_its_licence() {
 const SESSION_HARNESS: &str = r##"
 const session = await import("data:text/javascript," + encodeURIComponent(process.env.SESSION));
 const sent = [];
+// Sends go through a promise queue: `settle` lets it drain.
+const settle = () => new Promise((resolve) => setImmediate(resolve));
 // A fake clock: `advance` runs the timers that fall due, in order.
 let now = 0;
 let nextTimer = 0;
@@ -348,7 +350,7 @@ const fakeTimers = {
   setTimeout: (callback, ms) => { timers.set(nextTimer, { callback, due: now + ms }); return nextTimer++; },
   clearTimeout: (id) => { timers.delete(id); },
 };
-const advance = (ms) => {
+const advance = async (ms) => {
   const end = now + ms;
   for (;;) {
     let next = null;
@@ -357,8 +359,10 @@ const advance = (ms) => {
     timers.delete(next[0]);
     now = next[1].due;
     next[1].callback();
+    await settle();
   }
   now = end;
+  await settle();
 };
 const runTimers = () => advance(1e9);
 // Stand-ins for Excalidraw: a scene version is the sum of element versions.
@@ -368,98 +372,167 @@ const restore = (data) => {
   return { elements: data ? data.elements ?? [] : [], appState: { viewBackgroundColor: data?.appState?.viewBackgroundColor ?? "#ffffff", gridModeEnabled: false, gridSize: 20, gridStep: 5 }, files: {} };
 };
 const serialize = (elements, appState) => JSON.stringify({ type: "excalidraw", elements, appState });
-const make = () => session.createSession({ restore, serialize, sceneVersion, send: (m) => sent.push(m), timers: fakeTimers });
+// An SVG embeds the scene as JSON in a comment; one without it has no scene.
+const serializeSvg = async (elements, appState) => { await settle(); return `<svg><!-- scene:${serialize(elements, appState)} --></svg>`; };
+const decodeSvg = async (text) => {
+  await settle();
+  const match = text.match(/<!-- scene:(.*) -->/);
+  if (!match) return null;
+  if (match[1] === "damaged") throw new Error("FAILED");
+  return restore(JSON.parse(match[1]));
+};
+const options = { restore, serialize, decodeSvg, serializeSvg, sceneVersion, send: (m) => sent.push(m), timers: fakeTimers };
+const make = (overrides = {}) => session.createSession({ ...options, ...overrides });
 const failures = [];
 const expect = (label, condition) => { if (!condition) failures.push(label + ": " + JSON.stringify(sent)); };
 
 const file = JSON.stringify({ type: "excalidraw", version: 2, elements: [{ id: "a", version: 3 }], appState: { viewBackgroundColor: "#ffffff" } });
 
 let s = make();
-let scene = s.load(file);
+let scene = await s.load(file, "a.excalidraw");
 s.change(scene.elements, scene.appState, {});
-runTimers();
+await runTimers();
 expect("load sends nothing", sent.length === 0);
 
 s.change([{ id: "a", version: 4 }], scene.appState, {});
+await settle();
 expect("the first change is sent at once", sent.length === 1 && sent[0].type === "changed" && JSON.parse(sent[0].text).elements[0].version === 4);
-runTimers();
+await runTimers();
 expect("a sent change is not sent again", sent.length === 1);
 s.change([{ id: "a", version: 4 }], scene.appState, {});
-runTimers();
+await runTimers();
 expect("an unchanged scene is not resent", sent.length === 1);
 
 s.change(scene.elements, { viewBackgroundColor: "#000000" }, {});
-runTimers();
+await runTimers();
 expect("a background change is sent", sent.length === 2 && sent[1].type === "changed");
 
 const background = { ...scene.appState, viewBackgroundColor: "#000000" };
 for (const [field, value] of [["gridModeEnabled", true], ["gridSize", 40], ["gridStep", 10]]) {
   const before = sent.length;
   s.change(scene.elements, { ...background, [field]: value }, {});
-  runTimers();
+  await runTimers();
   expect(field + " change is sent", sent.length === before + 1 && sent[before].type === "changed");
   s.change(scene.elements, background, {});
-  runTimers();
+  await runTimers();
 }
 
 sent.length = 0;
 s.change([{ id: "a", version: 9 }], scene.appState, {});
 s.change([{ id: "a", version: 10 }], scene.appState, {});
-s.flush(7);
+await s.flush(7);
 expect("flush sends the pending change then flushed", sent.length === 3 && sent[1].type === "changed" && JSON.parse(sent[1].text).elements[0].version === 10 && sent[2].type === "flushed" && sent[2].request === 7);
-runTimers();
+await runTimers();
 expect("a flushed change is not sent twice", sent.length === 3);
 
 // A burst: the first change at once, the rest as one more send once the edits pause.
 sent.length = 0;
 let version = 20;
 s.change([{ id: "a", version: version++ }], scene.appState, {});
+await settle();
 expect("a burst's first change is sent at once", sent.length === 1);
 for (let step = 0; step < 6; step++) {
-  advance(50);
+  await advance(50);
   s.change([{ id: "a", version: version++ }], scene.appState, {});
 }
+await settle();
 expect("the rest of a burst waits for a pause", sent.length === 1);
-advance(299);
+await advance(299);
 expect("the pause is the debounce", sent.length === 1);
-advance(1);
+await advance(1);
 expect("a burst sends at most one more", sent.length === 2 && JSON.parse(sent[1].text).elements[0].version === version - 1);
-runTimers();
+await runTimers();
 expect("nothing more after a burst", sent.length === 2);
 
 // Continuous edits: none waits longer than the max wait to be sent.
 sent.length = 0;
 const sentAt = [];
 const changedAt = [];
-const continuous = session.createSession({ restore, serialize, sceneVersion, send: (m) => { sent.push(m); sentAt.push(now); }, timers: fakeTimers });
-scene = continuous.load(file);
+const continuous = make({ send: (m) => { sent.push(m); sentAt.push(now); } });
+scene = await continuous.load(file, "a.excalidraw");
 for (let step = 0; step < 50; step++) {
   changedAt.push(now);
   continuous.change([{ id: "a", version: 100 + step }], scene.appState, {});
-  advance(100);
+  await advance(100);
 }
-runTimers();
+await runTimers();
 const late = changedAt.filter((at) => !sentAt.some((sentTime) => sentTime >= at && sentTime <= at + 1000));
 expect("continuous changes are sent within the max wait (late: " + late.join(",") + ")", late.length === 0);
 expect("continuous changes are still debounced", sent.length <= 8);
 
 sent.length = 0;
 s = make();
-scene = s.load("");
+scene = await s.load("", "a.excalidraw");
 expect("an empty file is an empty scene", scene && scene.elements.length === 0);
 s.change([], scene.appState, {});
-runTimers();
+await runTimers();
 expect("an empty file is not dirtied", sent.length === 0);
 
 for (const text of ["{not json", JSON.stringify({ type: "something-else" }), "[]", JSON.stringify({ type: "excalidraw", elements: [{ broken: true }] })]) {
   sent.length = 0;
   s = make();
-  expect("invalid file returns no scene", s.load(text) === null);
+  expect("invalid file returns no scene", (await s.load(text, "a.excalidraw")) === null);
   expect("invalid file sends error", sent.length === 1 && sent[0].type === "error" && sent[0].message.length > 0);
   s.change([{ id: "a", version: 1 }], {}, {});
-  runTimers();
+  await runTimers();
   expect("nothing is saved after an error", sent.length === 1);
 }
+
+// .excalidraw.svg: the scene is read from and written into the SVG.
+sent.length = 0;
+s = make();
+const svgFile = await serializeSvg([{ id: "a", version: 3 }], { viewBackgroundColor: "#fff9db" });
+scene = await s.load(svgFile, "a.excalidraw.SVG");
+expect("an SVG's scene is loaded", scene && scene.elements[0].version === 3 && scene.appState.viewBackgroundColor === "#fff9db");
+s.change([{ id: "a", version: 4 }], scene.appState, {});
+await s.flush(8);
+expect("an SVG is saved as an SVG, before flushed", sent.length === 2 && sent[0].type === "changed" && sent[0].text.startsWith("<svg>") && sent[1].type === "flushed");
+expect("the saved SVG loads back", (await make().load(sent[0].text, "a.excalidraw.svg"))?.elements[0].version === 4);
+
+sent.length = 0;
+s = make();
+scene = await s.load("", "new.excalidraw.svg");
+expect("an empty SVG file is an empty scene", scene && scene.elements.length === 0 && sent.length === 0);
+s.change([{ id: "a", version: 1 }], scene.appState, {});
+await runTimers();
+expect("an empty SVG file is saved as an SVG", sent.length === 1 && sent[0].text.startsWith("<svg>"));
+
+for (const [text, message] of [
+  ['<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>', "This SVG has no Excalidraw scene to edit"],
+  ["<svg><!-- scene:damaged --></svg>", "This Excalidraw drawing could not be read: FAILED"],
+]) {
+  sent.length = 0;
+  s = make();
+  expect("an unreadable SVG returns no scene", (await s.load(text, "a.excalidraw.svg")) === null);
+  expect("an unreadable SVG says why", sent.length === 1 && sent[0].type === "error" && sent[0].message === message);
+  s.change([{ id: "a", version: 1 }], {}, {});
+  await runTimers();
+  expect("an unreadable SVG is never overwritten", sent.length === 1);
+}
+
+// A slow load replaced by a newer one is dropped, and so is a save for the older load.
+sent.length = 0;
+let releaseDecode;
+s = make({ decodeSvg: (text) => new Promise((resolve) => { releaseDecode = () => resolve(decodeSvg(text)); }) });
+const stale = s.load(svgFile, "a.excalidraw.svg");
+const fresh = s.load(file, "a.excalidraw");
+releaseDecode();
+expect("a replaced load returns nothing", (await stale) === undefined && (await fresh).elements[0].version === 3);
+let releaseWrite;
+s = make({ serializeSvg: () => new Promise((resolve) => { releaseWrite = () => resolve("<svg>old</svg>"); }) });
+scene = await s.load(svgFile, "a.excalidraw.svg");
+s.change([{ id: "a", version: 5 }], scene.appState, {});
+await s.load(file, "a.excalidraw");
+releaseWrite();
+await runTimers();
+expect("a save for a replaced load is dropped", sent.length === 0);
+
+sent.length = 0;
+s = make({ serializeSvg: async () => { throw new Error("no fonts"); } });
+scene = await s.load(svgFile, "a.excalidraw.svg");
+s.change([{ id: "a", version: 5 }], scene.appState, {});
+await s.flush(9);
+expect("a failed save is reported, and flush still answers", sent.length === 2 && sent[0].type === "error" && sent[0].message === "This drawing could not be saved: no fonts" && sent[1].type === "flushed");
 
 const toasts = [];
 session.showNotice({ setToast: (toast) => toasts.push(toast) }, "Saved a.png to Downloads");

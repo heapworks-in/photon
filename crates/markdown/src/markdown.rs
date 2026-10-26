@@ -72,6 +72,8 @@ type CheckboxToggleCallback = Rc<dyn Fn(Range<usize>, bool, &mut Window, &mut Ap
 /// Invoked when a mermaid diagram's zoom level changes (via scroll gesture or
 /// the reset button), so a scroll container can keep the diagram anchored.
 pub type MermaidZoomCallback = Rc<dyn Fn(&mut Window, &mut App)>;
+// photon: opens an image or a Mermaid diagram full size; gets the image and its name.
+pub type ImageOpenCallback = Rc<dyn Fn(ImageSource, SharedString, &mut Window, &mut App)>;
 
 #[derive(Clone, Copy, Default)]
 pub struct BlockQuoteKindColors {
@@ -1782,6 +1784,7 @@ pub struct MarkdownElement {
     on_source_click: Option<SourceClickCallback>,
     on_checkbox_toggle: Option<CheckboxToggleCallback>,
     on_mermaid_zoom: Option<MermaidZoomCallback>,
+    on_image_open: Option<ImageOpenCallback>, // photon: full-size images and diagrams
     image_resolver: Option<Box<dyn Fn(&str, &App) -> Option<ImageSource>>>,
     show_root_block_markers: bool,
     autoscroll: AutoscrollBehavior,
@@ -1809,6 +1812,7 @@ impl MarkdownElement {
             on_source_click: None,
             on_checkbox_toggle: None,
             on_mermaid_zoom: None,
+            on_image_open: None, // photon: full-size images and diagrams
             image_resolver: None,
             show_root_block_markers: false,
             autoscroll: AutoscrollBehavior::Propagate,
@@ -1899,6 +1903,15 @@ impl MarkdownElement {
     /// Registers a callback invoked when a mermaid diagram's zoom level changes.
     /// Consumers that scroll the markdown can use this to keep the diagram's
     /// position anchored while it grows or shrinks.
+    // photon: images and Mermaid diagrams open full size through this.
+    pub fn on_image_open(
+        mut self,
+        handler: impl Fn(ImageSource, SharedString, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_image_open = Some(Rc::new(handler));
+        self
+    }
+
     pub fn on_mermaid_zoom(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_mermaid_zoom = Some(Rc::new(handler));
         self
@@ -2023,6 +2036,16 @@ impl MarkdownElement {
                             });
                         }
                     })
+            } else if let Some(open) = self.on_image_open.clone() {
+                // photon: an image that isn't a link opens full size.
+                let source = source.clone();
+                let name = alt_text
+                    .clone()
+                    .filter(|alt| !alt.is_empty())
+                    .unwrap_or_else(|| dest_url.clone());
+                wrapper
+                    .cursor_pointer()
+                    .on_click(move |_, window, cx| open(source.clone(), name.clone(), window, cx))
             } else {
                 wrapper
             };
@@ -2838,6 +2861,7 @@ impl Element for MarkdownElement {
                                         zoom,
                                         copy_button_visibility,
                                         self.on_mermaid_zoom.clone(),
+                                        self.on_image_open.clone(),
                                         window,
                                         cx,
                                     ),

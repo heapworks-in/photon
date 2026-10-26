@@ -15,7 +15,10 @@ use crate::parser::{CodeBlockKind, MarkdownEvent, MarkdownTag};
 use settings::Settings as _;
 use theme_settings::ThemeSettings;
 
-use super::{CopyButtonVisibility, Markdown, MarkdownStyle, MermaidZoomCallback, ParsedMarkdown};
+use super::{
+    CopyButtonVisibility, ImageOpenCallback, Markdown, MarkdownStyle, MermaidZoomCallback,
+    ParsedMarkdown,
+};
 
 type MermaidDiagramCache = HashMap<ParsedMarkdownMermaidDiagramContents, Arc<CachedMermaidDiagram>>;
 
@@ -584,6 +587,7 @@ pub(crate) fn render_mermaid_diagram(
     zoom: f32,
     copy_button_visibility: CopyButtonVisibility,
     on_zoom: Option<MermaidZoomCallback>,
+    on_open: Option<ImageOpenCallback>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -638,6 +642,7 @@ pub(crate) fn render_mermaid_diagram(
                         (!showing_code && zoom != 1.0).then_some(zoom),
                         markdown,
                         on_zoom,
+                        on_open.filter(|_| !showing_code),
                     ))
                 })
                 .into_any_element()
@@ -653,6 +658,7 @@ pub(crate) fn render_mermaid_diagram(
                         None,
                         markdown,
                         on_zoom,
+                        None,
                     ))
                 })
                 .into_any_element()
@@ -711,6 +717,7 @@ pub(crate) fn render_mermaid_diagram(
                             (zoom != 1.0).then_some(zoom),
                             markdown,
                             on_zoom,
+                            None,
                         ))
                     })
                     .into_any_element()
@@ -739,6 +746,7 @@ pub(crate) fn render_mermaid_diagram(
                             None,
                             markdown,
                             on_zoom,
+                            None,
                         ))
                     })
                     .into_any_element()
@@ -865,6 +873,7 @@ fn render_mermaid_overlay_controls(
     zoom: Option<f32>,
     markdown: Entity<Markdown>,
     on_zoom: Option<MermaidZoomCallback>,
+    on_open: Option<ImageOpenCallback>,
 ) -> impl IntoElement {
     h_flex()
         .absolute()
@@ -878,6 +887,42 @@ fn render_mermaid_overlay_controls(
                 markdown.clone(),
                 on_zoom,
             ))
+        })
+        // photon: a diagram opens full size, drawn from its SVG so it stays sharp.
+        .when_some(on_open, |this, on_open| {
+            let code = code.clone();
+            let markdown = markdown.clone();
+            this.child(
+                div()
+                    .debug_selector(move || format!("mermaid-full-size-{source_offset}"))
+                    .child(
+                        IconButton::new(
+                            ElementId::named_usize("mermaid-full-size", source_offset),
+                            IconName::Maximize,
+                        )
+                        .icon_size(IconSize::Small)
+                        .icon_color(Color::Muted)
+                        .visible_on_hover("code_block")
+                        .tooltip(Tooltip::text("Open Full Size"))
+                        .on_click(move |_, window, cx| {
+                            let theme = markdown.update(cx, |_, cx| build_mermaid_theme(cx));
+                            match mermaid_render::render_to_svg(&code, &theme) {
+                                Ok(svg) => on_open(
+                                    ImageSource::Image(Arc::new(gpui::Image::from_bytes(
+                                        gpui::ImageFormat::Svg,
+                                        svg.into_bytes(),
+                                    ))),
+                                    "Diagram".into(),
+                                    window,
+                                    cx,
+                                ),
+                                Err(error) => {
+                                    log::error!("rendering a Mermaid diagram failed: {error:#}")
+                                }
+                            }
+                        }),
+                    ),
+            )
         })
         .child(render_mermaid_copy_button(source_offset, code, markdown))
 }

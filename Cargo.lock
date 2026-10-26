@@ -10764,6 +10764,7 @@ dependencies = [
  "language",
  "log",
  "markdown",
+ "photon_markdown",
  "project",
  "serde_json",
  "settings",
@@ -13755,6 +13756,17 @@ dependencies = [
  "tree-sitter-rust",
  "ui",
  "util",
+ "workspace",
+]
+
+[[package]]
+name = "photon_markdown"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "menu",
+ "project",
+ "ui",
  "workspace",
 ]
 

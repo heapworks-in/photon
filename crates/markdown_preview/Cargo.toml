@@ -23,6 +23,7 @@ gpui.workspace = true
 language.workspace = true
 log.workspace = true
 markdown.workspace = true
+photon_markdown.workspace = true # photon: full-size images and diagrams
 project.workspace = true
 settings.workspace = true
 theme.workspace = true
