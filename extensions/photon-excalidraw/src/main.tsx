@@ -18,6 +18,7 @@ import {
   isBundledLibraryItem,
   showNotice,
 } from "./session.js";
+import { decodeSvg, encodeSvg } from "./svg.js";
 
 type Api = any;
 type LibraryItem = any;
@@ -54,6 +55,8 @@ const session = createSession({
     restore(data, null, null, { repairBindings: true, refreshDimensions: false }),
   serialize: (elements: any, appState: any, files: any) =>
     serializeAsJSON(elements, appState, files, "local"),
+  decodeSvg,
+  serializeSvg: encodeSvg,
   sceneVersion: getSceneVersion,
   send: (message: any) => {
     if (message.type === "error") setError(message.message);
@@ -98,9 +101,10 @@ function onLibraryChange(items: readonly LibraryItem[]) {
   }
 }
 
-function load(text: string, fileName: string) {
-  setFileName(fileName.replace(/\.excalidraw$/i, ""));
-  const scene = session.load(text);
+async function load(text: string, fileName: string) {
+  setFileName(fileName.replace(/\.excalidraw(\.svg)?$/i, ""));
+  const scene = await session.load(text, fileName);
+  if (scene === undefined) return;
   if (!scene) {
     api?.updateScene({ elements: [], captureUpdate: CaptureUpdateAction.NEVER });
     return;

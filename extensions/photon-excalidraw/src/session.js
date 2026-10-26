@@ -22,9 +22,13 @@ export function showNotice(api, message) {
   api?.setToast({ message, closable: true, duration: 3000 });
 }
 
+// `decodeSvg` and `serializeSvg` read and write .excalidraw.svg files: an image with the scene
+// embedded. Both are async, so every send goes through one queue to keep them in order.
 export function createSession({
   restore,
   serialize,
+  decodeSvg,
+  serializeSvg,
   sceneVersion,
   send,
   debounceMs = 300,
@@ -38,6 +42,16 @@ export function createSession({
   // dirty before a quick close, and the rest wait for a pause (or the max wait).
   let quietTimer = null;
   let maxWaitTimer = null;
+  let svg = false;
+  // Bumped by each load, so a scene still being read or written for an older load is dropped.
+  let generation = 0;
+  let queue = Promise.resolve();
+
+  const enqueue = (task) => {
+    // Caught so one failed task doesn't stop every later send.
+    queue = queue.then(task).catch((error) => console.error("Excalidraw session", error));
+    return queue;
+  };
 
   // These are saved in the file but changing them does not bump the scene version.
   const keyOf = (elements, appState) =>
@@ -60,15 +74,6 @@ export function createSession({
     pending = null;
   };
 
-  const sendPending = () => {
-    maxWaitTimer = clear(maxWaitTimer);
-    if (!pending) return;
-    const { elements, appState, files, key } = pending;
-    pending = null;
-    send({ type: "changed", text: serialize(elements, appState, files) });
-    saved = key;
-  };
-
   const fail = (message) => {
     cancel();
     saved = null;
@@ -76,28 +81,72 @@ export function createSession({
     return null;
   };
 
-  return {
-    // Returns the restored scene, or null after reporting an error.
-    load(text) {
-      cancel();
-      saved = null;
-      let data = null;
-      if (text.trim() !== "") {
-        try {
-          data = JSON.parse(text);
-        } catch (error) {
-          return fail(`This file is not valid Excalidraw JSON: ${error.message}`);
-        }
-        if (!isExcalidrawData(data)) {
-          return fail("This file is not an Excalidraw drawing");
-        }
+  const sendPending = () => {
+    maxWaitTimer = clear(maxWaitTimer);
+    if (!pending) return;
+    const { elements, appState, files, key } = pending;
+    pending = null;
+    saved = key;
+    const loaded = generation;
+    const write = svg ? serializeSvg : serialize;
+    enqueue(async () => {
+      let text;
+      try {
+        text = await write(elements, appState, files);
+      } catch (error) {
+        if (loaded === generation) fail(`This drawing could not be saved: ${error.message}`);
+        return;
       }
+      if (loaded === generation) send({ type: "changed", text });
+    });
+  };
+
+  // Throws errors whose message is shown to the user.
+  const read = async (text) => {
+    if (text.trim() === "") return restore(null);
+    const unreadable = (error) =>
+      new Error(`This Excalidraw drawing could not be read: ${error.message}`);
+    if (svg) {
       let scene;
       try {
-        scene = restore(data);
+        scene = await decodeSvg(text);
       } catch (error) {
-        return fail(`This Excalidraw drawing could not be read: ${error.message}`);
+        throw unreadable(error);
       }
+      if (!scene) throw new Error("This SVG has no Excalidraw scene to edit");
+      return scene;
+    }
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (error) {
+      throw new Error(`This file is not valid Excalidraw JSON: ${error.message}`);
+    }
+    if (!isExcalidrawData(data)) {
+      throw new Error("This file is not an Excalidraw drawing");
+    }
+    try {
+      return restore(data);
+    } catch (error) {
+      throw unreadable(error);
+    }
+  };
+
+  return {
+    // Resolves to the restored scene, null after reporting an error, or undefined when a later
+    // load replaced this one.
+    async load(text, fileName = "") {
+      cancel();
+      saved = null;
+      svg = /\.svg$/i.test(fileName);
+      const loading = ++generation;
+      let scene;
+      try {
+        scene = await read(text);
+      } catch (error) {
+        return loading === generation ? fail(error.message) : undefined;
+      }
+      if (loading !== generation) return undefined;
       saved = keyOf(scene.elements, scene.appState);
       return scene;
     },
@@ -125,7 +174,7 @@ export function createSession({
 
     flush(request) {
       sendPending();
-      send({ type: "flushed", request });
+      return enqueue(() => send({ type: "flushed", request }));
     },
   };
 }

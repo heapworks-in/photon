@@ -35,6 +35,8 @@ trap 'rm -rf "$downloads"' EXIT
 cd "$extension"
 npm ci --ignore-scripts
 npx vite build
+# Needs Excalidraw itself, so it runs here rather than in cargo's tests.
+node svg.test.mjs
 
 rm -rf "$out"
 mkdir -p "$out/fonts" "$out/libraries"
