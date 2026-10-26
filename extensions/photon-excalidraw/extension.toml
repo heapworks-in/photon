@@ -1,11 +1,11 @@
 id = "photon-excalidraw"
 name = "Excalidraw"
-description = "Draw Excalidraw diagrams in .excalidraw files."
+description = "Draw Excalidraw diagrams in .excalidraw and .excalidraw.svg files."
 version = "0.18.1"
 schema_version = 1
 authors = ["Photon"]
 
 [web_editors.excalidraw]
 name = "Excalidraw"
-file_suffixes = ["excalidraw"]
+file_suffixes = ["excalidraw", "excalidraw.svg"]
 entry = "editor/index.html"

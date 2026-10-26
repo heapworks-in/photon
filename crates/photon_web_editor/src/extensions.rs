@@ -34,7 +34,7 @@ fn built_in_editors() -> Vec<WebEditor> {
         id: "excalidraw".into(),
         extension_id: "photon-excalidraw".into(),
         name: "Excalidraw".to_string(),
-        file_suffixes: vec!["excalidraw".to_string()],
+        file_suffixes: vec!["excalidraw".to_string(), "excalidraw.svg".to_string()],
         entry: "editor/index.html".to_string(),
         source: WebEditorSource::Embedded {
             prefix: "web_editors/excalidraw/".to_string(),
@@ -160,6 +160,41 @@ mod tests {
                 .editor_for_path(Path::new("/a/b.draw"))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn excalidraw_svgs_open_in_excalidraw_and_other_svgs_do_not() {
+        let registry = registry_for(&BTreeMap::default(), &installed_dir());
+        let id = |path: &str| {
+            registry
+                .editor_for_path(Path::new(path))
+                .map(|editor| editor.id.to_string())
+        };
+        assert_eq!(
+            id("/docs/arch.excalidraw.svg"),
+            Some("excalidraw".to_string())
+        );
+        assert_eq!(
+            id("/docs/Arch.Excalidraw.SVG"),
+            Some("excalidraw".to_string())
+        );
+        assert_eq!(id("/docs/arch.excalidraw"), Some("excalidraw".to_string()));
+        assert_eq!(id("/docs/logo.svg"), None);
+        assert_eq!(id("/docs/excalidraw.svg"), None);
+        assert_eq!(id("/docs/arch.excalidraw.svg.bak"), None);
+
+        // An installed editor for plain SVGs doesn't take the drawings, being the shorter match.
+        let with_svg_editor = registry_for(&index_with("svg-ext", "svg", "svg"), &installed_dir());
+        let id = |path: &str| {
+            with_svg_editor
+                .editor_for_path(Path::new(path))
+                .map(|editor| editor.id.to_string())
+        };
+        assert_eq!(
+            id("/docs/arch.excalidraw.svg"),
+            Some("excalidraw".to_string())
+        );
+        assert_eq!(id("/docs/logo.svg"), Some("svg".to_string()));
     }
 
     #[test]
