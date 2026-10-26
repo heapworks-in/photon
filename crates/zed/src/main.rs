@@ -771,6 +771,7 @@ fn main() {
         photon_call_trails::init(cx); // photon: call hierarchy panel
         photon_review::init(cx); // photon: GitHub PR review
         photon_tabs::init(zed::photon::ensure_center_terminal, cx); // photon: project tabs inside one window
+        photon_navigation::init(cx); // photon: go-to-definition without a language server
         photon_web_editor::init(cx); // photon: web editors for file types (after editor::init so they open first)
         journal::init(app_state.clone(), cx);
         encoding_selector::init(cx);

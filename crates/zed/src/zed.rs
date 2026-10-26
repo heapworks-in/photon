@@ -637,11 +637,15 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         let git_blame_status = cx.new(|_| git_ui::GitBlameStatus::default());
         let merge_conflict_indicator =
             cx.new(|cx| git_ui::MergeConflictIndicator::new(workspace, cx));
+        // photon: offers to install a language server when the file has none
+        let set_up_language_server =
+            cx.new(|cx| photon_navigation::SetUpLanguageServer::new(workspace, cx));
         workspace.status_bar().update(cx, |status_bar, cx| {
             // photon: a one-click way back to a terminal
             status_bar.add_left_item(cx.new(|_| photon::NewTerminalButton), window, cx);
             status_bar.add_left_item(search_button, window, cx);
             status_bar.add_left_item(lsp_button, window, cx);
+            status_bar.add_left_item(set_up_language_server, window, cx); // photon: no language server
             status_bar.add_left_item(diagnostic_summary, window, cx);
             status_bar.add_left_item(active_file_name, window, cx);
             status_bar.add_left_item(git_blame_status, window, cx);

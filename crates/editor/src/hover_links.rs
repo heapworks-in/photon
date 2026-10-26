@@ -453,6 +453,13 @@ impl Editor {
             if navigation.await.log_err().unwrap_or(Navigated::No) == Navigated::Yes {
                 return;
             }
+            // photon: text-search fallback when no language server can answer.
+            if let Ok(Some(fallback)) = editor.update_in(cx, |editor, window, cx| {
+                editor.photon_definition_fallback(window, cx)
+            }) {
+                fallback.await.log_err();
+                return;
+            }
             let focus_handle = editor
                 .read_with(cx, |editor, cx| {
                     editor.lsp_data_enabled().then(|| editor.focus_handle(cx))

@@ -1049,6 +1049,12 @@ impl Editor {
             if definition.await? == Navigated::Yes {
                 return Ok(Navigated::Yes);
             }
+            // photon: text-search fallback when no language server can answer.
+            if let Some(fallback) = editor.update_in(cx, |editor, window, cx| {
+                editor.photon_definition_fallback(window, cx)
+            })? {
+                return fallback.await;
+            }
             match fallback_strategy {
                 GoToDefinitionFallback::None => Ok(Navigated::No),
                 GoToDefinitionFallback::FindAllReferences => {
