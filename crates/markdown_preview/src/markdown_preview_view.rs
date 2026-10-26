@@ -162,6 +162,10 @@ impl MarkdownPreviewView {
                 if !Self::is_markdown_editor(workspace, &editor, cx) {
                     return;
                 }
+                // photon: an empty file opens for writing; its preview has nothing to show or click.
+                if Self::is_blank(&editor, cx) {
+                    return;
+                }
                 let Some(pane) = workspace.pane_for_item_id(item.item_id()) else {
                     return;
                 };
@@ -542,6 +546,17 @@ impl MarkdownPreviewView {
                 .ok();
         })
         .detach();
+    }
+
+    // photon: stops at the first visible character, so a real document costs almost nothing.
+    fn is_blank(editor: &Entity<Editor>, cx: &App) -> bool {
+        editor
+            .read(cx)
+            .buffer()
+            .read(cx)
+            .snapshot(cx)
+            .chars_at(MultiBufferOffset(0))
+            .all(char::is_whitespace)
     }
 
     pub fn is_markdown_file(editor: &Entity<Editor>, cx: &App) -> bool {
@@ -2016,6 +2031,39 @@ impl Render for MarkdownPreviewView {
                         .track_scroll(&self.scroll_handle)
                         .restrict_scroll_to_axis()
                         .p_4()
+                        // photon: an emptied file still has a way back to its source.
+                        .when(
+                            self.active_editor.is_some()
+                                && self.markdown.read(cx).source().trim().is_empty(),
+                            |this| {
+                                this.child(
+                                    v_flex()
+                                        .size_full()
+                                        .items_center()
+                                        .justify_center()
+                                        .gap_2()
+                                        .child(Label::new("This file is empty").color(Color::Muted))
+                                        .child(
+                                            div()
+                                                .debug_selector(|| {
+                                                    "photon-markdown-edit-empty".into()
+                                                })
+                                                .child(
+                                                    Button::new("photon-markdown-edit", "Edit")
+                                                        .on_click(cx.listener(
+                                                            |this, _, window, cx| {
+                                                                this.close_and_return_to_editor(
+                                                                    &CloseAndReturnToEditor,
+                                                                    window,
+                                                                    cx,
+                                                                )
+                                                            },
+                                                        )),
+                                                ),
+                                        ),
+                                )
+                            },
+                        )
                         .child({
                             let markdown_element =
                                 self.render_markdown_element(&preview_theme, window, cx);
@@ -3679,6 +3727,63 @@ mod tests {
             open_lightbox_name(cx, &multi_workspace),
             Some("Diagram".into())
         );
+    }
+
+    #[gpui::test]
+    async fn photon_empty_markdown_files_open_in_the_editor(cx: &mut TestAppContext) {
+        let (project, workspace, multi_workspace) = markdown_workspace(
+            cx,
+            json!({ "empty.md": "", "blank.md": "\n  \n", "note.md": "# Note\n" }),
+            false,
+        )
+        .await;
+        cx.update(|cx| set_auto_preview_enabled(cx, true));
+        for name in ["empty.md", "blank.md"] {
+            open_project_file(cx, &project, &multi_workspace, name, None, true).await;
+            cx.run_until_parked();
+            cx.update(|cx| {
+                let workspace = workspace.read(cx);
+                assert!(
+                    workspace.active_item_as::<Editor>(cx).is_some(),
+                    "{name} opens in the editor"
+                );
+                assert_eq!(
+                    workspace.items_of_type::<MarkdownPreviewView>(cx).count(),
+                    0
+                );
+            });
+        }
+        open_project_file(cx, &project, &multi_workspace, "note.md", None, true).await;
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                workspace
+                    .read(cx)
+                    .active_item_as::<MarkdownPreviewView>(cx)
+                    .is_some(),
+                "a file with content still opens in the preview"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn photon_emptied_preview_offers_edit(cx: &mut TestAppContext) {
+        let (multi_workspace, editor) = open_markdown_source(cx, "# Note\n").await;
+        dispatch_open_preview(cx, &multi_workspace);
+        editor.update(cx, |editor, cx| {
+            let end = editor.buffer().read(cx).snapshot(cx).len();
+            editor.edit([(editor::MultiBufferOffset(0)..end, "")], cx);
+        });
+        cx.executor().advance_clock(Duration::from_secs(1));
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        cx.run_until_parked();
+        let edit = cx
+            .debug_bounds("photon-markdown-edit-empty")
+            .expect("an empty preview shows Edit")
+            .center();
+        cx.simulate_click(edit, Modifiers::none());
+        cx.run_until_parked();
+        assert_editor_is_active_and_focused(cx, &multi_workspace, &editor);
     }
 
     #[gpui::test]
