@@ -1147,6 +1147,17 @@ impl MarkdownPreviewView {
             })
             .scroll_handle(self.scroll_handle.clone())
             .show_root_block_markers()
+            // photon: images and Mermaid diagrams open full size.
+            .on_image_open({
+                let workspace = self.workspace.clone();
+                move |source, name, window, cx| {
+                    workspace
+                        .update(cx, |workspace, cx| {
+                            photon_markdown::open_image(workspace, source, name, window, cx)
+                        })
+                        .log_err();
+                }
+            })
             .image_resolver({
                 let base_directory = self.base_directory.clone();
                 move |dest_url, cx| {
@@ -3606,6 +3617,67 @@ mod tests {
             cx.debug_bounds(format!("markdown_image_{image_start}").leak())
                 .is_some(),
             "a missing image is still drawn, as its fallback card"
+        );
+    }
+
+    fn open_lightbox_name(
+        cx: &mut VisualTestContext,
+        multi_workspace: &WindowHandle<MultiWorkspace>,
+    ) -> Option<gpui::SharedString> {
+        multi_workspace
+            .update(cx, |multi_workspace, _, cx| {
+                multi_workspace
+                    .workspace()
+                    .read(cx)
+                    .active_modal::<photon_markdown::ImageLightbox>(cx)
+                    .map(|lightbox| lightbox.read(cx).name().clone())
+            })
+            .unwrap()
+    }
+
+    #[gpui::test]
+    async fn photon_clicking_an_image_opens_it_full_size(cx: &mut TestAppContext) {
+        let source = "# Note\n\n![Architecture](arch.png)\n";
+        let (multi_workspace, _) = open_markdown_source(cx, source).await;
+        dispatch_open_preview(cx, &multi_workspace);
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        cx.run_until_parked();
+        assert_eq!(open_lightbox_name(cx, &multi_workspace), None);
+
+        let image_start = source.find('!').expect("image");
+        let image = cx
+            .debug_bounds(format!("markdown_image_{image_start}").leak())
+            .expect("the image is drawn")
+            .center();
+        cx.simulate_click(image, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            open_lightbox_name(cx, &multi_workspace),
+            Some("Architecture".into())
+        );
+    }
+
+    #[gpui::test]
+    async fn photon_mermaid_diagram_opens_full_size(cx: &mut TestAppContext) {
+        let source = "# Note\n\n```mermaid\ngraph TD\n  A --> B\n```\n";
+        let (multi_workspace, _) = open_markdown_source(cx, source).await;
+        dispatch_open_preview(cx, &multi_workspace);
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        cx.run_until_parked();
+
+        let diagram_start = source.find("```").expect("diagram");
+        let selector: &'static str = format!("mermaid-full-size-{diagram_start}").leak();
+        let button = cx
+            .debug_bounds(selector)
+            .expect("the full-size button is drawn")
+            .center();
+        cx.simulate_mouse_move(button, None, Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_click(button, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            open_lightbox_name(cx, &multi_workspace),
+            Some("Diagram".into())
         );
     }
 
