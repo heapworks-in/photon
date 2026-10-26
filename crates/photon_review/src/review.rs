@@ -542,7 +542,15 @@ async fn place_review(
             .into_iter()
             .map(|(diff, base)| {
                 let abs_path = checkout.worktree.join(&diff.path);
-                build_loaded_file(&project, abs_path, base, diff, cx)
+                build_loaded_file(
+                    &project,
+                    abs_path,
+                    &checkout.worktree,
+                    &checkout.head_sha,
+                    base,
+                    diff,
+                    cx,
+                )
             })
             .collect::<Vec<_>>()
     });
@@ -1440,7 +1448,15 @@ impl ReviewItem {
                                 .into_iter()
                                 .map(|(diff, base)| {
                                     let abs_path = checkout.worktree.join(&diff.path);
-                                    build_loaded_file(&project, abs_path, base, diff, cx)
+                                    build_loaded_file(
+                                        &project,
+                                        abs_path,
+                                        &checkout.worktree,
+                                        &checkout.head_sha,
+                                        base,
+                                        diff,
+                                        cx,
+                                    )
                                 })
                                 .collect::<Vec<_>>()
                         });
@@ -3258,6 +3274,18 @@ impl ReviewItem {
         &self.steps
     }
 
+    /// Notes on the selected step's files, such as one read from git instead of the checkout.
+    fn step_notes(&self) -> Vec<SharedString> {
+        let Some(step) = self.steps.get(self.selected) else {
+            return Vec::new();
+        };
+        self.files
+            .iter()
+            .filter(|file| step.files.contains(&file.diff.path))
+            .filter_map(|file| file.note.clone())
+            .collect()
+    }
+
     pub fn selected_step(&self) -> usize {
         self.selected
     }
@@ -4961,6 +4989,12 @@ impl ReviewItem {
             .min_w_0()
             .h_full()
             .children(status)
+            .children(self.step_notes().into_iter().map(|note| {
+                div()
+                    .px_2()
+                    .py_1()
+                    .child(Label::new(note).size(LabelSize::Small).color(Color::Muted))
+            }))
             .children(self.render_hidden_by_view(cx))
             .child(div().flex_1().min_h_0().child(self.editor.clone()))
     }
@@ -5612,6 +5646,8 @@ mod tests {
                 build_loaded_file(
                     &project,
                     PathBuf::from(path!("/repo")).join(file.path),
+                    Path::new(path!("/repo")),
+                    "head",
                     file.base.map(str::to_string),
                     diff,
                     cx,
@@ -6468,9 +6504,115 @@ fn verify_password(user: &str, password: &str) -> bool {
         )
         .await;
         settle(&mut cx);
-        item.read_with(&cx, |item, _| assert!(!item.steps().is_empty(), "the file gets a step"));
+        item.read_with(&cx, |item, _| {
+            assert!(!item.steps().is_empty(), "the file gets a step")
+        });
         let shown = text(&item, &mut cx);
         assert!(shown.contains("runs-on: macos-15"), "diff shown: {shown:?}");
+    }
+
+    const APP_BASE: &str = "server:\n  port: 8080\n";
+    const APP_HEAD: &str = "server:\n  port: 9090\n";
+
+    #[gpui::test]
+    async fn missing_file_in_checkout_is_read_from_git(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path();
+        run(repo, &["init", "-q"]);
+        std::fs::write(repo.join("application.yml"), APP_BASE).expect("write");
+        run(repo, &["add", "."]);
+        run(repo, &["commit", "-q", "-m", "base"]);
+        let base = run(repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("application.yml"), APP_HEAD).expect("write");
+        run(repo, &["commit", "-q", "-am", "head"]);
+        let head = run(repo, &["rev-parse", "HEAD"]);
+        let diff = git_diff(repo, &base, &head)
+            .await
+            .expect("diff")
+            .pop()
+            .expect("one file");
+
+        init_test(cx);
+        let database = test_database(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/repo"), json!({})).await;
+        let project = Project::test(fs, [path!("/repo").as_ref()], cx).await;
+        let loaded = cx
+            .update(|cx| {
+                build_loaded_file(
+                    &project,
+                    PathBuf::from(path!("/repo/application.yml")),
+                    repo,
+                    &head,
+                    Some(APP_BASE.into()),
+                    diff,
+                    cx,
+                )
+            })
+            .await
+            .expect("loaded");
+        let detail = parse_detail(&key(), DETAIL).expect("detail");
+        let window = cx.add_window(|window, cx| {
+            ReviewItem::new(
+                project.clone(),
+                detail,
+                "alice".into(),
+                checkout(),
+                vec![loaded],
+                database,
+                window,
+                cx,
+            )
+        });
+        let item = window.root(cx).expect("item");
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        settle(&mut cx);
+        let shown = text(&item, &mut cx);
+        assert!(shown.contains("port: 9090"), "head shown: {shown:?}");
+        assert!(
+            shown.contains("port: 8080"),
+            "base shown as deleted: {shown:?}"
+        );
+        item.read_with(&cx, |item, _| {
+            assert_eq!(
+                item.step_notes(),
+                vec![SharedString::from(
+                    "application.yml · Shown from git; the file isn't in the checkout"
+                )]
+            )
+        });
+    }
+
+    #[gpui::test]
+    async fn unreadable_file_shows_a_message_not_a_blank_editor(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (item, mut cx) = open_item(
+            cx,
+            json!({}),
+            vec![modified("config/application.yml", APP_BASE)],
+            Graph {
+                functions: Vec::new(),
+                calls: Vec::new(),
+            },
+            false,
+            None,
+        )
+        .await;
+        settle(&mut cx);
+        item.read_with(&cx, |item, _| {
+            assert!(item.files[0].contents.is_none(), "no blank buffer");
+            assert!(!item.steps().is_empty(), "the file still gets a step");
+            assert_eq!(
+                item.step_notes(),
+                vec![SharedString::from(
+                    "Couldn't read application.yml from the checkout"
+                )]
+            );
+        });
     }
 
     #[gpui::test]
@@ -6601,6 +6743,7 @@ fn verify_password(user: &str, password: &str) -> bool {
                 .map(|file| LoadedFile {
                     diff: file.diff.clone(),
                     contents: file.contents.clone(),
+                    note: file.note.clone(),
                 })
                 .collect();
             (item.project.clone(), item.detail.clone(), files)

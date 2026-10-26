@@ -733,7 +733,15 @@ trait Speak {
         };
         let loaded = cx
             .update(|cx| {
-                build_loaded_file(&project, "/repo/a.rs".into(), Some(BASE.into()), diff, cx)
+                build_loaded_file(
+                    &project,
+                    "/repo/a.rs".into(),
+                    std::path::Path::new("/repo"),
+                    "HEAD",
+                    Some(BASE.into()),
+                    diff,
+                    cx,
+                )
             })
             .await
             .expect("loaded");

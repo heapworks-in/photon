@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
 use buffer_diff::BufferDiff;
-use gpui::{App, AppContext as _, AsyncApp, Entity, Task};
+use gpui::{App, AppContext as _, AsyncApp, Entity, SharedString, Task};
 use language::Buffer;
 use project::Project;
 
@@ -47,6 +47,8 @@ impl FileDiff {
 pub struct LoadedFile {
     pub diff: FileDiff,
     pub contents: Option<(Entity<Buffer>, Entity<BufferDiff>)>,
+    /// Shown muted in the file's step, e.g. when its text came from git instead of the checkout.
+    pub note: Option<SharedString>,
 }
 
 impl FileDiff {
@@ -355,9 +357,54 @@ async fn reload_from_disk(buffer: &Entity<Buffer>, cx: &mut AsyncApp) {
     log::warn!("buffer reload kept being superseded; showing its current text");
 }
 
+/// Whether `text` holds the new side of every hunk, so a buffer read from disk is the head
+/// that GitHub diffs. A file system that ignores case can hand back another file's text.
+fn matches_hunks(text: &str, hunks: &[Hunk]) -> bool {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .collect();
+    hunks.iter().all(|hunk| {
+        let new_lines = hunk
+            .body
+            .lines()
+            .filter_map(|line| match line.as_bytes().first() {
+                Some(b' ' | b'+') => line.get(1..).map(|line| line.trim_end_matches('\r')),
+                _ => None,
+            });
+        let first = hunk.new_start.saturating_sub(1) as usize;
+        new_lines
+            .enumerate()
+            .all(|(offset, line)| lines.get(first + offset) == Some(&line))
+    })
+}
+
+fn local_buffer(
+    text: String,
+    registry: std::sync::Arc<language::LanguageRegistry>,
+    language: Option<std::sync::Arc<language::Language>>,
+    cx: &mut AsyncApp,
+) -> Entity<Buffer> {
+    cx.new(|cx| {
+        let mut buffer = Buffer::local(text, cx);
+        buffer.set_language_registry(registry);
+        buffer.set_language(language, cx);
+        buffer
+    })
+}
+
+enum Opened {
+    Buffer(Entity<Buffer>),
+    FromGit(Entity<Buffer>),
+    NotRegular,
+    Unreadable,
+}
+
 pub fn build_loaded_file(
     project: &Entity<Project>,
     abs_path: PathBuf,
+    worktree: &Path,
+    head_sha: &str,
     base: Option<String>,
     diff: FileDiff,
     cx: &mut App,
@@ -366,50 +413,103 @@ pub fn build_loaded_file(
         return Task::ready(Ok(LoadedFile {
             diff,
             contents: None,
+            note: None,
         }));
     }
     let registry = project.read(cx).languages().clone();
     let fs = project.read(cx).fs().clone();
-    let buffer_task = if diff.status == FileStatus::Deleted {
-        let registry = registry.clone();
-        cx.spawn(async move |cx| {
+    let project = project.clone();
+    let worktree = worktree.to_path_buf();
+    let head_object = format!("{head_sha}:{}", diff.path);
+    cx.spawn(async move |cx| {
+        let opened = if diff.status == FileStatus::Deleted {
             let language = registry.load_language_for_file_path(&abs_path).await.ok();
-            Ok(Some(cx.new(|cx| {
-                let mut buffer = Buffer::local("", cx);
-                buffer.set_language_registry(registry);
-                buffer.set_language(language, cx);
-                buffer
-            })))
-        })
-    } else {
-        let project = project.clone();
-        cx.spawn(async move |cx| {
+            Opened::Buffer(local_buffer(String::new(), registry.clone(), language, cx))
+        } else {
             // The diff's modes come from the PR; what's on disk is checked again before opening.
             let metadata = fs.metadata(&abs_path).await?;
-            if metadata
-                .is_some_and(|metadata| metadata.is_symlink || metadata.is_dir || metadata.is_fifo)
-            {
-                return Ok(None);
+            let from_disk = match metadata {
+                Some(metadata) if metadata.is_symlink || metadata.is_dir || metadata.is_fifo => {
+                    None
+                }
+                // `open_local_buffer` would make an empty buffer for a missing path.
+                None => Some(Err(anyhow!("not in the checkout"))),
+                Some(_) => Some(
+                    project
+                        .update(cx, |project, cx| project.open_local_buffer(&abs_path, cx))
+                        .await,
+                ),
+            };
+            let from_disk = match from_disk {
+                None => None,
+                Some(Ok(buffer)) => {
+                    // The project may still hold this buffer from a review of an older head; read
+                    // the text the checkout just wrote rather than waiting for the file watcher.
+                    reload_from_disk(&buffer, cx).await;
+                    let (dirty, text) =
+                        buffer.read_with(cx, |buffer, _| (buffer.is_dirty(), buffer.text()));
+                    if dirty || matches_hunks(&text, &diff.hunks) {
+                        Some(Ok(buffer))
+                    } else {
+                        Some(Err(anyhow!("its text on disk isn't the reviewed head")))
+                    }
+                }
+                Some(Err(error)) => Some(Err(error)),
+            };
+            match from_disk {
+                None => Opened::NotRegular,
+                Some(Ok(buffer)) => Opened::Buffer(buffer),
+                Some(Err(disk_error)) => {
+                    log::info!("reading {:?} from git: {disk_error:#}", diff.path);
+                    let show = cx.background_spawn({
+                        let worktree = worktree.clone();
+                        async move { git_raw(&worktree, &["show", &head_object]).await }
+                    });
+                    match show.await {
+                        Ok(text) => {
+                            let language =
+                                registry.load_language_for_file_path(&abs_path).await.ok();
+                            Opened::FromGit(local_buffer(text, registry.clone(), language, cx))
+                        }
+                        Err(error) => {
+                            log::error!(
+                                "can't read {:?} from the checkout or git: {error:#}",
+                                diff.path
+                            );
+                            Opened::Unreadable
+                        }
+                    }
+                }
             }
-            project
-                .update(cx, |project, cx| project.open_local_buffer(abs_path, cx))
-                .await
-                .map(Some)
-        })
-    };
-    cx.spawn(async move |cx| {
-        let Some(buffer) = buffer_task.await? else {
-            log::warn!("not opening {:?}: it isn't a regular file", diff.path);
-            return Ok(LoadedFile {
-                diff,
-                contents: None,
-            });
         };
-        // The project may still hold this buffer from a review of an older head; read the text
-        // the checkout just wrote rather than waiting for the file watcher.
-        if diff.status != FileStatus::Deleted {
-            reload_from_disk(&buffer, cx).await;
-        }
+        let file_name = Path::new(&diff.path).file_name().map_or_else(
+            || diff.path.clone(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let (buffer, note) = match opened {
+            Opened::Buffer(buffer) => (buffer, None),
+            Opened::FromGit(buffer) => (
+                buffer,
+                Some(
+                    format!("{file_name} · Shown from git; the file isn't in the checkout").into(),
+                ),
+            ),
+            Opened::NotRegular => {
+                log::warn!("not opening {:?}: it isn't a regular file", diff.path);
+                return Ok(LoadedFile {
+                    diff,
+                    contents: None,
+                    note: None,
+                });
+            }
+            Opened::Unreadable => {
+                return Ok(LoadedFile {
+                    diff,
+                    contents: None,
+                    note: Some(format!("Couldn't read {file_name} from the checkout").into()),
+                });
+            }
+        };
         let snapshot = buffer.read_with(cx, |buffer, _| buffer.snapshot());
         let buffer_diff = cx.new(|cx| {
             BufferDiff::new(
@@ -427,6 +527,7 @@ pub fn build_loaded_file(
         Ok(LoadedFile {
             diff,
             contents: Some((buffer, buffer_diff)),
+            note,
         })
     })
 }
@@ -907,9 +1008,19 @@ index 1..2 100644
         let project = Project::test(fs, ["/repo".as_ref()], cx).await;
         let diff = file("a.txt", status, false);
         let base = base.map(str::to_string);
-        cx.update(|cx| build_loaded_file(&project, "/repo/a.txt".into(), base, diff, cx))
-            .await
-            .expect("loaded")
+        cx.update(|cx| {
+            build_loaded_file(
+                &project,
+                "/repo/a.txt".into(),
+                Path::new("/repo"),
+                "HEAD",
+                base,
+                diff,
+                cx,
+            )
+        })
+        .await
+        .expect("loaded")
     }
 
     #[gpui::test]
@@ -950,6 +1061,67 @@ index 1..2 100644
     }
 
     #[gpui::test]
+    async fn case_only_rename_shows_the_diff(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path();
+        run(repo, &["init", "-q"]);
+        let old = "server:\n  port: 8080\n";
+        let new = "server:\n  port: 9090\n";
+        std::fs::write(repo.join("Application.yml"), old).expect("write");
+        run(repo, &["add", "."]);
+        run(repo, &["commit", "-q", "-m", "base"]);
+        let base = run(repo, &["rev-parse", "HEAD"]);
+        run(repo, &["mv", "Application.yml", "application.yml"]);
+        std::fs::write(repo.join("application.yml"), new).expect("write");
+        run(repo, &["commit", "-q", "-am", "head"]);
+        let head = run(repo, &["rev-parse", "HEAD"]);
+        let diff = git_diff(repo, &base, &head)
+            .await
+            .expect("diff")
+            .pop()
+            .expect("one file");
+        assert_eq!(diff.path, "application.yml", "comments use GitHub's path");
+        let base_contents = base_text(repo, &base, &diff).await.expect("base");
+
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+        });
+        // A case-insensitive file system resolves the new name to the old file, which still
+        // holds the base text.
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/repo", json!({ "application.yml": old }))
+            .await;
+        let project = Project::test(fs, ["/repo".as_ref()], cx).await;
+        let loaded = cx
+            .update(|cx| {
+                build_loaded_file(
+                    &project,
+                    "/repo/application.yml".into(),
+                    repo,
+                    &head,
+                    base_contents,
+                    diff,
+                    cx,
+                )
+            })
+            .await
+            .expect("loaded");
+        assert!(loaded.note.is_some());
+        let (buffer, diff) = loaded.contents.expect("contents");
+        let hunks = cx.read(|cx| {
+            let snapshot = buffer.read(cx).snapshot();
+            assert_eq!(snapshot.text(), new);
+            diff.read(cx).snapshot(cx).hunks(&snapshot.text).count()
+        });
+        assert_eq!(hunks, 1);
+    }
+
+    #[gpui::test]
     async fn submodule_has_no_buffer(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let store = SettingsStore::test(cx);
@@ -962,7 +1134,17 @@ index 1..2 100644
         let mut diff = file("vendor/lib", FileStatus::Modified, false);
         diff.submodule = true;
         let loaded = cx
-            .update(|cx| build_loaded_file(&project, "/repo/vendor/lib".into(), None, diff, cx))
+            .update(|cx| {
+                build_loaded_file(
+                    &project,
+                    "/repo/vendor/lib".into(),
+                    Path::new("/repo"),
+                    "HEAD",
+                    None,
+                    diff,
+                    cx,
+                )
+            })
             .await
             .expect("loaded");
         assert!(loaded.contents.is_none());
@@ -1039,7 +1221,17 @@ index 5555555..6666666 100644
         let parsed = parse_unified_diff(SYMLINK_PATCH).expect("parse");
         let key = parsed.into_iter().next().expect("key entry");
         let loaded = cx
-            .update(|cx| build_loaded_file(&project, "/repo/key".into(), None, key, cx))
+            .update(|cx| {
+                build_loaded_file(
+                    &project,
+                    "/repo/key".into(),
+                    Path::new("/repo"),
+                    "HEAD",
+                    None,
+                    key,
+                    cx,
+                )
+            })
             .await
             .expect("loaded");
         assert!(loaded.contents.is_none());
@@ -1047,7 +1239,17 @@ index 5555555..6666666 100644
         // A symlink the diff didn't report as one is still skipped.
         let unmarked = file("key", FileStatus::Added, false);
         let loaded = cx
-            .update(|cx| build_loaded_file(&project, "/repo/key".into(), None, unmarked, cx))
+            .update(|cx| {
+                build_loaded_file(
+                    &project,
+                    "/repo/key".into(),
+                    Path::new("/repo"),
+                    "HEAD",
+                    None,
+                    unmarked,
+                    cx,
+                )
+            })
             .await
             .expect("loaded");
         assert!(loaded.contents.is_none());
