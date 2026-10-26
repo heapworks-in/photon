@@ -839,14 +839,14 @@ fn single_query_param(url: &Url, name: &'static str) -> Result<Option<String>> {
     }
 }
 
+// photon: chips read `file.rs:12-14`, the `path:lines` form Photon uses everywhere.
 pub fn selection_name(path: Option<&Path>, line_range: &RangeInclusive<u32>) -> String {
     format!(
-        "{} ({}:{})",
+        "{}{}",
         path.and_then(|path| path.file_name())
             .unwrap_or("Untitled".as_ref())
             .display(),
-        *line_range.start() + 1,
-        *line_range.end() + 1
+        line_range_suffix(line_range)
     )
 }
 

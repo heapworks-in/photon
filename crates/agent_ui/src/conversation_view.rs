@@ -2077,6 +2077,9 @@ impl ConversationView {
                 {
                     return;
                 }
+                if !is_subagent {
+                    photon_agent::turn_stopped(thread, cx); // photon: review agent work
+                }
                 if let Some(active) = self.thread_view(&session_id) {
                     let is_generating =
                         matches!(thread.read(cx).status(), ThreadStatus::Generating);

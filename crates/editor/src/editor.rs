@@ -2916,6 +2916,11 @@ impl Editor {
         if disjoint.len() > 1 {
             key_context.add("multiple_selections");
         }
+        // photon: lets ⌥-letter shortcuts act on a selection without taking those keys from typing.
+        let newest_selection = self.selections.newest_anchor();
+        if newest_selection.start != newest_selection.end {
+            key_context.add("has_selection");
+        }
         if matches!(
             &self.mode,
             EditorMode::SingleLine | EditorMode::AutoHeight { .. }

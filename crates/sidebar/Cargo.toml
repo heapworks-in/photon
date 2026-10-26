@@ -35,6 +35,7 @@ language_model.workspace = true
 log.workspace = true
 menu.workspace = true
 notifications.workspace = true
+photon_agent.workspace = true # photon: reviewing agent work
 platform_title_bar.workspace = true
 project.workspace = true
 recent_projects.workspace = true

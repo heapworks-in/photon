@@ -15237,4 +15237,137 @@ mod tests {
             );
         });
     }
+
+    // photon: the review-agent-work loop (docs/photon/specs/2026-10-27-agent-review-loop-design.md).
+    mod photon_review_loop {
+        use super::*;
+
+        fn bind_photon_keymap(cx: &mut VisualTestContext) {
+            cx.update(|_, cx| {
+                let keymap = include_str!("../../../assets/keymaps/default-macos.json");
+                let key_bindings = match settings::KeymapFile::load(keymap, cx) {
+                    settings::KeymapFileLoadResult::Success { key_bindings }
+                    | settings::KeymapFileLoadResult::SomeFailedToLoad { key_bindings, .. } => {
+                        key_bindings
+                    }
+                    settings::KeymapFileLoadResult::JsonParseFailure { error } => {
+                        panic!("default keymap doesn't parse: {error}")
+                    }
+                };
+                cx.bind_keys(key_bindings);
+            });
+        }
+
+        async fn open_file_in_editor(
+            panel: &Entity<AgentPanel>,
+            path: &str,
+            text: &str,
+            cx: &mut VisualTestContext,
+        ) -> Entity<Editor> {
+            let fs = cx.update(|_, cx| <dyn fs::Fs>::global(cx));
+            fs.as_fake().insert_file(path, text.into()).await;
+            let workspace = panel.read_with(cx, |panel, _| {
+                panel.workspace.upgrade().expect("workspace must exist")
+            });
+            let item = workspace
+                .update_in(cx, |workspace, window, cx| {
+                    workspace.open_abs_path(
+                        PathBuf::from(path),
+                        workspace::OpenOptions::default(),
+                        window,
+                        cx,
+                    )
+                })
+                .await
+                .expect("file opens");
+            cx.run_until_parked();
+            item.downcast::<Editor>().expect("an editor")
+        }
+
+        #[gpui::test]
+        async fn alt_t_starts_a_thread_about_the_selection(cx: &mut TestAppContext) {
+            let (panel, mut cx) = setup_visible_panel(cx).await;
+            crate::test_support::set_stub_agent_connection(StubAgentConnection::new());
+            panel.update_in(&mut cx, |panel, window, cx| {
+                panel.selected_agent = Agent::Stub;
+                panel.activate_draft(true, AgentThreadSource::AgentPanel, window, cx);
+            });
+            cx.run_until_parked();
+            bind_photon_keymap(&mut cx);
+            let previous = panel.read_with(&cx, |panel, _| {
+                panel.active_conversation_view().cloned().expect("a draft")
+            });
+            // A draft with text, so the new thread can't reuse it.
+            let previous_editor = previous.read_with(&cx, |view, cx| {
+                view.active_thread()
+                    .expect("draft is ready")
+                    .read(cx)
+                    .message_editor
+                    .clone()
+            });
+            previous_editor.update_in(&mut cx, |editor, window, cx| {
+                editor.set_text("Keep this draft", window, cx);
+            });
+            let editor =
+                open_file_in_editor(&panel, "/project/main.rs", "one\ntwo\nthree\n", &mut cx).await;
+
+            // Without a selection, ⌥T is left to typing.
+            cx.focus(&editor);
+            cx.simulate_keystrokes("alt-t");
+            cx.run_until_parked();
+            panel.read_with(&cx, |panel, _| {
+                let active = panel.active_conversation_view().expect("a thread");
+                assert_eq!(active.entity_id(), previous.entity_id());
+            });
+
+            editor.update_in(&mut cx, |editor, window, cx| {
+                editor.change_selections(Default::default(), window, cx, |selections| {
+                    selections.select_ranges([text::Point::new(1, 0)..text::Point::new(2, 5)]);
+                });
+            });
+            cx.focus(&editor);
+            cx.simulate_keystrokes("alt-t");
+            cx.run_until_parked();
+
+            let conversation = panel.read_with(&cx, |panel, _| {
+                panel.active_conversation_view().cloned().expect("a thread")
+            });
+            assert_ne!(conversation.entity_id(), previous.entity_id());
+            let chips = conversation.read_with(&cx, |view, cx| {
+                view.active_thread()
+                    .expect("thread is ready")
+                    .read(cx)
+                    .message_editor
+                    .read(cx)
+                    .mention_set()
+                    .read(cx)
+                    .mentions()
+                    .into_iter()
+                    .map(|mention| mention.name())
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(chips, ["main.rs:2-3"]);
+            assert_eq!(
+                previous_editor.read_with(&cx, |editor, cx| editor.text(cx)),
+                "Keep this draft"
+            );
+
+            // Once the turn ends, the thread counts as being about the file.
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            let session_id = crate::test_support::active_session_id(&panel, &cx);
+            cx.update(|_, cx| {
+                assert!(photon_agent::thread_is_about(
+                    &session_id,
+                    Path::new("/project/main.rs"),
+                    cx
+                ));
+                assert!(!photon_agent::thread_is_about(
+                    &session_id,
+                    Path::new("/project/file.txt"),
+                    cx
+                ));
+            });
+        }
+    }
 }
