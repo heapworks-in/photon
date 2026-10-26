@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
@@ -86,10 +86,28 @@ impl Domain for ReviewDb {
             exit_code INTEGER NOT NULL,
             PRIMARY KEY(host, owner, repo, number)
         ) STRICT;",
+        "ALTER TABLE viewed_steps ADD COLUMN head_sha TEXT;
+        ALTER TABLE viewed_steps ADD COLUMN fingerprint TEXT;
+        CREATE TABLE viewed_files(
+            host TEXT NOT NULL,
+            owner TEXT NOT NULL,
+            repo TEXT NOT NULL,
+            number INTEGER NOT NULL,
+            path TEXT NOT NULL,
+            head_sha TEXT NOT NULL,
+            PRIMARY KEY(host, owner, repo, number, path)
+        ) STRICT;",
     ];
 }
 
 db::static_connection!(ReviewDb, []);
+
+/// When a step was ticked. Both are `None` for marks from before Photon recorded them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ViewedMark {
+    pub head: Option<String>,
+    pub fingerprint: Option<String>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tracked {
@@ -386,34 +404,85 @@ impl ReviewDb {
         .await
     }
 
-    pub fn viewed_steps(&self, key: &PrKey) -> Result<HashSet<String>> {
+    pub fn viewed_steps(&self, key: &PrKey) -> Result<HashMap<String, ViewedMark>> {
         let number = i64::try_from(key.number)?;
-        Ok(self.select_bound::<(String, String, String, i64), String>(
-            "SELECT step_key FROM viewed_steps
+        Ok(self
+            .select_bound::<(String, String, String, i64), (String, Option<String>, Option<String>)>(
+                "SELECT step_key, head_sha, fingerprint FROM viewed_steps
                  WHERE host = ?1 AND owner = ?2 AND repo = ?3 AND number = ?4",
-        )?((
-            key.host.clone(),
-            key.owner.clone(),
-            key.repo.clone(),
-            number,
-        ))?
-        .into_iter()
-        .collect())
+            )?((
+                key.host.clone(),
+                key.owner.clone(),
+                key.repo.clone(),
+                number,
+            ))?
+            .into_iter()
+            .map(|(step_key, head, fingerprint)| (step_key, ViewedMark { head, fingerprint }))
+            .collect())
     }
 
-    pub async fn set_step_viewed(&self, key: PrKey, step_key: String, viewed: bool) -> Result<()> {
+    /// `None` unticks the step.
+    pub async fn set_step_viewed(
+        &self,
+        key: PrKey,
+        step_key: String,
+        mark: Option<ViewedMark>,
+    ) -> Result<()> {
         let number = i64::try_from(key.number)?;
-        let query = if viewed {
-            "INSERT OR IGNORE INTO viewed_steps(host, owner, repo, number, step_key)
-             VALUES (?1, ?2, ?3, ?4, ?5)"
-        } else {
-            "DELETE FROM viewed_steps
-             WHERE host = ?1 AND owner = ?2 AND repo = ?3 AND number = ?4 AND step_key = ?5"
-        };
-        self.write(move |connection| {
-            connection.exec_bound::<(String, String, String, i64, String)>(query)?((
-                key.host, key.owner, key.repo, number, step_key,
-            ))
+        self.write(move |connection| match mark {
+            Some(mark) => connection.exec_bound::<(
+                (String, String, String, i64, String),
+                (Option<String>, Option<String>),
+            )>(
+                "INSERT OR REPLACE INTO viewed_steps(host, owner, repo, number, step_key, head_sha, fingerprint)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?((
+                (key.host, key.owner, key.repo, number, step_key),
+                (mark.head, mark.fingerprint),
+            )),
+            None => connection.exec_bound::<(String, String, String, i64, String)>(
+                "DELETE FROM viewed_steps
+                 WHERE host = ?1 AND owner = ?2 AND repo = ?3 AND number = ?4 AND step_key = ?5",
+            )?((key.host, key.owner, key.repo, number, step_key)),
+        })
+        .await
+    }
+
+    /// The head each file was marked viewed at on GitHub from Photon, by path.
+    pub fn viewed_files(&self, key: &PrKey) -> Result<HashMap<String, String>> {
+        let number = i64::try_from(key.number)?;
+        Ok(
+            self.select_bound::<(String, String, String, i64), (String, String)>(
+                "SELECT path, head_sha FROM viewed_files
+                 WHERE host = ?1 AND owner = ?2 AND repo = ?3 AND number = ?4",
+            )?((
+                key.host.clone(),
+                key.owner.clone(),
+                key.repo.clone(),
+                number,
+            ))?
+            .into_iter()
+            .collect(),
+        )
+    }
+
+    /// `None` forgets the file's head, for a file unmarked as viewed.
+    pub async fn set_file_viewed_head(
+        &self,
+        key: PrKey,
+        path: String,
+        head: Option<String>,
+    ) -> Result<()> {
+        let number = i64::try_from(key.number)?;
+        self.write(move |connection| match head {
+            Some(head) => connection.exec_bound::<(String, String, String, i64, String, String)>(
+                "INSERT OR REPLACE INTO viewed_files(host, owner, repo, number, path, head_sha)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?((key.host, key.owner, key.repo, number, path, head)),
+            None => connection.exec_bound::<(String, String, String, i64, String)>(
+                "DELETE FROM viewed_files
+                 WHERE host = ?1 AND owner = ?2 AND repo = ?3 AND number = ?4 AND path = ?5",
+            )?((key.host, key.owner, key.repo, number, path)),
         })
         .await
     }
@@ -703,22 +772,44 @@ mod tests {
         assert_eq!(db.drafts(&key(8)).unwrap(), vec![]);
 
         assert!(db.viewed_steps(&key(7)).unwrap().is_empty());
-        db.set_step_viewed(key(7), "src/a.rs::f".into(), true)
+        let mark = |head: &str| ViewedMark {
+            head: Some(head.into()),
+            fingerprint: Some(format!("print-{head}")),
+        };
+        db.set_step_viewed(key(7), "src/a.rs::f".into(), Some(mark("h1")))
             .await
             .unwrap();
-        db.set_step_viewed(key(7), "src/a.rs::f".into(), true)
+        db.set_step_viewed(key(7), "src/a.rs::f".into(), Some(mark("h2")))
             .await
             .unwrap();
-        db.set_step_viewed(key(7), "src/b.rs".into(), true)
+        db.set_step_viewed(key(7), "src/b.rs".into(), Some(mark("h1")))
             .await
             .unwrap();
-        db.set_step_viewed(key(7), "src/b.rs".into(), false)
+        db.set_step_viewed(key(7), "src/b.rs".into(), None)
             .await
             .unwrap();
         assert_eq!(
             db.viewed_steps(&key(7)).unwrap(),
-            HashSet::from_iter(["src/a.rs::f".to_string()])
+            HashMap::from_iter([("src/a.rs::f".to_string(), mark("h2"))])
         );
         assert!(db.viewed_steps(&key(8)).unwrap().is_empty());
+
+        db.set_file_viewed_head(key(7), "src/a.rs".into(), Some("h1".into()))
+            .await
+            .unwrap();
+        db.set_file_viewed_head(key(7), "src/a.rs".into(), Some("h2".into()))
+            .await
+            .unwrap();
+        db.set_file_viewed_head(key(7), "src/b.rs".into(), Some("h1".into()))
+            .await
+            .unwrap();
+        db.set_file_viewed_head(key(7), "src/b.rs".into(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.viewed_files(&key(7)).unwrap(),
+            HashMap::from_iter([("src/a.rs".to_string(), "h2".to_string())])
+        );
+        assert!(db.viewed_files(&key(8)).unwrap().is_empty());
     }
 }
