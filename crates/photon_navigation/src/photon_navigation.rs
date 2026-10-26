@@ -1,3 +1,4 @@
+mod language_server_fixes;
 mod set_up_language_server;
 
 use std::rc::Rc;

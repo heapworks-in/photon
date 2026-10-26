@@ -13783,6 +13783,7 @@ dependencies = [
  "language",
  "lsp",
  "project",
+ "proto",
  "regex",
  "serde_json",
  "settings",

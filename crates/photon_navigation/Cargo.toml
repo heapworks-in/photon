@@ -21,6 +21,7 @@ gpui.workspace = true
 language.workspace = true
 lsp.workspace = true
 project.workspace = true
+proto.workspace = true
 regex.workspace = true
 ui.workspace = true
 util.workspace = true
