@@ -147,8 +147,8 @@ impl AgentRegistryStore {
         let store = cx.new(|cx| Self::new(fs, http_client, cx));
         cx.set_global(GlobalAgentRegistryStore(store.clone()));
 
-        // photon: no registry fetch at startup; `refresh_if_stale` fetches it when agents are
-        // first resolved.
+        // photon: no registry fetch at startup; the agent panel fetches it the first time it's
+        // shown or its new-thread menu is opened, and connecting to a registry agent waits for it.
 
         store
     }

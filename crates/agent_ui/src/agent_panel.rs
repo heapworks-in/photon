@@ -212,6 +212,53 @@ fn read_global_last_used_agent(kvp: &KeyValueStore) -> Option<Agent> {
         .or_else(|| Some(photon_default_agent()))
 }
 
+// photon: display names for the agents Photon offers by default, used until the agent
+// registry (which carries their real names) has been fetched.
+fn photon_known_agent_name(agent_id: &AgentId) -> Option<SharedString> {
+    match agent_id.0.as_ref() {
+        agent_servers::CLAUDE_AGENT_ID => Some("Claude Code".into()),
+        agent_servers::CODEX_ID => Some("Codex".into()),
+        _ => None,
+    }
+}
+
+// photon: registry agents in settings that aren't registered yet because the agent registry
+// hasn't been fetched; Photon offers them anyway and fetches the registry when one is picked.
+fn photon_unloaded_registry_agents(
+    agent_server_store: &project::AgentServerStore,
+    cx: &App,
+) -> Vec<AgentId> {
+    let registry_store = project::AgentRegistryStore::try_global(cx);
+    AllAgentServersSettings::get_global(cx)
+        .iter()
+        .filter(|(_, settings)| {
+            matches!(
+                settings,
+                project::agent_server_store::CustomAgentServerSettings::Registry { .. }
+            )
+        })
+        .map(|(id, _)| AgentId::new(id.clone()))
+        .filter(|id| !agent_server_store.external_agents.contains_key(id))
+        .filter(|id| {
+            registry_store
+                .as_ref()
+                .is_none_or(|store| store.read(cx).agent(id).is_none())
+        })
+        .collect()
+}
+
+// photon: Photon doesn't fetch the agent registry at startup; it's fetched the first time the
+// user shows the agent panel or opens its new-thread menu.
+fn photon_load_agent_registry(cx: &mut App) {
+    if let Some(registry_store) = project::AgentRegistryStore::try_global(cx) {
+        registry_store.update(cx, |registry_store, cx| {
+            if registry_store.agents().is_empty() {
+                registry_store.refresh(cx);
+            }
+        });
+    }
+}
+
 // photon: the built-in agent is off; agents run over ACP, Claude Code first.
 fn photon_default_agent() -> Agent {
     Agent::Custom {
@@ -5131,6 +5178,7 @@ impl Panel for AgentPanel {
     fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.is_active = active;
         if active {
+            photon_load_agent_registry(cx); // photon: the registry loads on first use
             self.ensure_thread_initialized(window, cx);
         }
     }
@@ -5915,6 +5963,7 @@ impl AgentPanel {
 
             let label = store
                 .agent_display_name(&id)
+                .or_else(|| photon_known_agent_name(id)) // photon: names before the registry loads
                 .unwrap_or_else(|| self.selected_agent.label());
             (icon, label)
         } else {
@@ -5938,6 +5987,7 @@ impl AgentPanel {
             let agent_server_store = agent_server_store;
 
             Rc::new(move |window, cx| {
+                photon_load_agent_registry(cx); // photon: the registry loads on first use
                 Some(ContextMenu::build(window, cx, |menu, _window, cx| {
                     menu.context(focus_handle.clone())
                         // photon: the built-in agent is off; agents run over ACP.
@@ -6017,8 +6067,11 @@ impl AgentPanel {
                                 display_name: SharedString,
                             }
 
+                            let unloaded_registry_agents =
+                                photon_unloaded_registry_agents(agent_server_store, cx); // photon: offered before the registry loads
                             let agent_items = agent_server_store
                                 .external_agents()
+                                .chain(&unloaded_registry_agents) // photon: offered before the registry loads
                                 .map(|agent_id| {
                                     let display_name = agent_server_store
                                         .agent_display_name(agent_id)
@@ -6028,6 +6081,7 @@ impl AgentPanel {
                                                 .and_then(|store| store.agent(agent_id))
                                                 .map(|a| a.name().clone())
                                         })
+                                        .or_else(|| photon_known_agent_name(agent_id)) // photon: names before the registry loads
                                         .unwrap_or_else(|| agent_id.0.clone());
                                     AgentMenuItem {
                                         id: agent_id.clone(),
@@ -12491,6 +12545,251 @@ mod tests {
             "the menu is open"
         );
         assert!(cx.debug_bounds("MENU_ITEM-Photon Agent").is_none());
+        // Claude Code and Codex are offered before the agent registry has been fetched.
+        assert!(
+            cx.debug_bounds("MENU_ITEM-Claude Code").is_some(),
+            "Claude Code is offered"
+        );
+        assert!(
+            cx.debug_bounds("MENU_ITEM-Codex").is_some(),
+            "Codex is offered"
+        );
+    }
+
+    // photon: a fake ACP registry listing Claude Code and Codex. Registry requests are counted,
+    // answered with `status`, and held until `gate` fires when one is given.
+    fn photon_fake_registry(
+        registry_requests: Arc<std::sync::atomic::AtomicUsize>,
+        status: u16,
+        gate: Option<futures::channel::oneshot::Receiver<()>>,
+    ) -> Arc<http_client::HttpClientWithUrl> {
+        let gate = Arc::new(Mutex::new(gate));
+        http_client::FakeHttpClient::create(move |request| {
+            let is_registry = request.uri().to_string().ends_with("registry.json");
+            if is_registry {
+                registry_requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            let gate = if is_registry {
+                gate.lock().take()
+            } else {
+                None
+            };
+            async move {
+                if let Some(gate) = gate {
+                    gate.await.ok();
+                }
+                let body = if is_registry && status == 200 {
+                    json!({
+                        "version": "1",
+                        "agents": [
+                            {
+                                "id": agent_servers::CLAUDE_AGENT_ID,
+                                "name": "Claude Code",
+                                "version": "1.0.0",
+                                "description": "",
+                                "distribution": { "npx": { "package": "claude-agent-acp" } }
+                            },
+                            {
+                                "id": agent_servers::CODEX_ID,
+                                "name": "Codex",
+                                "version": "1.0.0",
+                                "description": "",
+                                "distribution": { "npx": { "package": "codex-acp" } }
+                            }
+                        ]
+                    })
+                    .to_string()
+                } else {
+                    String::new()
+                };
+                Ok(http_client::Response::builder()
+                    .status(if is_registry { status } else { 404 })
+                    .body(body.into())?)
+            }
+        })
+    }
+
+    // photon: a workspace with an agent panel that hasn't been shown, on a machine where the
+    // agent registry has never been fetched.
+    async fn photon_panel_with_fake_registry(
+        http_client: Arc<http_client::HttpClientWithUrl>,
+        cx: &mut TestAppContext,
+    ) -> (Entity<AgentPanel>, Entity<Workspace>, VisualTestContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+            cx.set_global(db::AppDatabase::test_new());
+        });
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| {
+            <dyn fs::Fs>::set_global(fs.clone(), cx);
+            project::AgentRegistryStore::init_global(cx, fs.clone(), http_client);
+        });
+        fs.insert_tree("/project", json!({ "file.txt": "" })).await;
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+        workspace.update(cx, |workspace, _cx| workspace.set_random_database_id());
+        let mut cx = VisualTestContext::from_window(multi_workspace.into(), cx);
+        let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+        cx.run_until_parked();
+        (panel, workspace, cx)
+    }
+
+    fn photon_active_agent_and_error(
+        panel: &Entity<AgentPanel>,
+        cx: &VisualTestContext,
+    ) -> (Agent, bool, Option<String>) {
+        panel.read_with(cx, |panel, cx| {
+            let conversation_view = panel
+                .active_conversation_view()
+                .expect("the panel shows a thread")
+                .read(cx);
+            (
+                conversation_view.agent_key().clone(),
+                conversation_view.is_loading(),
+                conversation_view.load_error(),
+            )
+        })
+    }
+
+    #[gpui::test]
+    async fn photon_agent_registry_is_fetched_on_first_use(cx: &mut TestAppContext) {
+        let registry_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (panel, workspace, mut cx) = photon_panel_with_fake_registry(
+            photon_fake_registry(registry_requests.clone(), 200, None),
+            cx,
+        )
+        .await;
+        assert_eq!(
+            registry_requests.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "nothing is fetched at startup"
+        );
+
+        // An agent that isn't from the registry, so only the panel itself asks for the registry.
+        panel.update(&mut cx, |panel, _| {
+            panel.selected_agent = Agent::Custom {
+                id: AgentId::new("devin"),
+            };
+        });
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.focus_panel::<AgentPanel>(window, cx);
+        });
+        cx.run_until_parked();
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.toggle_new_thread_menu(&ToggleNewThreadMenu, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            registry_requests.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "showing the panel and opening its menu fetch the registry once"
+        );
+        assert!(cx.debug_bounds("MENU_ITEM-Claude Code").is_some());
+        assert!(cx.debug_bounds("MENU_ITEM-Codex").is_some());
+        panel.read_with(&cx, |panel, cx| {
+            let agent_server_store = panel.project.read(cx).agent_server_store().read(cx);
+            assert!(
+                agent_server_store
+                    .external_agents
+                    .contains_key(&AgentId::new(agent_servers::CLAUDE_AGENT_ID))
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn photon_agent_picked_before_the_registry_loads_waits_for_it(cx: &mut TestAppContext) {
+        let registry_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (release_registry, gate) = futures::channel::oneshot::channel();
+        let (panel, workspace, mut cx) = photon_panel_with_fake_registry(
+            photon_fake_registry(registry_requests.clone(), 200, Some(gate)),
+            cx,
+        )
+        .await;
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.focus_panel::<AgentPanel>(window, cx);
+        });
+        cx.run_until_parked();
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.new_external_agent_thread(
+                &NewExternalAgentThread {
+                    agent: AgentId::new(agent_servers::CODEX_ID),
+                },
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let codex = Agent::Custom {
+            id: AgentId::new(agent_servers::CODEX_ID),
+        };
+        let (agent, is_loading, error) = photon_active_agent_and_error(&panel, &cx);
+        assert_eq!(agent, codex);
+        assert!(is_loading, "the thread waits for the registry: {error:?}");
+
+        release_registry.send(()).ok();
+        cx.run_until_parked();
+        let (agent, _, error) = photon_active_agent_and_error(&panel, &cx);
+        assert_eq!(agent, codex);
+        assert!(
+            error
+                .as_ref()
+                .is_none_or(|error| !error.contains("not registered")),
+            "Codex starts once the registry loads: {error:?}"
+        );
+        assert_eq!(
+            registry_requests.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[gpui::test]
+    async fn photon_failed_registry_fetch_is_shown(cx: &mut TestAppContext) {
+        let registry_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (panel, workspace, mut cx) = photon_panel_with_fake_registry(
+            photon_fake_registry(registry_requests.clone(), 404, None),
+            cx,
+        )
+        .await;
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.focus_panel::<AgentPanel>(window, cx);
+        });
+        cx.run_until_parked();
+
+        let (_, is_loading, error) = photon_active_agent_and_error(&panel, &cx);
+        assert!(!is_loading);
+        let error = error.expect("the thread shows why it couldn't start");
+        assert!(
+            error.contains("Couldn't load the agent registry") && error.contains("404"),
+            "{error}"
+        );
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.toggle_new_thread_menu(&ToggleNewThreadMenu, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            registry_requests.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "opening the menu retries a failed fetch"
+        );
+        let (_, is_loading, error) = photon_active_agent_and_error(&panel, &cx);
+        assert!(
+            !is_loading && error.is_some(),
+            "the retry fails the same way"
+        );
     }
 
     #[gpui::test]

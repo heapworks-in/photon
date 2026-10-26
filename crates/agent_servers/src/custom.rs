@@ -257,6 +257,9 @@ impl AgentServer for CustomAgentServer {
                     extra_env.insert("GEMINI_API_KEY".into(), api_key);
                 }
             }
+            if is_registry_agent {
+                photon_wait_for_registry(&agent_id, &store, cx).await?; // photon: registry loads on first use
+            }
             let command = store
                 .update(cx, |store, cx| {
                     let agent = store.get_external_agent(&agent_id).with_context(|| {
@@ -287,6 +290,46 @@ impl AgentServer for CustomAgentServer {
 
     fn into_any(self: Rc<Self>) -> Rc<dyn std::any::Any> {
         self
+    }
+}
+
+// photon: Photon fetches the agent registry on first use instead of at startup, so a registry
+// agent can be picked before it's registered. Wait for the fetch rather than failing as
+// unregistered, and report why the fetch failed if it did.
+async fn photon_wait_for_registry(
+    agent_id: &AgentId,
+    store: &gpui::WeakEntity<project::AgentServerStore>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<()> {
+    let Some(registry_store) = cx.update(|cx| project::AgentRegistryStore::try_global(cx)) else {
+        return Ok(());
+    };
+    let (notified_tx, mut notified_rx) = futures::channel::mpsc::unbounded();
+    let _subscription = cx.update(|cx| {
+        cx.observe(&registry_store, move |_, _| {
+            notified_tx.unbounded_send(()).ok();
+        })
+    });
+    loop {
+        let registered =
+            store.read_with(cx, |store, _| store.external_agents.contains_key(agent_id))?;
+        if registered {
+            return Ok(());
+        }
+        let (is_fetching, fetch_error) = registry_store.read_with(cx, |registry_store, _| {
+            (registry_store.is_fetching(), registry_store.fetch_error())
+        });
+        if !is_fetching {
+            return match fetch_error {
+                Some(error) => Err(anyhow::anyhow!(
+                    "Couldn't load the agent registry to start {agent_id}: {error}"
+                )),
+                None => Ok(()),
+            };
+        }
+        if futures::StreamExt::next(&mut notified_rx).await.is_none() {
+            return Ok(());
+        }
     }
 }
 

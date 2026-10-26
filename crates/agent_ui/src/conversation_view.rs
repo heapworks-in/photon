@@ -1911,6 +1911,15 @@ impl ConversationView {
         matches!(self.server_state, ServerState::Loading { .. })
     }
 
+    // photon: lets agent panel tests check the error a thread shows.
+    #[cfg(test)]
+    pub(crate) fn load_error(&self) -> Option<String> {
+        match &self.server_state {
+            ServerState::LoadError { error } => Some(error.to_string()),
+            _ => None,
+        }
+    }
+
     fn send_queued_after_confirmed_idle(
         &mut self,
         window: &mut Window,

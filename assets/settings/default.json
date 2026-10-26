@@ -3067,6 +3067,10 @@
   "context_servers": {},
   // Configures agent servers available in the agent panel.
   "agent_servers": {
+    // photon: Claude Code and Codex are always offered; each downloads from the agent registry
+    // the first time it's used.
+    "claude-acp": { "type": "registry" },
+    "codex-acp": { "type": "registry" },
     // photon: Devin CLI over ACP (`devin acp`), using the user's existing Devin login.
     "devin": { "type": "custom", "command": "devin", "args": ["acp"] },
   },
