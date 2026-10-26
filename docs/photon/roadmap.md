@@ -3,10 +3,17 @@
 Motto: **review first, review fast.** Every item follows the product rules in CLAUDE.md: looks like
 Zed, simple UX, never resource hungry, fully tested.
 
+## Done
+- [x] Idle memory "regression" in 0.1.5: a measurement artifact (bare binary vs app bundle).
+- [x] Open a pull request from its URL (0.1.6).
+- [x] Call hierarchy tree panel (0.1.6).
+- [x] Claude Code and Codex always offered; registry loads on first use (0.1.7).
+- [x] PR review: comment counts, comments off the diff, resizable steps, sharper review prompt (0.1.8).
+- [x] Markdown: preview first, one-tab flip, double-click to edit, full-size images and Mermaid, missing-image card, `.excalidraw.svg` in docs (0.1.8).
+
 ## In progress
-- [ ] Idle memory regression in 0.1.5 (+56 MB vs 0.1.4, no diagram open): root cause, then fix.
-- [ ] Open a pull request from its URL (branch `open-pr-by-url`, built and tested).
-- [ ] Call hierarchy tree panel: "Keep open" from Zed's call hierarchy popup; multi-level, lazily expanded tree of callers or calls.
+- [ ] PR review comment text hard to read (needs a screenshot).
+- [ ] Focused-window idle CPU (about 4% at idle, 10% with a diagram open; seen in 0.1.6 and later).
 
 ## Next: review agent work
 1. [ ] Agent threads anchored to a selection (⌥T, `path:lines` chip), "this file" filter, list badges (running, failed, finished in background).
@@ -33,9 +40,9 @@ Zed, simple UX, never resource hungry, fully tested.
 16. [ ] Language server setup help: "Set up" status with the install command and Detect & Start; fallback outline without a server.
 
 ## Then: docs and diagrams
-17. [ ] Markdown preview: source ↔ preview in one tab, edit from the section you're reading, Mermaid zoom/fullscreen and theme re-render, image lightbox, "not found" image card, code copy button, relative links open in a tab.
+17. [ ] Markdown preview leftovers: zoom and pan in the full-size view; open `.excalidraw.svg` images in the editor from the preview.
 18. [ ] Image viewer: pan, zoom, background contrast, pixel-exact mode.
-19. [ ] Excalidraw: `.excalidraw.svg` / `.png`, diagrams in Markdown preview, Reveal in Finder after export, "Open as text" for broken files.
+19. [ ] Excalidraw: `.excalidraw.png`, Reveal in Finder after export, "Open as text" for broken files.
 
 ## Then: workbench
 20. [ ] Open a folder or PR by path or URL with autocomplete; pinned recent projects and PRs with status; stop idle workspaces; CPU · RAM · language server readout.
