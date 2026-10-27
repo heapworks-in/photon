@@ -43,32 +43,114 @@
       <p class="meta">Free and open source. macOS on Apple silicon. Alpha: used every day, with some rough edges. <a href="https://github.com/heapworks-in/photon/releases">Release notes</a></p>
     </div>
 
-    <div class="term" aria-label="A terminal in Photon: a test run becomes a block you can act on">
-      <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="term-title">billing — zsh</span></div>
-      <div class="block done" style="--i:0">
-        <div class="bh"><span class="path">~/code/billing</span><span class="branch">retry-card-charges</span><span class="dur">(3.2s)</span></div>
-        <div class="cmd">cargo build</div>
-        <div class="out"><span class="g">   Compiling</span> billing v0.4.0<br><span class="g">    Finished</span> `dev` profile in 3.14s</div>
-      </div>
-      <div class="block fail" style="--i:1">
-        <div class="bh"><span class="path">~/code/billing</span><span class="branch">retry-card-charges</span><span class="chip-fail">2 failed · 7 passed</span><span class="acts"><button type="button">Re-run failed</button><button type="button">Open errors</button></span></div>
-        <div class="cmd">cargo test</div>
-        <div class="out">
-          <span class="l" style="--l:0">running 9 tests</span>
-          <span class="l" style="--l:1">test invoice::tests::total_subtracts_discount ... <span class="g">ok</span></span>
-          <span class="l" style="--l:2">test payments::tests::declines_are_not_retried ... <span class="g">ok</span></span>
-          <span class="l" style="--l:3">test payments::tests::retries_gateway_timeouts ... <span class="r">FAILED</span></span>
-          <span class="l" style="--l:4">test retry::tests::delays_double_up_to_the_cap ... <span class="g">ok</span></span>
-          <span class="l" style="--l:5">test retry::tests::delay_never_passes_max ... <span class="r">FAILED</span></span>
-          <span class="l" style="--l:6"></span>
-          <span class="l" style="--l:7">thread 'retry::tests::delay_never_passes_max' panicked at <span class="link">src/retry.rs:52:9</span></span>
-          <span class="l" style="--l:8">test result: <span class="r">FAILED</span>. 7 passed; 2 failed</span>
+    <div class="hero-right">
+    <div class="stage" data-stage>
+      <!-- Scene 1: the terminal -->
+      <div class="scene scene-term is-active" data-scene="terminal" data-duration="6200">
+        <div class="term" aria-label="A terminal in Photon: a test run becomes a block you can act on">
+          <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="term-title">billing — zsh</span></div>
+          <div class="block done" style="--i:0">
+            <div class="bh"><span class="path">~/code/billing</span><span class="branch">retry-card-charges</span><span class="dur">(3.2s)</span></div>
+            <div class="cmd">cargo build</div>
+            <div class="out"><span class="g">   Compiling</span> billing v0.4.0<br><span class="g">    Finished</span> `dev` profile in 3.14s</div>
+          </div>
+          <div class="block fail" style="--i:1">
+            <div class="bh"><span class="path">~/code/billing</span><span class="branch">retry-card-charges</span><span class="chip-fail">2 failed · 7 passed</span><span class="acts"><button type="button" tabindex="-1">Re-run failed</button><button type="button" tabindex="-1">Open errors</button></span></div>
+            <div class="cmd">cargo test</div>
+            <div class="out">
+              <span class="l" style="--l:0">running 9 tests</span>
+              <span class="l" style="--l:1">test invoice::tests::total_subtracts_discount ... <span class="g">ok</span></span>
+              <span class="l" style="--l:2">test payments::tests::declines_are_not_retried ... <span class="g">ok</span></span>
+              <span class="l" style="--l:3">test payments::tests::retries_gateway_timeouts ... <span class="r">FAILED</span></span>
+              <span class="l" style="--l:4">test retry::tests::delays_double_up_to_the_cap ... <span class="g">ok</span></span>
+              <span class="l" style="--l:5">test retry::tests::delay_never_passes_max ... <span class="r">FAILED</span></span>
+              <span class="l" style="--l:6"></span>
+              <span class="l" style="--l:7">thread 'retry::tests::delay_never_passes_max' panicked at <span class="link">src/retry.rs:52:9</span></span>
+              <span class="l" style="--l:8">test result: <span class="r">FAILED</span>. 7 passed; 2 failed</span>
+            </div>
+          </div>
+          <div class="prompt" style="--i:2"><span class="path">~/code/billing</span><span class="branch">retry-card-charges</span><span class="caret"></span></div>
         </div>
       </div>
-      <div class="prompt" style="--i:2"><span class="path">~/code/billing</span><span class="branch">retry-card-charges</span><span class="caret"></span></div>
+
+      <!-- Scene 2: a pull request review -->
+      <div class="scene scene-review" data-scene="review" data-duration="7600" aria-label="A pull request review in Photon: steps on the left, the diff with a comment and an AI draft on the right, and Ready to merge in the header">
+        <div class="rv">
+          <div class="rv-head">
+            <div class="rv-title">Retry declined card charges with backoff</div>
+            <div class="rv-meta"><span>#214</span><span>priya → main</span><span class="stat"><i class="g">+94</i> <i class="r">−9</i></span><span class="pill pill-ok">Ready to merge</span><span class="rv-btn rv-primary">Submit review</span></div>
+          </div>
+          <div class="rv-body">
+            <div class="rv-steps">
+              <div class="rv-progress">3 of 4 steps left to review</div>
+              <div class="rv-row" style="--i:0"><span class="rv-chev">›</span>Checklist <span class="rv-dim">2/9</span></div>
+              <div class="rv-row" style="--i:1"><span class="rv-ico">◌</span>Conversation <span class="rv-count">2</span></div>
+              <div class="rv-row" style="--i:2"><span class="rv-box"></span>api.rs · charge_failed()</div>
+              <div class="rv-row" style="--i:3"><span class="rv-box rv-ticks"></span>payments.rs · new()</div>
+              <div class="rv-row rv-sel" style="--i:4"><span class="rv-box"></span><span>retry.rs · default()<small>Changed since you viewed it</small></span><span class="rv-count">2</span></div>
+              <div class="rv-row" style="--i:5"><span class="rv-box rv-on"></span>main.rs</div>
+            </div>
+            <div class="rv-diff">
+              <div class="rv-file">retry.rs <span class="rv-dim">src/</span><span class="stat"><i class="g">+68</i> <i class="r">−0</i></span></div>
+              <div class="dl" style="--l:0"><span class="n">24</span><span class="t"><span class="k">impl</span> Backoff {</span></div>
+              <div class="dl add" style="--l:1"><span class="n">25</span><span class="t">    <span class="k">pub fn</span> <span class="f">delay</span>(&amp;self, attempt: u32) → Duration {</span></div>
+              <div class="card card-ai" style="--l:2">
+                <div class="card-h"><b>you</b> line 25 <span class="chip">Draft</span><span class="chip">AI</span><span class="chip chip-warn">should fix</span><span class="chip">Reliability</span></div>
+                <div class="card-b">With these defaults the four attempts can wait about 8 s in total while <code>charge_invoice</code> holds the HTTP request. Give the API handler a shorter budget.</div>
+              </div>
+              <div class="dl add" style="--l:3"><span class="n">26</span><span class="t">        <span class="k">let</span> exponential = self.initial.saturating_mul(2u32.saturating_pow(attempt));</span></div>
+              <div class="dl add" style="--l:4"><span class="n">27</span><span class="t">        <span class="k">let</span> jitter = rand::rng().random_range(0..=capped.as_millis() / 4);</span></div>
+              <div class="card card-thread" style="--l:5">
+                <div class="card-h"><b>devon</b> 22 days ago</div>
+                <div class="card-b">Jitter is added after the cap, so <code>max</code> isn't really the maximum. Cap after adding it?</div>
+                <div class="card-acts"><span class="rv-btn">Reply</span><span class="rv-btn rv-quiet">Resolve</span></div>
+              </div>
+              <div class="dl add" style="--l:6"><span class="n">28</span><span class="t">        capped + Duration::from_millis(jitter)</span></div>
+            </div>
+          </div>
+          <div class="toast">Kept 1 of 3 findings; dropped 2 it couldn't confirm</div>
+        </div>
+      </div>
+
+      <!-- Scene 3: the call map -->
+      <div class="scene scene-map" data-scene="map" data-duration="6800" aria-label="Photon's call map: the callers of charge drawn left to right, with the trail from main lit up">
+        <div class="cm">
+          <div class="cm-head">
+            <div class="cm-root"><span class="glyph">ƒ</span><b>Gateway::charge</b><span class="chip chip-mod">changed in PR #214</span><span class="cm-ctrl"><span class="seg"><i class="on">Callers</i><i>Calls</i></span><span class="cm-sum">4 callers</span></span></div>
+            <div class="cm-crumb">trail <span class="c1">main</span> › <span class="c2">run_nightly</span> › <span class="c3">retry_failed_invoices</span> › <b>charge</b></div>
+          </div>
+          <div class="cm-graph">
+            <svg viewBox="0 0 600 240" preserveAspectRatio="none" aria-hidden="true">
+              <g class="e dimmed" fill="none" stroke="#2c2c2c" stroke-width="1.5">
+                <path d="M 372 34 C 405 34, 405 120, 425 120"/>
+                <path d="M 388 173 C 410 173, 410 120, 425 120"/>
+                <path d="M 376 211 C 410 211, 410 120, 425 120"/>
+              </g>
+              <g class="e lit" fill="none" stroke="#19aad8" stroke-width="2">
+                <path class="p1" d="M 76 120 L 89 120"/>
+                <path class="p2" d="M 201 120 L 212 120"/>
+                <path class="p3" d="M 410 120 L 425 120"/>
+              </g>
+            </svg>
+            <div class="node trail" style="--c:0; left:1%; top:50%"><span class="glyph entry">▶</span>main</div>
+            <div class="node trail" style="--c:1; left:15%; top:50%"><span class="glyph">ƒ</span>run_nightly</div>
+            <div class="node trail" style="--c:2; left:36%; top:50%"><span class="glyph">ƒ</span>retry_failed_invoices <small>×2</small></div>
+            <div class="node dim" style="--c:2; left:36%; top:14%"><span class="glyph entry">▶</span>charge_invoice <small>handler</small></div>
+            <div class="node dim" style="--c:2; left:36%; top:72%"><span class="glyph test">✓</span>gateway_timeout <small>test</small></div>
+            <div class="node dim" style="--c:2; left:36%; top:88%"><span class="glyph">ƒ</span>charge_fallback <small>↺</small></div>
+            <div class="node root" style="--c:3; left:72%; top:50%"><span class="glyph">ƒ</span>charge <small>payments.rs</small></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="scene-bar" role="tablist" aria-label="Scenes">
+      <button type="button" role="tab" aria-selected="true" data-scene-to="terminal">Terminal</button>
+      <button type="button" role="tab" aria-selected="false" data-scene-to="review">PR review</button>
+      <button type="button" role="tab" aria-selected="false" data-scene-to="map">Call map</button>
+    </div>
     </div>
   </div>
-  <div class="wrap"><p class="hero-note">Every command becomes a block: where it ran, how long it took, whether it worked. Test runs are summarised, failures are one click to rerun, and <code>src/retry.rs:52</code> opens in the editor beside it.</p></div>
+  <div class="wrap"><p class="hero-note">Watch it work: a test run becomes a block you can act on, a pull request is reviewed step by step with an AI draft that checked itself, and the callers of a function are drawn as a map.</p></div>
 </section>
 
 <!-- Index -->
@@ -316,6 +398,44 @@
       catch { button.textContent = "Select and copy"; }
       setTimeout(() => { button.textContent = "Copy"; }, 1800);
     });
+  }
+  // The hero stage: plays each scene, then the next; click the bar to jump; hover pauses.
+  for (const stage of document.querySelectorAll("[data-stage]")) {
+    const scenes = [...stage.querySelectorAll("[data-scene]")];
+    const bar = stage.parentElement.querySelector(".scene-bar");
+    const buttons = bar ? [...bar.querySelectorAll("[data-scene-to]")] : [];
+    const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const params = new URLSearchParams(location.search);
+    let current = Math.max(0, scenes.findIndex((s) => s.dataset.scene === params.get("scene")));
+    let timer = null;
+    let paused = false;
+
+    const play = (index) => {
+      const from = scenes.findIndex((s) => s.classList.contains("is-active"));
+      scenes.forEach((s, i) => {
+        s.classList.toggle("is-leaving", i === from && i !== index);
+        s.classList.toggle("is-active", i === index);
+        s.classList.remove("play");
+      });
+      const scene = scenes[index];
+      void scene.offsetWidth;
+      scene.classList.add("play");
+      const duration = Number(scene.dataset.duration) || 6000;
+      buttons.forEach((b, i) => {
+        b.setAttribute("aria-selected", String(i === index));
+        b.style.setProperty("--dur", duration + "ms");
+      });
+      current = index;
+      clearTimeout(timer);
+      if (!reduced && !params.has("hold")) {
+        timer = setTimeout(() => { if (!paused) play((index + 1) % scenes.length); else timer = null; }, duration + 450);
+      }
+    };
+    buttons.forEach((b, i) => b.addEventListener("click", () => play(i)));
+    stage.addEventListener("mouseenter", () => { paused = true; bar?.classList.add("is-paused"); });
+    stage.addEventListener("mouseleave", () => { paused = false; bar?.classList.remove("is-paused"); if (timer === null) play((current + 1) % scenes.length); });
+    scenes.forEach((s) => { s.classList.remove("is-active"); });
+    play(current);
   }
   for (const tabs of document.querySelectorAll("[data-tabs]")) {
     const buttons = [...tabs.querySelectorAll("[role=tab]")];
