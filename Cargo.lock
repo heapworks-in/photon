@@ -13822,7 +13822,24 @@ dependencies = [
 name = "photon_plan_review"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "db",
+ "editor",
+ "fs",
+ "gpui",
+ "language",
+ "log",
+ "markdown",
+ "photon_navigation",
+ "project",
  "regex",
+ "serde",
+ "serde_json",
+ "settings",
+ "sha2",
+ "ui",
+ "util",
+ "workspace",
 ]
 
 [[package]]
