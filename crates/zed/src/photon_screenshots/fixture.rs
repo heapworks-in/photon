@@ -221,7 +221,11 @@ pub const JOBS_RS: &str = r#"use std::{sync::Arc, time::Duration};
 
 use tracing::{info, warn};
 
-use crate::{ledger::Ledger, payments::Gateway};
+use crate::{
+    invoice::Invoice,
+    ledger::Ledger,
+    payments::{ChargeError, Gateway, Receipt},
+};
 
 pub async fn run_nightly(ledger: Ledger, gateway: Arc<Gateway>) {
     let mut interval = tokio::time::interval(Duration::from_secs(24 * 60 * 60));
@@ -246,6 +250,33 @@ async fn retry_failed_invoices(ledger: &Ledger, gateway: &Gateway) {
             }
             Err(error) => warn!(invoice = invoice.id, %error, "charge failed again"),
         }
+    }
+}
+
+/// Tries the backup gateway, then the primary again, while the gateways are down.
+pub async fn charge_with_fallback(
+    primary: &Gateway,
+    backup: &Gateway,
+    invoice: &Invoice,
+    attempts: u32,
+) -> Result<Receipt, ChargeError> {
+    match primary.charge(invoice).await {
+        Err(ChargeError::Unavailable(_)) if attempts > 1 => {
+            Box::pin(charge_with_fallback(backup, primary, invoice, attempts - 1)).await
+        }
+        result => result,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn retries_gateway_timeouts() {
+        let gateway = Gateway::new("sk_test_timeouts");
+        let invoice = Invoice::for_test(4_200);
+        assert!(gateway.charge(&invoice).await.is_err());
     }
 }
 "#;
@@ -789,6 +820,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("run_nightly", "src/jobs.rs"),
     ("retry_failed_invoices", "src/jobs.rs"),
     ("main", "src/main.rs"),
+    ("charge_with_fallback", "src/jobs.rs"),
+    ("retries_gateway_timeouts", "src/jobs.rs"),
 ];
 
 pub const CALLS: &[(&str, &str)] = &[
@@ -806,6 +839,9 @@ pub const CALLS: &[(&str, &str)] = &[
     ("charge", "send_charge"),
     ("charge", "is_retryable"),
     ("retry_with_backoff", "delay"),
+    ("charge_with_fallback", "charge"),
+    ("charge_with_fallback", "charge_with_fallback"),
+    ("retries_gateway_timeouts", "charge"),
 ];
 
 /// An untracked file in the `git status` close-up.

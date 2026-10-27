@@ -1754,23 +1754,86 @@ mod mac {
 
         fn call_hierarchy(&mut self) -> Result<()> {
             self.call_hierarchy_at(false)?;
-            self.call_hierarchy_at(true)
+            self.call_hierarchy_at(true)?;
+            self.call_map()
         }
 
-        fn call_hierarchy_at(&mut self, close_up: bool) -> Result<()> {
-            let win = self.scene_window(close_up)?;
+        /// Call Trails on `charge`, with the pull request that changes it open in a tab, so the
+        /// header flags it. Opens charge_invoice's call site, the recursive fallback, and the
+        /// nightly job's trail down to `main`, which ends selected.
+        fn open_call_trails(&mut self, close_up: bool) -> Result<Win> {
+            let (width, height) = if close_up {
+                (CLOSE_UP_WIDTH, CLOSE_UP_HEIGHT)
+            } else {
+                (WINDOW_WIDTH, WINDOW_HEIGHT)
+            };
+            let (win, _) = self.open_review_sized(&Self::all_unviewed(), width, height)?;
+            self.cx.update(|cx| {
+                photon_call_trails::set_hooks(
+                    photon_call_trails::CallTrailHooks {
+                        changed_in_review: Some(Rc::new(photon_review::pr_changing_rows)),
+                        explain: Some(Rc::new(|_, _, _, _| {})),
+                    },
+                    cx,
+                )
+            });
             self.add_panel(&win, photon_call_trails::CallHierarchyPanel::load)?;
             let editor = self.open_file(&win, "src/payments.rs")?;
             self.place_cursor(&win, &editor, "charge(&self")?;
             self.dispatch(&win, photon_call_trails::ShowInPanel);
-            // Expands each caller in turn: the first under the root, then its own first caller.
-            for action in ["next", "child", "next", "child", "next", "next", "child"] {
-                match action {
-                    "next" => self.dispatch(&win, menu::SelectNext),
-                    _ => self.dispatch(&win, menu::SelectChild),
-                }
+            // Rows: charge_invoice, retry_failed_invoices, charge_with_fallback, the test.
+            self.dispatch(&win, menu::SelectNext);
+            self.dispatch(&win, photon_call_trails::ToggleCallSite);
+            self.dispatch(&win, menu::SelectNext);
+            self.dispatch(&win, menu::SelectNext);
+            self.dispatch(&win, menu::SelectChild);
+            self.dispatch(&win, menu::SelectPrevious);
+            for _ in 0..4 {
+                self.dispatch(&win, menu::SelectChild);
             }
+            Ok(win)
+        }
+
+        fn call_hierarchy_at(&mut self, close_up: bool) -> Result<()> {
+            let win = self.open_call_trails(close_up)?;
             let result = self.shoot_scene(&win, close_up, "call-hierarchy", "cu-call-tree");
+            self.close(win);
+            result
+        }
+
+        /// The same trail as a map, in a panel widened the way a user would for it, cropped to
+        /// the panel's header and map.
+        fn call_map(&mut self) -> Result<()> {
+            const PANEL_WIDTH: f32 = 1100.;
+            let win = self.open_call_trails(false)?;
+            self.click(&win, "call-trail-view-map")?;
+            self.update(&win, |workspace, _, cx| {
+                if let Some(panel) = workspace.panel::<photon_call_trails::CallHierarchyPanel>(cx) {
+                    workspace.right_dock().update(cx, |dock, cx| {
+                        dock.set_panel_size_state(
+                            &panel,
+                            workspace::dock::PanelSizeState {
+                                size: Some(gpui::px(PANEL_WIDTH)),
+                                flex: None,
+                            },
+                            cx,
+                        );
+                    });
+                }
+            })?;
+            let result = self.shoot_crops(
+                &win,
+                None,
+                &[(
+                    "cu-call-map",
+                    &[Area::Exact(
+                        WINDOW_WIDTH - PANEL_WIDTH,
+                        36.,
+                        PANEL_WIDTH,
+                        340.,
+                    )],
+                )],
+            );
             self.close(win);
             result
         }
