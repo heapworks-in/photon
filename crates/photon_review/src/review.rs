@@ -1025,19 +1025,12 @@ fn relative_time(created_at: &str) -> Option<String> {
 
 fn state_chip(label: impl Into<SharedString>, color: Color, cx: &App) -> AnyElement {
     let label = label.into();
-    let tint = color.color(cx);
     div()
         .debug_selector({
             let label = label.clone();
             move || format!("photon-review-chip-{label}")
         })
-        .child(
-            ui::Chip::new(label)
-                .label_color(color)
-                .label_size(LabelSize::XSmall)
-                .bg_color(tint.opacity(0.12))
-                .border_color(tint.opacity(0.3)),
-        )
+        .child(crate::chip(label, color, LabelSize::XSmall, cx))
         .into_any_element()
 }
 
@@ -5410,7 +5403,7 @@ impl ReviewItem {
                                     if files == 1 { "" } else { "s" }
                                 )),
                             )
-                            .child(self.render_readiness()),
+                            .child(self.render_readiness(cx)),
                     ),
             )
             .child(
@@ -5757,7 +5750,7 @@ impl ReviewItem {
     }
 
     /// What matters most about merging, opening the checks, review decision and mergeability.
-    fn render_readiness(&self) -> impl IntoElement {
+    fn render_readiness(&self, cx: &App) -> impl IntoElement {
         let readiness = self.detail.readiness();
         let color = match readiness {
             Readiness::Merged => Color::Accent,
@@ -5775,11 +5768,12 @@ impl ReviewItem {
         let base = self.detail.summary.base_ref.clone();
         let menu = ui::PopoverMenu::new("photon-review-readiness")
             .trigger(
-                ui::ButtonLike::new("photon-review-readiness-trigger").child(
-                    ui::Chip::new(readiness.label())
-                        .label_color(color)
-                        .label_size(LabelSize::Small),
-                ),
+                ui::ButtonLike::new("photon-review-readiness-trigger").child(crate::chip(
+                    readiness.label(),
+                    color,
+                    LabelSize::Small,
+                    cx,
+                )),
             )
             .anchor(gpui::Anchor::TopRight)
             .menu(move |window, cx| {
