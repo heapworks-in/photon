@@ -65,9 +65,9 @@ impl AgentComment {
                 .unwrap_or_default()
         });
         let lead = match (category, label(&self.severity)) {
-            (Some(category), Some(severity)) => format!("**{category}** ({severity}): "),
-            (Some(category), None) => format!("**{category}**: "),
-            (None, Some(severity)) => format!("**{severity}**: "),
+            (Some(category), Some(severity)) => format!("{category} ({severity}): "),
+            (Some(category), None) => format!("{category}: "),
+            (None, Some(severity)) => format!("{severity}: "),
             (None, None) => String::new(),
         };
         format!("{lead}{}", self.body.trim())
@@ -768,11 +768,11 @@ mod tests {
         };
         assert_eq!(
             finding(Some("must fix"), Some("data loss")).draft_text(),
-            "**Data loss** (must fix): Retries forever on a 404."
+            "Data loss (must fix): Retries forever on a 404."
         );
         assert_eq!(
             finding(None, Some("tests")).draft_text(),
-            "**Tests**: Retries forever on a 404."
+            "Tests: Retries forever on a 404."
         );
         assert_eq!(
             finding(Some(" "), None).draft_text(),
@@ -782,7 +782,7 @@ mod tests {
             "```json\n[{\"path\":\"a.rs\",\"line\":2,\"severity\":\"nice to have\",\"category\":\"performance\",\"body\":\"x\"}]\n```",
         )
         .expect("parse");
-        assert_eq!(parsed[0].draft_text(), "**Performance** (nice to have): x");
+        assert_eq!(parsed[0].draft_text(), "Performance (nice to have): x");
     }
 
     #[test]

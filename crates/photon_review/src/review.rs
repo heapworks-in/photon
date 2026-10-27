@@ -9868,8 +9868,8 @@ fn verify_password(user: &str, password: &str) -> bool {
             assert_eq!(
                 bodies,
                 [
-                    "**Security** (must fix): Audit before the check?",
-                    "**Logic** (must fix): Wrong order."
+                    "Security (must fix): Audit before the check?",
+                    "Logic (must fix): Wrong order."
                 ]
             );
         });
