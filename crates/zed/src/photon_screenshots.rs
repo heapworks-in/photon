@@ -14,7 +14,8 @@
 //! settings: GitHub answers come from a fake `gh`, language servers are fakes, and the agent is
 //! a stub. Terminals run zsh in a fixture home whose `bin/` has canned `cargo` and `kubectl`.
 //!
-//! Close-ups (`cu-*`) are crops of a window, or small windows saved whole. `PHOTON_SCENES=a,b`
+//! Every scene uses a 1440x900 window with large type, so each image reads well at the site's
+//! width; close-ups (`cu-*`) are mostly whole windows showing one panel. `PHOTON_SCENES=a,b`
 //! runs only those scenes; `PHOTON_FULL=<dir>` also keeps each whole-window capture there, for
 //! placing a crop.
 
@@ -99,9 +100,8 @@ mod mac {
 
     const WINDOW_WIDTH: f32 = 1440.;
     const WINDOW_HEIGHT: f32 = 900.;
-    /// Close-ups that are a whole window use this smaller one, so the UI fills the image.
-    const CLOSE_UP_WIDTH: f32 = 960.;
-    const CLOSE_UP_HEIGHT: f32 = 600.;
+    const UI_FONT_SIZE: f32 = 17.;
+    const BUFFER_FONT_SIZE: f32 = 16.;
     const REVIEWER: &str = "maya";
     const AUTHOR: &str = "priya";
     const OWNER: &str = "orbit-labs";
@@ -211,7 +211,7 @@ mod mac {
             let head_sha = commit(
                 &root,
                 AUTHOR,
-                "Add jitter and answer 503 while the gateway is down",
+                "Add jitter and return 503 while the gateway is down",
                 3,
             )?;
             Ok(Self {
@@ -477,7 +477,6 @@ mod mac {
         let retry_head = std::fs::read_to_string(repo.root.join("src/retry.rs"))?;
         let payments_head = std::fs::read_to_string(repo.root.join("src/payments.rs"))?;
         let jitter_line = line_of(&retry_head, "let jitter")?;
-        let exponential_line = line_of(&retry_head, "let exponential")?;
         let sum_line = line_of(&retry_head, "capped + Duration::from_millis(jitter)")?;
         let retryable_line = line_of(&payments_head, "|| error.is_connect()")?;
         Ok(json!({ "data": { "repository": {
@@ -523,21 +522,8 @@ mod mac {
                         "startLine": null,
                         "diffSide": "RIGHT",
                         "comments": { "nodes": [
-                            comment(9101, "devon", "Jitter is added after the cap, so `max` isn't really the maximum: the last wait can reach 6.25 s. Cap after adding it?", 4),
-                            comment(9102, AUTHOR, "That's on purpose: the spread above the cap keeps the nightly job from retrying in lockstep. I'll say so in the doc comment.", 4),
-                        ] },
-                    },
-                    {
-                        "id": "PRRT_overflow",
-                        "isResolved": true,
-                        "isOutdated": false,
-                        "path": "src/retry.rs",
-                        "line": exponential_line,
-                        "startLine": null,
-                        "diffSide": "RIGHT",
-                        "comments": { "nodes": [
-                            comment(9105, "maya", "Can `saturating_pow` overflow before the multiply?", 4),
-                            comment(9106, AUTHOR, "No: both saturate, so a huge attempt count just waits `max`.", 4),
+                            comment(9101, "devon", "Jitter is added after the cap, so `max` isn't really the maximum. Cap after adding it?", 4),
+                            comment(9102, AUTHOR, "On purpose: it keeps retries from landing in lockstep. I'll say so in the doc comment.", 4),
                         ] },
                     },
                     {
@@ -549,7 +535,7 @@ mod mac {
                         "startLine": null,
                         "diffSide": "RIGHT",
                         "comments": { "nodes": [
-                            comment(9107, "maya", "If `max` should be a real ceiling, cap after adding the jitter:\n\n```suggestion\n        (capped + Duration::from_millis(jitter)).min(self.max)\n```", 5),
+                            comment(9107, "maya", "To make `max` a real ceiling:\n\n```suggestion\n        (capped + Duration::from_millis(jitter)).min(self.max)\n```", 5),
                         ] },
                     },
                     {
@@ -561,8 +547,8 @@ mod mac {
                         "startLine": null,
                         "diffSide": "RIGHT",
                         "comments": { "nodes": [
-                            comment(9103, REVIEWER, "Should a 429 from the gateway count as retryable too?", 3),
-                            comment(9104, AUTHOR, "They send 503 when rate limiting, so this covers it.", 3),
+                            comment(9103, REVIEWER, "Should a 429 count as retryable too?", 3),
+                            comment(9104, AUTHOR, "The gateway sends 503 when it rate-limits, so this covers it.", 3),
                         ] },
                     },
                 ] },
@@ -605,7 +591,7 @@ mod mac {
               "submittedAt": "2026-10-03T11:40:00Z" },
             { "__typename": "PullRequestCommit", "commit": {
                 "abbreviatedOid": &repo.head_sha[..7],
-                "messageHeadline": "Add jitter and answer 503 while the gateway is down",
+                "messageHeadline": "Add jitter and return 503 while the gateway is down",
             } },
             { "__typename": "IssueComment", "databaseId": 7002, "author": { "login": AUTHOR },
               "body": "Added jitter and a 503 for the API. I'll add the retry dashboard in a follow-up.",
@@ -655,7 +641,6 @@ mod mac {
             "s0": { "nodes": [
                 inbox_pr(214, "Retry declined card charges with backoff", AUTHOR, "SUCCESS", 1, &["a1c4e2f", "b7d9031"], Some("a1c4e2f")),
                 inbox_pr(219, "Store invoice PDFs in object storage", "devon", "PENDING", 0, &["c2e8a10"], None),
-                inbox_pr(221, "Fix rounding in multi-currency totals", "sam", "FAILURE", 2, &["d41f7b3", "e09a6c2"], None),
             ] },
             "s1": { "nodes": [
                 inbox_pr(217, "Add a ledger export for finance", REVIEWER, "SUCCESS", 0, &["f3b2d18"], None),
@@ -665,7 +650,6 @@ mod mac {
             ] },
             "s3": { "nodes": [
                 inbox_pr(223, "Bump sqlx to 0.8.3", "lee", "SUCCESS", 0, &["1b7c5d9"], None),
-                inbox_pr(198, "Draft: tax rules per region", "sam", "PENDING", 0, &["2c8d6e0"], None),
             ] },
             "nodes": [],
         } })
@@ -871,6 +855,12 @@ mod mac {
         }
 
         fn set_theme(&mut self, light: bool) -> Result<()> {
+            self.set_settings(light, false)
+        }
+
+        /// The site shows each image about 1240 px wide, so text is set large enough to read
+        /// at 14 px there, and chrome that adds nothing to a picture is turned off.
+        fn set_settings(&mut self, light: bool, status_bar: bool) -> Result<()> {
             let mode = if light { "light" } else { "dark" };
             // The system shell would start through `login`, which resets HOME to the user's own
             // and loads their dotfiles; a named program starts zsh directly in the fixture home.
@@ -878,7 +868,22 @@ mod mac {
             let json = format!(
                 r#"{{
                     "theme": {{ "mode": "{mode}", "light": "One Light", "dark": "Photon Black" }},
-                    "terminal": {{ "shell": {{ "program": "/bin/zsh" }}, "env": {{ "HOME": {home} }} }}
+                    "ui_font_size": {UI_FONT_SIZE},
+                    "buffer_font_size": {BUFFER_FONT_SIZE},
+                    "agent_buffer_font_size": {BUFFER_FONT_SIZE},
+                    "buffer_line_height": {{ "custom": 1.5 }},
+                    "cursor_blink": false,
+                    "current_line_highlight": "none",
+                    "scrollbar": {{ "show": "never" }},
+                    "toolbar": {{ "breadcrumbs": false, "quick_actions": false }},
+                    "tab_bar": {{ "show_nav_history_buttons": false, "show_tab_bar_buttons": false }},
+                    "status_bar": {{ "experimental.show": {status_bar} }},
+                    "terminal": {{
+                        "shell": {{ "program": "/bin/zsh" }},
+                        "env": {{ "HOME": {home} }},
+                        "line_height": {{ "custom": 1.4 }},
+                        "default_height": 400
+                    }}
                 }}"#
             );
             self.cx.update(|cx| {
@@ -1033,6 +1038,35 @@ mod mac {
                 });
                 window.focus(&editor.focus_handle(cx), cx);
             })?;
+            self.settle();
+            Ok(())
+        }
+
+        /// Scrolls so the first line containing `needle` sits `margin` lines below the top,
+        /// without moving the cursor.
+        fn scroll_to(
+            &mut self,
+            win: &Win,
+            editor: &Entity<Editor>,
+            needle: &str,
+            margin: f64,
+        ) -> Result<()> {
+            let text = editor.read_with(&self.cx, |editor, cx| editor.text(cx));
+            let row = f64::from(line_of(&text, needle)? - 1) - margin;
+            let editor = editor.clone();
+            win.handle.update(&mut self.cx, |_, window, cx| {
+                editor.update(cx, |editor, cx| {
+                    editor.set_scroll_position(gpui::point(0., row.max(0.)), window, cx)
+                })
+            })?;
+            self.settle();
+            Ok(())
+        }
+
+        /// Takes focus away from everything, so no cursor is drawn.
+        fn blur(&mut self, win: &Win) -> Result<()> {
+            win.handle
+                .update(&mut self.cx, |_, window, cx| window.blur(cx))?;
             self.settle();
             Ok(())
         }
@@ -1198,6 +1232,13 @@ mod mac {
             name: Option<&str>,
             crops: &[(&str, &[Area])],
         ) -> Result<()> {
+            // Out of the way, in the title bar, so nothing shows a hover state.
+            self.cx.simulate_mouse_move(
+                win.handle.into(),
+                point(px(win.width * 0.6), px(12.)),
+                None,
+                Modifiers::none(),
+            );
             self.settle();
             self.capture_crops(win, name, crops)
         }
@@ -1299,20 +1340,20 @@ mod mac {
             self.set_theme(light)?;
             let root = self.repo.root.clone();
             let win = self.open_window(&root)?;
-            self.add_panel(&win, project_panel::ProjectPanel::load)?;
-            self.update(&win, |workspace, window, cx| {
-                workspace.open_panel::<project_panel::ProjectPanel>(window, cx)
-            })?;
             let editor = self.open_file(&win, "src/payments.rs")?;
             let terminal = self.open_dock_terminal(&win)?;
             self.run_in_terminal(&terminal, "cargo build")?;
             self.run_in_terminal(&terminal, "git log --oneline -3")?;
-            self.place_cursor(&win, &editor, "retry_with_backoff(self.backoff")?;
+            self.scroll_to(&win, &editor, "/// Retries timeouts", 1.)?;
+            self.blur(&win)?;
             let crop = format!("{name}-crop");
             let crops: &[(&str, &[Area])] = if light {
                 &[]
             } else {
-                &[(crop.as_str(), &[Area::Exact(0., 0., 1200., 790.)])]
+                &[(
+                    crop.as_str(),
+                    &[Area::Exact(0., 0., WINDOW_WIDTH, WINDOW_HEIGHT)],
+                )]
             };
             let result = self.shoot_crops(&win, Some(name), crops);
             self.close(win);
@@ -1562,14 +1603,14 @@ mod mac {
                     "line": finding_line,
                     "severity": "should fix",
                     "category": "reliability",
-                    "body": "With these defaults the four attempts can wait about 8 s in total, and `charge_invoice` awaits all of them while it holds the HTTP request. The load balancer cuts requests at 5 s, so the client sees a 504 even when the last attempt succeeds. Give the API handler a shorter budget and keep this one for the nightly job.",
+                    "body": "Four attempts can wait about 8 s, but the load balancer cuts requests at 5 s. Give `charge_invoice` a shorter budget.",
                 },
                 {
                     "path": "src/payments.rs",
                     "line": line_of(&payments, "|| error.is_connect()")?,
                     "severity": "should fix",
                     "category": "logic",
-                    "body": "A connect error is retried even when DNS can't resolve the gateway, which won't recover between attempts.",
+                    "body": "A DNS failure is retried, but it won't recover between attempts.",
                 },
                 {
                     "path": "src/api.rs",
@@ -1582,7 +1623,7 @@ mod mac {
             let agent = Rc::new(ScriptedReviewAgent {
                 replies: RefCell::new(VecDeque::from([
                     format!("```json\n{findings}\n```"),
-                    "```json\n[{\"finding\": 1, \"verdict\": \"keep\", \"reason\": \"The handler awaits the whole retry loop.\"}, {\"finding\": 2, \"verdict\": \"drop\", \"reason\": \"During a gateway deploy its DNS name resolves again within seconds; retrying is the point.\"}, {\"finding\": 3, \"verdict\": \"drop\", \"reason\": \"The checkout client already waits before retrying a 503.\"}]\n```".to_string(),
+                    "```json\n[{\"finding\": 1, \"verdict\": \"keep\", \"reason\": \"The handler awaits the whole retry loop.\"}, {\"finding\": 2, \"verdict\": \"drop\", \"reason\": \"During a deploy the name resolves again within seconds.\"}, {\"finding\": 3, \"verdict\": \"drop\", \"reason\": \"The checkout client already waits before retrying.\"}]\n```".to_string(),
                 ])),
             });
             self.cx.update(|cx| set_review_agent(agent, cx));
@@ -1598,8 +1639,8 @@ mod mac {
 
         /// Close-ups of the review tab, from a window sized so each part fills its image.
         fn pr_closeups(&mut self) -> Result<()> {
-            const WIDTH: f32 = 1120.;
-            const HEIGHT: f32 = 700.;
+            const WIDTH: f32 = WINDOW_WIDTH;
+            const HEIGHT: f32 = WINDOW_HEIGHT;
             let changed_since_viewed = [
                 ("src/api.rs", "UNVIEWED"),
                 ("src/main.rs", "VIEWED"),
@@ -1622,23 +1663,13 @@ mod mac {
             self.cx.run_until_parked();
             self.capture_crops(&win, None, &[("cu-review-verifier", &[whole])])?;
             self.settle();
+            self.click(&win, "photon-review-dropped")?;
             self.select_step_with(&win, &item, "src/retry.rs")?;
-            // The diff pane alone: the draft, then the thread under the lines it's on.
+            // The agent's draft, then the thread under the lines it's on.
             self.scroll_review(&win, &item, 22.)?;
-            self.shoot_crops(
-                &win,
-                None,
-                &[("cu-review-comment", &[Area::Exact(322., 120., 798., 532.)])],
-            )?;
+            self.shoot_crops(&win, None, &[("cu-review-comment", &[whole])])?;
             self.scroll_review(&win, &item, 32.5)?;
-            self.shoot_crops(
-                &win,
-                None,
-                &[(
-                    "cu-review-suggestion",
-                    &[Area::Exact(322., 162., 798., 496.)],
-                )],
-            )?;
+            self.shoot_crops(&win, None, &[("cu-review-suggestion", &[whole])])?;
             self.close(win);
 
             // A narrow window, where the header takes up a good part of the image.
@@ -1650,13 +1681,20 @@ mod mac {
             self.shoot_crops(&win, None, &[("cu-review-readiness", &[small])])?;
             self.close(win);
 
-            let medium = Area::Exact(0., 0., 800., 500.);
-            let (win, item) = self.open_review_sized(&changed_since_viewed, 800., 500.)?;
-            self.select_step_with(&win, &item, "src/retry.rs")?;
-            self.shoot_crops(&win, None, &[("cu-review-steps", &[medium])])?;
+            // The API change came in the second push, after maya had viewed it.
+            let api_changed = [
+                ("src/api.rs", "DISMISSED"),
+                ("src/main.rs", "VIEWED"),
+                ("src/payments.rs", "VIEWED"),
+                ("src/retry.rs", "UNVIEWED"),
+            ];
+            let (win, item) = self.open_review_sized(&api_changed, WIDTH, HEIGHT)?;
+            self.select_step_with(&win, &item, "src/api.rs")?;
+            self.blur(&win)?;
+            self.shoot_crops(&win, None, &[("cu-review-steps", &[whole])])?;
             self.click(&win, "photon-review-view")?;
             self.dispatch(&win, menu::SelectLast);
-            self.shoot_crops(&win, None, &[("cu-review-unreviewed", &[medium])])?;
+            self.shoot_crops(&win, None, &[("cu-review-unreviewed", &[whole])])?;
             self.close(win);
 
             // The Comments view beside the thread it opened, with a reply mentioning someone.
@@ -1668,6 +1706,7 @@ mod mac {
             self.cx
                 .simulate_input(win.handle.into(), "Fine by me once it's documented. @");
             self.settle();
+            self.scroll_review(&win, &item, 20.)?;
             self.shoot_crops(&win, None, &[("cu-review-comments-view", &[whole])])?;
             self.close(win);
 
@@ -1711,15 +1750,9 @@ mod mac {
             result
         }
 
-        /// A whole-window scene, or with `close_up` the same scene in a small window that is
-        /// saved whole as its close-up.
-        fn scene_window(&mut self, close_up: bool) -> Result<Win> {
+        fn scene_window(&mut self) -> Result<Win> {
             let root = self.repo.root.clone();
-            if close_up {
-                self.open_window_sized(&root, CLOSE_UP_WIDTH, CLOSE_UP_HEIGHT)
-            } else {
-                self.open_window(&root)
-            }
+            self.open_window(&root)
         }
 
         fn shoot_scene(&mut self, win: &Win, close_up: bool, full: &str, crop: &str) -> Result<()> {
@@ -1747,18 +1780,20 @@ mod mac {
         }
 
         fn markdown_at(&mut self, close_up: bool) -> Result<()> {
-            let win = self.scene_window(close_up)?;
+            let win = self.scene_window()?;
             if !close_up {
                 self.open_project_panel(&win)?;
             }
             // Markdown files open in their preview.
             self.open_file(&win, "docs/architecture.md")?;
             let result = if close_up {
-                // Ends above the next heading, which the status bar would cut through.
                 self.shoot_crops(
                     &win,
                     None,
-                    &[("cu-markdown-mermaid", &[Area::Exact(0., 0., 960., 560.)])],
+                    &[(
+                        "cu-markdown-mermaid",
+                        &[Area::Exact(0., 0., WINDOW_WIDTH, WINDOW_HEIGHT)],
+                    )],
                 )
             } else {
                 self.shoot(&win, "markdown")
@@ -1784,7 +1819,7 @@ mod mac {
             files.push((PLAN_PATH, fixture::RETRY_PLAN.to_string()));
             files.push((
                 "docs/specs/2026-10-20-retry-charges-design.md",
-                fixture::retry_spec(),
+                fixture::RETRY_SPEC.to_string(),
             ));
             write_files(&root, &files)?;
             self.cx.update(|cx| {
@@ -1796,8 +1831,6 @@ mod mac {
                 )
             });
             let win = self.open_window(&root)?;
-            self.open_center_terminal(&win)?;
-            self.open_file(&win, "src/payments.rs")?;
             let open = self.update(&win, |workspace, window, cx| {
                 let worktree_id = workspace
                     .project()
@@ -1816,51 +1849,33 @@ mod mac {
             })??;
             let item = self.block(open)?;
             self.settle();
+            let whole = Area::Exact(0., 0., WINDOW_WIDTH, WINDOW_HEIGHT);
             let result = (|| {
                 for tick in ["plan-tick-0", "plan-tick-1", "plan-tick-2"] {
                     self.click(&win, tick)?;
                 }
                 self.click(&win, "plan-step-3")?;
+                self.shoot_crops(&win, None, &[("cu-plan-task", &[whole])])?;
                 let paragraph = item
                     .read_with(&self.cx, |item, _| {
                         item.paragraph_containing("Replace the direct")
                     })
                     .context("the paragraph")?;
-                // Room below the paragraph for the comment box, then back to the top.
+                // Room below the paragraph for the comment box; the gaps image stays there.
                 self.scroll_plan(&win, -400.)?;
                 self.click(&win, &format!("plan-paragraph-{paragraph}"))?;
                 self.cx.simulate_keystrokes(win.handle.into(), "c");
                 self.cx.simulate_input(
                     win.handle.into(),
-                    "Where does is_retryable come from? If it's new, it needs its own test: a 402 \
+                    "Where does is_retryable come from? If it's new, it needs a test: a 402 \
                      must not be retried.",
                 );
+                // The task only scrolls this far once the comment box has made it longer.
+                self.scroll_plan(&win, -600.)?;
                 self.click(&win, "plan-composer-save")?;
-                self.scroll_plan(&win, 400.)?;
-                self.click(&win, &format!("plan-paragraph-{}", paragraph + 1))?;
-                let bounds = |shooter: &mut Self, selector: &str| -> Result<Area> {
-                    let bounds = shooter
-                        .cx
-                        .debug_bounds(win.handle.into(), selector)
-                        .with_context(|| format!("{selector} isn't drawn"))?;
-                    Ok(Area::Rect(
-                        f32::from(bounds.origin.x),
-                        f32::from(bounds.origin.y),
-                        f32::from(bounds.size.width),
-                        f32::from(bounds.size.height),
-                    ))
-                };
-                self.refresh(&win)?;
-                let gaps = [
-                    bounds(self, "plan-progress")?,
-                    bounds(self, "plan-decision-1")?,
-                ];
-                let task = [bounds(self, "plan-facts")?, bounds(self, "plan-finding-0")?];
-                self.shoot_crops(
-                    &win,
-                    None,
-                    &[("cu-plan-gaps", &gaps), ("cu-plan-task", &task)],
-                )?;
+                self.blur(&win)?;
+                self.shoot_crops(&win, None, &[("cu-plan-gaps", &[whole])])?;
+                self.scroll_plan(&win, 1000.)?;
                 self.click(&win, "plan-request-changes")?;
                 self.click(&win, "plan-verdict-summary")?;
                 self.cx.simulate_input(
@@ -1874,15 +1889,12 @@ mod mac {
             result
         }
 
+        /// Scrolls the task, from a point inside it whatever is scrolled into view.
         fn scroll_plan(&mut self, win: &Win, by: f32) -> Result<()> {
-            let bounds = self
-                .cx
-                .debug_bounds(win.handle.into(), "plan-facts")
-                .context("plan-facts isn't drawn")?;
             self.cx.simulate_event(
                 win.handle.into(),
                 gpui::ScrollEvent {
-                    position: bounds.center(),
+                    position: point(px(WINDOW_WIDTH * 0.6), px(WINDOW_HEIGHT * 0.6)),
                     delta: gpui::ScrollDelta::Pixels(point(px(0.), px(by))),
                     ..Default::default()
                 },
@@ -1898,15 +1910,13 @@ mod mac {
         }
 
         /// Call Trails on `charge`, with the pull request that changes it open in a tab, so the
-        /// header flags it. Opens charge_invoice's call site, the recursive fallback, and the
-        /// nightly job's trail down to `main`, which ends selected.
+        /// header flags it. Opens charge_invoice's call site and the nightly job's trail down to
+        /// `main`, which ends selected.
         fn open_call_trails(&mut self, close_up: bool) -> Result<Win> {
-            let (width, height) = if close_up {
-                (CLOSE_UP_WIDTH, CLOSE_UP_HEIGHT)
-            } else {
-                (WINDOW_WIDTH, WINDOW_HEIGHT)
-            };
-            let (win, _) = self.open_review_sized(&Self::all_unviewed(), width, height)?;
+            let (win, _) = self.open_review(&Self::all_unviewed())?;
+            if !close_up {
+                self.open_project_panel(&win)?;
+            }
             self.cx.update(|cx| {
                 photon_call_trails::set_hooks(
                     photon_call_trails::CallTrailHooks {
@@ -1920,17 +1930,36 @@ mod mac {
             let editor = self.open_file(&win, "src/payments.rs")?;
             self.place_cursor(&win, &editor, "charge(&self")?;
             self.dispatch(&win, photon_call_trails::ShowInPanel);
-            // Rows: charge_invoice, retry_failed_invoices, charge_with_fallback, the test.
+            // Rows: charge_invoice, retry_failed_invoices, the test.
             self.dispatch(&win, menu::SelectNext);
             self.dispatch(&win, photon_call_trails::ToggleCallSite);
             self.dispatch(&win, menu::SelectNext);
-            self.dispatch(&win, menu::SelectNext);
-            self.dispatch(&win, menu::SelectChild);
-            self.dispatch(&win, menu::SelectPrevious);
             for _ in 0..4 {
                 self.dispatch(&win, menu::SelectChild);
             }
+            // Wide enough for the call sites, leaving the editor room for `charge`.
+            self.set_call_panel_width(&win, 520.)?;
+            self.scroll_to(&win, &editor, "/// Retries timeouts", 3.)?;
             Ok(win)
+        }
+
+        fn set_call_panel_width(&mut self, win: &Win, width: f32) -> Result<()> {
+            self.update(win, |workspace, _, cx| {
+                if let Some(panel) = workspace.panel::<photon_call_trails::CallHierarchyPanel>(cx) {
+                    workspace.right_dock().update(cx, |dock, cx| {
+                        dock.set_panel_size_state(
+                            &panel,
+                            workspace::dock::PanelSizeState {
+                                size: Some(gpui::px(width)),
+                                flex: None,
+                            },
+                            cx,
+                        );
+                    });
+                }
+            })?;
+            self.settle();
+            Ok(())
         }
 
         fn call_hierarchy_at(&mut self, close_up: bool) -> Result<()> {
@@ -1943,33 +1972,22 @@ mod mac {
         /// The same trail as a map, in a panel widened the way a user would for it, cropped to
         /// the panel's header and map.
         fn call_map(&mut self) -> Result<()> {
-            const PANEL_WIDTH: f32 = 1100.;
-            let win = self.open_call_trails(false)?;
+            const PANEL_WIDTH: f32 = 860.;
+            let win = self.open_call_trails(true)?;
             self.click(&win, "call-trail-view-map")?;
-            self.update(&win, |workspace, _, cx| {
-                if let Some(panel) = workspace.panel::<photon_call_trails::CallHierarchyPanel>(cx) {
-                    workspace.right_dock().update(cx, |dock, cx| {
-                        dock.set_panel_size_state(
-                            &panel,
-                            workspace::dock::PanelSizeState {
-                                size: Some(gpui::px(PANEL_WIDTH)),
-                                flex: None,
-                            },
-                            cx,
-                        );
-                    });
-                }
-            })?;
+            self.set_call_panel_width(&win, PANEL_WIDTH)?;
             let result = self.shoot_crops(
                 &win,
                 None,
+                // The map's nodes keep a fixed size, so a strip of the panel shows them larger
+                // than a whole window would.
                 &[(
                     "cu-call-map",
                     &[Area::Exact(
-                        WINDOW_WIDTH - PANEL_WIDTH,
-                        36.,
-                        PANEL_WIDTH,
-                        340.,
+                        WINDOW_WIDTH - PANEL_WIDTH + 1.,
+                        35.,
+                        PANEL_WIDTH - 1.,
+                        300.,
                     )],
                 )],
             );
@@ -1983,7 +2001,9 @@ mod mac {
         }
 
         fn language_server_help_at(&mut self, close_up: bool) -> Result<()> {
-            let win = self.scene_window(close_up)?;
+            // The language server's status lives in the status bar.
+            self.set_settings(false, true)?;
+            let win = self.scene_window()?;
             if !close_up {
                 self.open_project_panel(&win)?;
             }
@@ -1991,7 +2011,8 @@ mod mac {
                 &win,
                 "clients/java/src/main/java/dev/billing/client/BillingClient.java",
             )?;
-            self.place_cursor(&win, &editor, "public ChargeResult charge")?;
+            // Scrolled rather than placing the cursor, which stays out of sight on line 1.
+            self.scroll_to(&win, &editor, "public ChargeResult charge", 12.)?;
             self.cx.update(|_| {
                 self.app_state.languages.update_lsp_binary_status(
                     LanguageServerName::new_static("jdtls"),
@@ -2004,6 +2025,7 @@ mod mac {
             self.click(&win, "photon-set-up-language-server")?;
             let result = self.shoot_scene(&win, close_up, "language-server-help", "cu-ls-help");
             self.close(win);
+            self.set_theme(false)?;
             result
         }
 
@@ -2016,7 +2038,7 @@ mod mac {
                 .with_file_name("agent");
             let repo = Repo::create(&parent)?;
             let win = self.open_window(&repo.root)?;
-            self.open_file(&win, "src/retry.rs")?;
+            let editor = self.open_file(&win, "src/retry.rs")?;
             let panel = self.add_panel(&win, agent_ui::AgentPanel::load)?;
             self.update(&win, |workspace, window, cx| {
                 workspace.open_panel::<agent_ui::AgentPanel>(window, cx)
@@ -2039,7 +2061,10 @@ mod mac {
             let end_turn = connection.defer_next_prompt_response();
             let send = thread.update(&mut self.cx, |thread, cx| {
                 thread.send(
-                    vec!["Cap the backoff after adding jitter so `max` is really the maximum, and add a test for it.".into()],
+                    vec![
+                        "Cap the backoff after adding jitter, so `max` is really the maximum."
+                            .into(),
+                    ],
                     cx,
                 )
             });
@@ -2048,24 +2073,13 @@ mod mac {
                 thread.set_title("Cap the backoff after jitter".into(), cx)
             });
             self.block(title)?;
-            // The agent reads, then edits files during its turn.
+            // The agent reads, then edits the file during its turn.
             let retry_path = repo.root.join("src/retry.rs");
-            let architecture_path = repo.root.join("docs/architecture.md");
-            let retry = fixture::RETRY_RS
-                .replace(
-                    "        capped + Duration::from_millis(jitter)",
-                    "        // Jitter spreads retries from many invoices; the cap still bounds the wait.\n        (capped + Duration::from_millis(jitter)).min(self.max)",
-                )
-                .replace(
-                    "        assert!(backoff.delay(10) <= Duration::from_millis(6250));",
-                    "        assert!(backoff.delay(10) <= backoff.max);",
-                );
-            std::fs::write(&retry_path, &retry)?;
-            let architecture = fixture::ARCHITECTURE.replace(
-                "with up to 25% jitter:",
-                "with up to 25% jitter, never past 5 s:",
+            let retry = fixture::RETRY_RS.replace(
+                "        capped + Duration::from_millis(jitter)",
+                "        // Jitter spreads retries out; the cap still bounds the wait.\n        (capped + Duration::from_millis(jitter)).min(self.max)",
             );
-            std::fs::write(&architecture_path, &architecture)?;
+            std::fs::write(&retry_path, &retry)?;
             let updates = vec![
                 acp_v1::SessionUpdate::ToolCall(
                     acp_v1::ToolCall::new("read-retry", "Read src/retry.rs")
@@ -2079,23 +2093,13 @@ mod mac {
                         .status(acp_v1::ToolCallStatus::Completed)
                         .locations(vec![acp_v1::ToolCallLocation::new(&retry_path)])
                         .content(vec![acp_v1::ToolCallContent::Diff(
-                            acp_v1::Diff::new(&retry_path, retry).old_text(fixture::RETRY_RS.to_string()),
-                        )]),
-                ),
-                acp_v1::SessionUpdate::ToolCall(
-                    acp_v1::ToolCall::new("edit-architecture", "Edit docs/architecture.md")
-                        .kind(acp_v1::ToolKind::Edit)
-                        .status(acp_v1::ToolCallStatus::Completed)
-                        .locations(vec![acp_v1::ToolCallLocation::new(&architecture_path)])
-                        .content(vec![acp_v1::ToolCallContent::Diff(
-                            acp_v1::Diff::new(&architecture_path, architecture)
-                                .old_text(fixture::ARCHITECTURE.to_string()),
+                            acp_v1::Diff::new(&retry_path, retry)
+                                .old_text(fixture::RETRY_RS.to_string()),
                         )]),
                 ),
                 acp_v1::SessionUpdate::AgentMessageChunk(acp_v1::ContentChunk::new(
-                    "Jitter is now added before the cap, so `max` is the longest any retry waits. \
-                     The comment says why the jitter is there, the test checks that no delay passes \
-                     `max`, and the architecture doc mentions the limit.\n\n`cargo test retry` passes."
+                    "The cap now comes after the jitter, so `max` is the longest any retry waits. \
+                     A comment says why the jitter is there.\n\n`cargo test retry` passes."
                         .into(),
                 )),
             ];
@@ -2112,12 +2116,14 @@ mod mac {
                 .map_err(|_| anyhow!("the turn already ended"))?;
             self.block(send)?;
             self.settle();
+            self.scroll_to(&win, &editor, "impl Backoff {", 2.)?;
+            self.blur(&win)?;
             // The thread panel's first turn: the prompt, its changed files, Revert Turn and the
             // first edit, ending above the second edit's diff.
             let result = self.shoot_crops(
                 &win,
                 Some("agent"),
-                &[("cu-agent-turn", &[Area::Exact(0., 35., 720., 435.)])],
+                &[("cu-agent-turn", &[Area::Exact(0., 35., 720., 465.)])],
             );
             self.close(win);
             result
@@ -2142,14 +2148,16 @@ mod mac {
                 Ok(inbox_json()),
             );
             self.cx.update(|cx| set_gh_runner(fake, cx));
-            let win = self.scene_window(close_up)?;
+            let win = self.scene_window()?;
             let panel = self.add_panel(&win, photon_review::InboxPanel::load)?;
             self.update(&win, |workspace, window, cx| {
                 workspace.open_panel::<photon_review::InboxPanel>(window, cx)
             })?;
             panel.update(&mut self.cx, |panel, cx| panel.refresh(cx));
             self.settle();
-            self.open_file(&win, "src/payments.rs")?;
+            let editor = self.open_file(&win, "src/payments.rs")?;
+            self.scroll_to(&win, &editor, "/// Retries timeouts", 3.)?;
+            self.blur(&win)?;
             let result = self.shoot_scene(&win, close_up, "inbox", "cu-inbox");
             self.close(win);
             result
