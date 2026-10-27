@@ -73,6 +73,9 @@ use crate::{
 };
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 
+mod comments;
+use comments::{CommentFilter, CommentKey, draft_slot, write_preview_toggle};
+
 actions!(
     photon_review,
     [
@@ -81,7 +84,15 @@ actions!(
         /// Shows the previous step of the pull request review map.
         PreviousStep,
         /// Starts a draft review comment on the selected lines.
-        AddComment
+        AddComment,
+        /// Shows the next open comment in the pull request review.
+        NextComment,
+        /// Shows the previous open comment in the pull request review.
+        PreviousComment,
+        /// Starts a reply to the comment under the cursor.
+        ReplyToComment,
+        /// Resolves the comment under the cursor.
+        ResolveComment
     ]
 );
 
@@ -91,6 +102,13 @@ const SIMPLIFIED_LEFT_COMMENT_NOTE: &str =
 const VIEWED_DISABLED_TOOLTIP: &str = "Switch to the full diff to mark things viewed";
 const HUNK_CONTEXT_LINES: u32 = 3;
 const COMPOSER_MAX_LINES: u32 = 4;
+
+/// The lines a composer shows for `text`.
+fn composer_lines(text: &str) -> u32 {
+    text.split('\n')
+        .count()
+        .clamp(1, COMPOSER_MAX_LINES as usize) as u32
+}
 const DEFAULT_MAP_WIDTH: Pixels = px(320.);
 const MIN_MAP_WIDTH: Pixels = px(200.);
 const MIN_CODE_WIDTH: Pixels = px(320.);
@@ -323,6 +341,19 @@ pub struct ReviewItem {
     comment_markdown: HashMap<String, Entity<Markdown>>,
     /// Resolved threads opened from their one-line fold.
     expanded_resolved: HashSet<String>,
+    /// The steps column shows the Comments view instead of the steps.
+    comments_view: bool,
+    comment_filters: HashSet<CommentFilter>,
+    resolved_rows_open: bool,
+    selected_comment: Option<CommentKey>,
+    /// Composers showing a preview instead of their editor, by slot.
+    previews: HashMap<String, CommentBody>,
+    /// The text last selected in a thread's card, by thread, for Quote.
+    card_quote: Option<(String, String)>,
+    /// Who `@` offers, shared with every composer's completions.
+    participants: std::rc::Rc<std::cell::RefCell<Vec<(String, &'static str)>>>,
+    /// Each reply box's height in lines when the cards were last placed.
+    reply_lines: HashMap<String, u32>,
     login: String,
     summary_editor: Entity<Editor>,
     submitting: bool,
@@ -1088,6 +1119,7 @@ fn render_comment_body(body: &CommentBody, block: &mut BlockContext) -> Div {
     v_flex()
         .gap_1()
         .max_w(px(720.))
+        .debug_selector(|| "photon-review-comment-body".into())
         .children(
             body.markdown
                 .clone()
@@ -1138,6 +1170,7 @@ fn draft_renderer(
     note: Option<SharedString>,
     posted_note: Option<&'static str>,
     composer: Option<Entity<Editor>>,
+    preview: Option<CommentBody>,
     sync: Arc<Mutex<DraftSync>>,
     can_suggest: bool,
     from_agent: bool,
@@ -1237,9 +1270,13 @@ fn draft_renderer(
                         )
                     }),
             )
-            .map(|this| match &composer {
-                Some(editor) => this.child(editor.clone()),
-                None => this.child(render_comment_body(&body, block)),
+            .map(|this| match (&composer, &preview) {
+                (Some(_), Some(preview)) => this.child(
+                    render_comment_body(preview, block)
+                        .debug_selector(|| "photon-review-preview-body".into()),
+                ),
+                (Some(editor), None) => this.child(editor.clone()),
+                (None, _) => this.child(render_comment_body(&body, block)),
             })
             .children(
                 note.clone()
@@ -1322,7 +1359,12 @@ fn draft_renderer(
                                         })
                                         .log_err();
                                 }),
-                        ),
+                        )
+                        .child(div().ml_auto().child(write_preview_toggle(
+                            item.clone(),
+                            draft_slot(local_id),
+                            preview.is_some(),
+                        ))),
                 )
             })
             .into_any_element()
@@ -1336,14 +1378,23 @@ struct SuggestionState {
     note: Option<SharedString>,
 }
 
+/// What a thread's card shows besides its comments.
+#[derive(Clone)]
+struct ThreadCardState {
+    error: Option<SharedString>,
+    resolve_pending: bool,
+    finishing: bool,
+    preview: Option<CommentBody>,
+    pr_author: SharedString,
+}
+
 fn thread_renderer(
     item: WeakEntity<ReviewItem>,
     thread: ReviewThread,
     bodies: Vec<CommentBody>,
     expanded: bool,
     reply: Option<Entity<Editor>>,
-    error: Option<SharedString>,
-    resolve_pending: bool,
+    state: ThreadCardState,
     suggestion: SuggestionState,
 ) -> RenderBlock {
     Arc::new(move |block: &mut BlockContext| {
@@ -1351,9 +1402,15 @@ fn thread_renderer(
         let reply_item = item.clone();
         let resolve_item = item.clone();
         let toggle_item = item.clone();
+        let done_item = item.clone();
+        let quote_item = item.clone();
+        let select_item = item.clone();
         let reply_thread = thread.id.clone();
         let resolve_thread = thread.id.clone();
         let toggle_thread = thread.id.clone();
+        let done_thread = thread.id.clone();
+        let quote_thread = thread.id.clone();
+        let select_thread = thread.id.clone();
         let resolved = thread.is_resolved;
         let colors = block.app.theme().colors();
         let (separator, input_border) = (colors.border, colors.border);
@@ -1412,10 +1469,39 @@ fn thread_renderer(
         if resolved {
             chips.push(state_chip("Resolved", Color::Success, block.app));
         }
+        // Quote takes what was last selected in this card's comments; a click anywhere in the
+        // card that leaves nothing selected forgets it.
+        let markdowns: Vec<Entity<Markdown>> = bodies
+            .iter()
+            .filter_map(|body| body.markdown.clone())
+            .collect();
+        let reply_box = match (&state.preview, &reply) {
+            (Some(preview), Some(_)) => Some(
+                render_comment_body(preview, block)
+                    .debug_selector(|| "photon-review-preview-body".into())
+                    .into_any_element(),
+            ),
+            (None, Some(editor)) => Some(editor.clone().into_any_element()),
+            _ => None,
+        };
         let (card_selector, fold_selector) =
             (id.to_string(), format!("photon-review-fold-{}", thread.id));
+        let (done_selector, quote_selector) = (
+            format!("photon-review-done-{}", thread.id),
+            format!("photon-review-quote-{}", thread.id),
+        );
         comment_card(id.into(), block)
             .debug_selector(move || card_selector)
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                let selected = markdowns
+                    .iter()
+                    .find_map(|markdown| markdown.read(cx).selected_source().map(str::to_string));
+                select_item
+                    .update(cx, |item, _| {
+                        item.card_quote = selected.map(|text| (select_thread.clone(), text));
+                    })
+                    .log_err();
+            })
             .when(resolved, |this| {
                 this.child(
                     div().absolute().top_1().right_1().debug_selector(move || fold_selector).child(
@@ -1431,11 +1517,14 @@ fn thread_renderer(
                 let commit_thread = thread.id.clone();
                 let has_suggestion =
                     suggestion.committable && parse_suggestion(&comment.body).is_some();
-                let chips = if index == 0 {
+                let mut chips = if index == 0 {
                     std::mem::take(&mut chips)
                 } else {
                     Vec::new()
                 };
+                if comment.author.eq_ignore_ascii_case(&state.pr_author) {
+                    chips.insert(0, state_chip("author", Color::Accent, block.app));
+                }
                 v_flex()
                     .gap_1()
                     .when(index > 0, |this| {
@@ -1477,54 +1566,106 @@ fn thread_renderer(
                     .size(LabelSize::XSmall)
                     .color(Color::Success)
             }))
-            .children(error.clone().map(|error| {
+            .children(state.error.clone().map(|error| {
                 Label::new(error)
                     .size(LabelSize::XSmall)
                     .color(Color::Error)
             }))
             .child(
-                h_flex()
+                v_flex()
                     .pt_1p5()
                     .gap_1()
                     .border_t_1()
                     .border_color(separator)
-                    .children(reply.clone().map(|editor| {
+                    .children(reply_box.map(|reply_box| {
                         div()
-                            .flex_1()
                             .min_w_0()
                             .px_2()
                             .py_1()
                             .rounded_sm()
                             .border_1()
                             .border_color(input_border)
-                            .child(editor)
+                            .child(reply_box)
                     }))
                     .child(
-                        crate::button("reply", "Reply")
-                            .style(if reply.is_some() {
-                                ButtonStyle::Tinted(TintColor::Accent)
-                            } else {
-                                ButtonStyle::Outlined
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                crate::button("reply", "Reply")
+                                    .style(if reply.is_some() {
+                                        ButtonStyle::Tinted(TintColor::Accent)
+                                    } else {
+                                        ButtonStyle::Outlined
+                                    })
+                                    .on_click(move |_, _, cx| {
+                                        reply_item
+                                            .update(cx, |item, cx| {
+                                                item.click_reply(&reply_thread, cx)
+                                                    .detach_and_log_err(cx)
+                                            })
+                                            .log_err();
+                                    }),
+                            )
+                            .when(!resolved, |this| {
+                                this.child(
+                                    div().debug_selector(move || done_selector).child(
+                                        crate::button("done", "Done")
+                                            .style(ButtonStyle::Subtle)
+                                            .disabled(state.finishing || state.resolve_pending)
+                                            .tooltip(Tooltip::text("Reply \"Done\" and resolve"))
+                                            .on_click(move |_, _, cx| {
+                                                done_item
+                                                    .update(cx, |item, cx| {
+                                                        item.mark_thread_done(&done_thread, cx)
+                                                            .detach_and_log_err(cx)
+                                                    })
+                                                    .log_err();
+                                            }),
+                                    ),
+                                )
                             })
-                            .on_click(move |_, _, cx| {
-                                reply_item
-                                    .update(cx, |item, cx| {
-                                        item.click_reply(&reply_thread, cx).detach_and_log_err(cx)
-                                    })
-                                    .log_err();
-                            }),
-                    )
-                    .child(
-                        crate::button("resolve", if resolved { "Unresolve" } else { "Resolve" })
-                            .style(ButtonStyle::Subtle)
-                            .disabled(resolve_pending)
-                            .on_click(move |_, _, cx| {
-                                resolve_item
-                                    .update(cx, |item, cx| {
-                                        item.set_thread_resolved(&resolve_thread, !resolved, cx)
-                                            .detach_and_log_err(cx)
-                                    })
-                                    .log_err();
+                            .child(
+                                crate::button(
+                                    "resolve",
+                                    if resolved { "Unresolve" } else { "Resolve" },
+                                )
+                                .style(ButtonStyle::Subtle)
+                                .disabled(state.resolve_pending)
+                                .on_click(move |_, _, cx| {
+                                    resolve_item
+                                        .update(cx, |item, cx| {
+                                            item.set_thread_resolved(&resolve_thread, !resolved, cx)
+                                                .detach_and_log_err(cx)
+                                        })
+                                        .log_err();
+                                }),
+                            )
+                            .when(reply.is_some(), |this| {
+                                this.child(
+                                    div().debug_selector(move || quote_selector).child(
+                                        crate::button("quote", "Quote")
+                                            .style(ButtonStyle::Subtle)
+                                            .tooltip(Tooltip::text(
+                                                "Quote the text selected in this comment or the diff",
+                                            ))
+                                            .on_click(move |_, window, cx| {
+                                                quote_item
+                                                    .update(cx, |item, cx| {
+                                                        item.quote_into_reply(
+                                                            &quote_thread,
+                                                            window,
+                                                            cx,
+                                                        )
+                                                    })
+                                                    .log_err();
+                                            }),
+                                    ),
+                                )
+                                .child(div().ml_auto().child(write_preview_toggle(
+                                    item.clone(),
+                                    reply_slot(&thread.id),
+                                    state.preview.is_some(),
+                                )))
                             }),
                     ),
             )
@@ -1807,6 +1948,14 @@ impl ReviewItem {
             comment_blocks: HashSet::new(),
             comment_markdown: HashMap::new(),
             expanded_resolved: HashSet::new(),
+            comments_view: false,
+            comment_filters: HashSet::new(),
+            resolved_rows_open: false,
+            selected_comment: None,
+            previews: HashMap::new(),
+            card_quote: None,
+            participants: Default::default(),
+            reply_lines: HashMap::new(),
             login,
             summary_editor,
             submitting: false,
@@ -1868,6 +2017,7 @@ impl ReviewItem {
         for draft in stored_drafts {
             this.push_draft(draft);
         }
+        this.refresh_participants();
         this.add_reply_editors(&composer_texts, window, cx);
         let unanswered: Vec<String> = this
             .checklist_answers
@@ -2352,19 +2502,26 @@ impl ReviewItem {
             .collect();
         for thread_id in thread_ids {
             let slot = reply_slot(&thread_id);
+            let provider = self.mention_provider();
             let editor = cx.new(|cx| {
-                let mut editor = Editor::single_line(window, cx);
+                let mut editor = Editor::auto_height(1, COMPOSER_MAX_LINES as usize, window, cx);
                 editor.set_placeholder_text("Reply…", window, cx);
+                editor.set_completion_provider(Some(provider));
                 if let Some(text) = stored.get(&slot) {
                     editor.set_text(text.as_str(), window, cx);
                 }
                 editor
             });
+            let editor_thread = thread_id.clone();
             self._subscriptions.push(cx.subscribe(
                 &editor,
                 move |this, editor, event: &EditorEvent, cx| {
                     if matches!(event, EditorEvent::BufferEdited) {
                         let text = editor.read(cx).text(cx);
+                        // The card grows with the reply, up to the box's height.
+                        if this.reply_lines.get(&editor_thread) != Some(&composer_lines(&text)) {
+                            this.show_comments(cx);
+                        }
                         this.queue_text(&slot, text, cx);
                     }
                 },
@@ -2705,6 +2862,7 @@ impl ReviewItem {
                     this.last_review = Some(commit.clone());
                 }
                 this.detail = detail;
+                this.refresh_participants();
                 this.refresh_conversation(cx);
                 this.refresh_auto_results(cx);
                 this.add_reply_editors(&HashMap::new(), window, cx);
@@ -2815,18 +2973,30 @@ impl ReviewItem {
         else {
             return;
         };
+        self.show_line(&thread.path, thread.side, thread.line, window, cx);
+    }
+
+    /// Selects the step holding the file and puts the cursor on the line, when it's shown.
+    fn show_line(
+        &mut self,
+        path: &str,
+        side: Side,
+        line: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(index) = self
             .steps
             .iter()
-            .position(|step| step.files.contains(&thread.path))
+            .position(|step| step.files.iter().any(|file| file == path))
         {
             self.select_step(index, window, cx);
         }
-        let Some(line) = thread.line else {
+        let Some(line) = line else {
             return;
         };
         let snapshot = self.multibuffer.read(cx).snapshot(cx);
-        let Some(anchor) = self.line_anchor(&thread.path, thread.side, line, &snapshot, cx) else {
+        let Some(anchor) = self.line_anchor(path, side, line, &snapshot, cx) else {
             return;
         };
         self.editor.update(cx, |editor, cx| {
@@ -3891,9 +4061,11 @@ impl ReviewItem {
             return;
         }
         let body = self.drafts[index].body.clone();
+        let provider = self.mention_provider();
         let composer = cx.new(|cx| {
             let mut editor = Editor::auto_height(1, COMPOSER_MAX_LINES as usize, window, cx);
             editor.set_placeholder_text("Leave a comment", window, cx);
+            editor.set_completion_provider(Some(provider));
             editor.set_text(body, window, cx);
             editor
         });
@@ -4407,6 +4579,7 @@ impl ReviewItem {
                     note.map(SharedString::from),
                     posted_note,
                     view.composer.clone(),
+                    self.previews.get(&draft_slot(view.local_id)).cloned(),
                     view.sync.clone(),
                     draft.side == Side::Right && !draft.general,
                     draft.from_agent,
@@ -4445,13 +4618,30 @@ impl ReviewItem {
                 0
             };
             let extra_rows = suggestion_rows as u32 + u32::from(suggestion.note.is_some());
+            let reply = self.reply_editors.get(&thread.id).cloned();
+            let preview = self.previews.get(&reply_slot(&thread.id)).cloned();
+            // The reply box, or its preview, and the buttons under it.
+            let reply_rows = match (&reply, &preview) {
+                (Some(_), Some(preview)) => {
+                    let lines = preview.markdown.as_ref().map_or(1, |markdown| {
+                        markdown.read(cx).source().lines().count().max(1)
+                    });
+                    lines as u32 + 2
+                }
+                (Some(editor), None) => {
+                    let lines = composer_lines(&editor.read(cx).text(cx));
+                    self.reply_lines.insert(thread.id.clone(), lines);
+                    lines + 2
+                }
+                _ => 1,
+            };
             blocks.push(BlockProperties {
                 placement: BlockPlacement::Below(anchor),
                 height: Some(
                     if thread.is_resolved && !self.expanded_resolved.contains(&thread.id) {
                         2
                     } else {
-                        body_rows as u32 + 3 + u32::from(error.is_some()) + extra_rows
+                        body_rows as u32 + 2 + reply_rows + u32::from(error.is_some()) + extra_rows
                     },
                 ),
                 style: BlockStyle::Sticky,
@@ -4460,9 +4650,14 @@ impl ReviewItem {
                     thread.clone(),
                     thread_bodies.remove(&thread.id).unwrap_or_default(),
                     self.expanded_resolved.contains(&thread.id),
-                    self.reply_editors.get(&thread.id).cloned(),
-                    error,
-                    pending,
+                    reply,
+                    ThreadCardState {
+                        error,
+                        resolve_pending: pending,
+                        finishing: self.finishing_threads.contains(&thread.id),
+                        preview,
+                        pr_author: self.detail.summary.author.clone().into(),
+                    },
                     suggestion,
                 ),
                 priority: 0,
@@ -6318,7 +6513,7 @@ impl ReviewItem {
 
     fn render_map(&self, cx: &Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
-        let mut map = v_flex()
+        let map = v_flex()
             .id("photon-review-map")
             .track_scroll(&self.map_scroll)
             .w(self.map_width)
@@ -6328,14 +6523,39 @@ impl ReviewItem {
             .gap_1()
             .overflow_y_scroll()
             .border_r_1()
-            .border_color(colors.border)
+            .border_color(colors.border);
+        if self.comments_view {
+            return map.children(self.render_comments_view(cx));
+        }
+        let mut map = map
             .child(
-                div()
-                    .debug_selector(|| "photon-review-progress".into())
+                h_flex()
+                    .gap_1()
                     .child(
-                        Label::new(self.progress_text())
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .debug_selector(|| "photon-review-progress".into())
+                            .child(
+                                Label::new(self.progress_text())
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "photon-review-show-comments".into())
+                            .child(
+                                Button::new("photon-review-show-comments", "Comments ›")
+                                    .style(ButtonStyle::Subtle)
+                                    .size(ButtonSize::Compact)
+                                    .label_size(LabelSize::XSmall)
+                                    .color(Color::Accent)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.comments_view = true;
+                                        cx.notify();
+                                    })),
+                            ),
                     ),
             )
             // Always the map's second child: a step's checklist link scrolls to it.
@@ -7118,6 +7338,10 @@ impl Render for ReviewItem {
                 this.select_step(this.selected.saturating_sub(1), window, cx)
             }))
             .on_action(cx.listener(Self::add_comment))
+            .on_action(cx.listener(Self::next_comment))
+            .on_action(cx.listener(Self::previous_comment))
+            .on_action(cx.listener(Self::reply_to_comment))
+            .on_action(cx.listener(Self::resolve_comment))
             .on_action(cx.listener(Self::toggle_changes_since_review))
             .child(self.render_header(cx))
             .children(self.merge_error.clone().map(|error| {
@@ -7159,6 +7383,9 @@ impl Render for ReviewItem {
                         _ => this.child(self.render_code(cx).into_any_element()),
                     }),
             )
+            .when(self.comments_view, |this| {
+                this.child(self.render_comment_keys(cx))
+            })
     }
 }
 
@@ -12709,5 +12936,579 @@ fn verify_password(user: &str, password: &str) -> bool {
         assert!(drawn("photon-review-comment-error", &mut cx));
         assert!(!drawn("photon-review-timeline-5", &mut cx));
         composer.read_with(&cx, |editor, cx| assert_eq!(editor.text(cx), "Ship it"));
+    }
+
+    fn review_thread(
+        id: &str,
+        path: &str,
+        line: u32,
+        author: &str,
+        body: &str,
+        resolved: bool,
+    ) -> ReviewThread {
+        ReviewThread {
+            id: id.into(),
+            path: path.into(),
+            line: Some(line),
+            start_line: None,
+            side: Side::Right,
+            is_resolved: resolved,
+            is_outdated: false,
+            comments: vec![crate::ThreadComment {
+                database_id: 500 + u64::from(line),
+                author: author.into(),
+                body: body.into(),
+                created_at: "2026-10-20T10:00:00Z".into(),
+            }],
+        }
+    }
+
+    /// The login review with `threads` as GitHub's, and `drafts` stored.
+    async fn open_with_threads(
+        cx: &mut TestAppContext,
+        threads: Vec<ReviewThread>,
+        drafts: Vec<Draft>,
+    ) -> (Entity<ReviewItem>, VisualTestContext) {
+        let database = test_database(cx);
+        for draft in drafts {
+            database.save_draft(draft).await.expect("save");
+        }
+        let mut detail = parse_detail(&key(), DETAIL).expect("detail");
+        detail.threads = threads;
+        detail.reviewers = vec!["maya".into()];
+        detail.requested_reviewers = vec!["marcus".into()];
+        let (item, mut cx, _) = open_item_with_detail(
+            cx,
+            login_tree(),
+            vec![login_with_hunk()],
+            login_graph(),
+            true,
+            None,
+            false,
+            Some(database),
+            detail,
+        )
+        .await;
+        settle(&mut cx);
+        (item, cx)
+    }
+
+    /// Two files, each its own step: `src/a.rs` first, then `src/b.rs`.
+    async fn open_two_files_with_threads(
+        cx: &mut TestAppContext,
+        threads: Vec<ReviewThread>,
+    ) -> (Entity<ReviewItem>, VisualTestContext) {
+        let mut detail = parse_detail(&key(), DETAIL).expect("detail");
+        detail.threads = threads;
+        let (item, mut cx, _) = open_item_with_detail(
+            cx,
+            json!({ "src": { "a.rs": A_HEAD, "b.rs": B_HEAD } }),
+            vec![modified("src/a.rs", A_BASE), modified("src/b.rs", B_BASE)],
+            Graph {
+                functions: two_file_graph().functions,
+                calls: Vec::new(),
+            },
+            true,
+            None,
+            false,
+            None,
+            detail,
+        )
+        .await;
+        settle(&mut cx);
+        (item, cx)
+    }
+
+    const COMMENT_KEYS_CONTEXT: &str = "PhotonReview > Editor && mode == full";
+
+    /// The comment keys as the default keymaps bind them, with the diff focused.
+    fn press_in_diff(item: &Entity<ReviewItem>, keys: &str, cx: &mut VisualTestContext) {
+        cx.update(|_, cx| {
+            cx.bind_keys([
+                gpui::KeyBinding::new("n", NextComment, Some(COMMENT_KEYS_CONTEXT)),
+                gpui::KeyBinding::new("p", PreviousComment, Some(COMMENT_KEYS_CONTEXT)),
+                gpui::KeyBinding::new("r", ReplyToComment, Some(COMMENT_KEYS_CONTEXT)),
+                gpui::KeyBinding::new("shift-r", ResolveComment, Some(COMMENT_KEYS_CONTEXT)),
+            ])
+        });
+        item.update_in(cx, |item, window, cx| {
+            window.focus(&item.editor().focus_handle(cx), cx)
+        });
+        cx.simulate_keystrokes(keys);
+        cx.run_until_parked();
+    }
+
+    fn row(id: &str) -> &'static str {
+        format!("photon-review-comment-row-{id}").leak()
+    }
+
+    fn selected_comment(item: &Entity<ReviewItem>, cx: &mut VisualTestContext) -> Option<String> {
+        item.read_with(cx, |item, _| match &item.selected_comment {
+            Some(CommentKey::Thread(id)) => Some(id.clone()),
+            Some(CommentKey::Draft(local_id)) => Some(format!("draft-{local_id}")),
+            None => None,
+        })
+    }
+
+    fn cursor_row(item: &Entity<ReviewItem>, cx: &mut VisualTestContext) -> (String, u32) {
+        item.read_with(cx, |item, cx| {
+            let lines = item.selected_lines(cx).expect("cursor in a file");
+            (lines.path, lines.start_line)
+        })
+    }
+
+    fn reply_box(
+        item: &Entity<ReviewItem>,
+        thread_id: &str,
+        cx: &mut VisualTestContext,
+    ) -> Entity<Editor> {
+        item.read_with(cx, |item, _| item.reply_editors.get(thread_id).cloned())
+            .expect("reply box")
+    }
+
+    fn is_resolve(request: &crate::GhRequest) -> bool {
+        request
+            .stdin
+            .as_deref()
+            .is_some_and(|stdin| stdin.contains("resolveReviewThread("))
+    }
+
+    fn is_reply_to(database_id: u64) -> impl Fn(&crate::GhRequest) -> bool {
+        move |request| {
+            request
+                .args
+                .iter()
+                .any(|argument| argument.ends_with(&format!("/{database_id}/replies")))
+        }
+    }
+
+    fn done_reply() -> Result<String, crate::GhError> {
+        Ok(r#"{"id":2002,"user":{"login":"alice"},"body":"Done","created_at":"t"}"#.into())
+    }
+
+    #[gpui::test]
+    async fn the_comments_view_lists_every_comment_and_filters_them(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_with_threads(
+            cx,
+            vec![
+                review_thread("T_open", "src/login.rs", 3, "bob", "Why trim here?", false),
+                review_thread(
+                    "T_ai",
+                    "src/login.rs",
+                    2,
+                    "alice",
+                    "should fix: audit first",
+                    false,
+                ),
+                review_thread("T_done", "src/login.rs", 4, "bob", "Fine now.", true),
+            ],
+            vec![current_draft("src/login.rs", 3, "    audit(user);")],
+        )
+        .await;
+        assert!(!drawn(row("T_open"), &mut cx));
+
+        click("photon-review-show-comments", &mut cx);
+        for shown in ["T_open", "T_ai", "draft-0"] {
+            assert!(drawn(row(shown), &mut cx), "{shown}");
+        }
+        assert!(drawn("photon-review-resolved-rows", &mut cx));
+        assert!(!drawn(row("T_done"), &mut cx), "resolved ones start folded");
+        click("photon-review-resolved-rows", &mut cx);
+        assert!(drawn(row("T_done"), &mut cx));
+        click("photon-review-resolved-rows", &mut cx);
+
+        let shown = |cx: &mut VisualTestContext| {
+            ["T_open", "T_ai", "T_done", "draft-0"]
+                .into_iter()
+                .filter(|id| drawn(row(id), cx))
+                .collect::<Vec<_>>()
+        };
+        click("photon-review-filter-Mine", &mut cx);
+        assert_eq!(shown(&mut cx), ["T_ai", "draft-0"]);
+        click("photon-review-filter-AI", &mut cx);
+        assert_eq!(shown(&mut cx), ["T_ai"], "filters add up");
+        click("photon-review-filter-Mine", &mut cx);
+        click("photon-review-filter-AI", &mut cx);
+        click("photon-review-filter-Resolved", &mut cx);
+        assert_eq!(shown(&mut cx), ["T_done"]);
+        click("photon-review-filter-Resolved", &mut cx);
+        click("photon-review-filter-Open", &mut cx);
+        assert_eq!(shown(&mut cx), ["T_open", "T_ai", "draft-0"]);
+
+        click("photon-review-show-steps", &mut cx);
+        assert!(!drawn(row("T_open"), &mut cx));
+        assert!(drawn("photon-review-show-comments", &mut cx));
+        item.read_with(&cx, |item, _| {
+            assert!(
+                item.comment_filters.contains(&CommentFilter::Open),
+                "the filters stay while the review is open"
+            )
+        });
+    }
+
+    #[gpui::test]
+    async fn clicking_a_comment_shows_its_card(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_two_files_with_threads(
+            cx,
+            vec![review_thread("T_b", "src/b.rs", 2, "bob", "Why 2?", false)],
+        )
+        .await;
+        item.read_with(&cx, |item, _| assert_eq!(item.selected_step(), 0));
+        click("photon-review-show-comments", &mut cx);
+        click(row("T_b"), &mut cx);
+        item.read_with(&cx, |item, _| assert_eq!(item.selected_step(), 1));
+        assert_eq!(cursor_row(&item, &mut cx), ("src/b.rs".to_string(), 2));
+        assert_eq!(selected_comment(&item, &mut cx).as_deref(), Some("T_b"));
+        assert!(drawn("photon-review-thread-T_b", &mut cx));
+    }
+
+    #[gpui::test]
+    async fn n_and_p_walk_the_open_comments_in_diff_order(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_two_files_with_threads(
+            cx,
+            vec![
+                review_thread("T_b2", "src/b.rs", 2, "bob", "b two", false),
+                review_thread("T_a3", "src/a.rs", 3, "bob", "a three", false),
+                review_thread("T_a2", "src/a.rs", 2, "bob", "a two", false),
+                review_thread("T_a1", "src/a.rs", 1, "bob", "a one", true),
+            ],
+        )
+        .await;
+        let mut walked = Vec::new();
+        for key in ["n", "n", "n", "n", "p"] {
+            press_in_diff(&item, key, &mut cx);
+            walked.push(selected_comment(&item, &mut cx).expect("a comment is selected"));
+        }
+        assert_eq!(walked, ["T_a2", "T_a3", "T_b2", "T_b2", "T_a3"]);
+        assert_eq!(cursor_row(&item, &mut cx), ("src/a.rs".to_string(), 3));
+        item.read_with(&cx, |item, _| assert_eq!(item.selected_step(), 0));
+
+        // This file follows the cursor.
+        click("photon-review-show-comments", &mut cx);
+        click("photon-review-filter-This file", &mut cx);
+        assert!(drawn(row("T_a3"), &mut cx));
+        assert!(!drawn(row("T_b2"), &mut cx));
+    }
+
+    #[gpui::test]
+    async fn r_starts_a_reply_and_shift_r_resolves(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_with_threads(
+            cx,
+            vec![review_thread(
+                "T1",
+                "src/login.rs",
+                3,
+                "bob",
+                "Why audit?",
+                false,
+            )],
+            Vec::new(),
+        )
+        .await;
+        let fake = install_fake(&mut cx);
+        fake.respond(is_resolve, Ok(r#"{"data":{"x":{}}}"#.to_string()));
+        let reply = reply_box(&item, "T1", &mut cx);
+
+        select_text(&item, "let user", &mut cx);
+        press_in_diff(&item, "r", &mut cx);
+        assert!(
+            !cx.update(|window, cx| reply.focus_handle(cx).is_focused(window)),
+            "no comment on that line"
+        );
+        select_text(&item, "audit(user)", &mut cx);
+        press_in_diff(&item, "r", &mut cx);
+        assert!(cx.update(|window, cx| reply.focus_handle(cx).is_focused(window)));
+
+        press_in_diff(&item, "shift-r", &mut cx);
+        let requests = fake.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(is_resolve(&requests[0]));
+        item.read_with(&cx, |item, _| assert!(item.detail.threads[0].is_resolved));
+    }
+
+    #[gpui::test]
+    async fn done_replies_and_resolves_in_one_click(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_with_threads(
+            cx,
+            vec![review_thread(
+                "T1",
+                "src/login.rs",
+                3,
+                "bob",
+                "Why audit?",
+                false,
+            )],
+            Vec::new(),
+        )
+        .await;
+        let fake = install_fake(&mut cx);
+        fake.respond(is_reply_to(503), done_reply());
+        fake.respond(is_resolve, Ok(r#"{"data":{"x":{}}}"#.to_string()));
+        click("photon-review-done-T1", &mut cx);
+        let requests = fake.requests();
+        assert_eq!(requests.len(), 2, "one reply, one resolve");
+        assert_eq!(request_json(&requests[0]), json!({"body": "Done"}));
+        assert!(is_resolve(&requests[1]));
+        item.read_with(&cx, |item, _| {
+            let thread = &item.detail.threads[0];
+            assert!(thread.is_resolved);
+            assert_eq!(
+                thread.comments.last().map(|c| c.body.as_str()),
+                Some("Done")
+            );
+        });
+        assert!(
+            !drawn("photon-review-done-T1", &mut cx),
+            "a resolved thread has no Done"
+        );
+    }
+
+    #[gpui::test]
+    async fn done_shows_why_when_either_step_fails(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_with_threads(
+            cx,
+            vec![
+                review_thread("T1", "src/login.rs", 3, "bob", "Why audit?", false),
+                review_thread("T2", "src/login.rs", 4, "bob", "And this?", false),
+            ],
+            Vec::new(),
+        )
+        .await;
+        let fake = install_fake(&mut cx);
+        let forbidden = || {
+            Err(crate::GhError::Failed {
+                message: "gh: Forbidden (HTTP 403)".into(),
+            })
+        };
+        fake.respond(is_reply_to(503), forbidden());
+        click("photon-review-done-T1", &mut cx);
+        assert_eq!(fake.requests().len(), 1, "no resolve after a failed reply");
+
+        fake.respond(is_reply_to(504), done_reply());
+        fake.respond(is_resolve, forbidden());
+        click("photon-review-done-T2", &mut cx);
+        assert_eq!(fake.requests().len(), 3);
+        item.read_with(&cx, |item, _| {
+            for thread in &item.detail.threads {
+                assert!(!thread.is_resolved, "{}", thread.id);
+                assert!(
+                    item.thread_errors[&thread.id].contains("403"),
+                    "{}",
+                    thread.id
+                );
+            }
+        });
+    }
+
+    #[gpui::test]
+    async fn quote_puts_the_selected_text_at_the_top_of_the_reply(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_with_threads(
+            cx,
+            vec![review_thread(
+                "T1",
+                "src/login.rs",
+                3,
+                "bob",
+                "Why audit here?",
+                false,
+            )],
+            Vec::new(),
+        )
+        .await;
+        let reply = reply_box(&item, "T1", &mut cx);
+        type_text(&reply, "Because.", &mut cx);
+
+        // Text selected in the diff.
+        let offset = text(&item, &mut cx).find("audit(user)").expect("shown");
+        item.update_in(&mut cx, |item, window, cx| {
+            item.editor().update(cx, |editor, cx| {
+                editor.change_selections(Default::default(), window, cx, |selections| {
+                    selections
+                        .select_ranges([MultiBufferOffset(offset)
+                            ..MultiBufferOffset(offset + "audit(user)".len())])
+                })
+            })
+        });
+        click("photon-review-quote-T1", &mut cx);
+        assert_eq!(
+            reply.read_with(&cx, |editor, cx| editor.text(cx)),
+            "> audit(user)\n\nBecause."
+        );
+
+        // Text selected in the comment, by dragging across it.
+        reply.update_in(&mut cx, |editor, window, cx| {
+            editor.set_text("", window, cx)
+        });
+        let body = cx
+            .debug_bounds("photon-review-comment-body")
+            .expect("the comment is drawn");
+        let (start, end) = (
+            gpui::point(body.left() + px(1.), body.center().y),
+            gpui::point(body.right() - px(1.), body.center().y),
+        );
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_move(end, MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(end, MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        click("photon-review-quote-T1", &mut cx);
+        assert_eq!(
+            reply.read_with(&cx, |editor, cx| editor.text(cx)),
+            "> Why audit here?\n\n"
+        );
+        assert!(cx.update(|window, cx| reply.focus_handle(cx).is_focused(window)));
+    }
+
+    #[gpui::test]
+    async fn at_offers_the_participants_and_inserts_one(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_with_threads(
+            cx,
+            vec![review_thread(
+                "T1",
+                "src/login.rs",
+                3,
+                "bob",
+                "Why audit?",
+                false,
+            )],
+            vec![current_draft(
+                "src/login.rs",
+                2,
+                "    let user = user.trim();",
+            )],
+        )
+        .await;
+        let fake = install_fake(&mut cx);
+        item.read_with(&cx, |item, _| {
+            assert_eq!(
+                *item.participants.borrow(),
+                [
+                    ("maya".to_string(), "reviewed"),
+                    ("marcus".to_string(), "requested"),
+                    ("bob".to_string(), "commented")
+                ],
+                "the author, alice, is the viewer here"
+            )
+        });
+        let reply = reply_box(&item, "T1", &mut cx);
+        cx.update(|window, cx| window.focus(&reply.focus_handle(cx), cx));
+        cx.simulate_input("Thanks @");
+        cx.run_until_parked();
+        assert!(reply.read_with(&cx, |editor, _| editor.has_visible_completions_menu()));
+        cx.simulate_input("mar");
+        cx.run_until_parked();
+        assert!(reply.read_with(&cx, |editor, _| editor.has_visible_completions_menu()));
+        cx.dispatch_action(editor::actions::ConfirmCompletion::default());
+        cx.run_until_parked();
+        assert_eq!(
+            reply.read_with(&cx, |editor, cx| editor.text(cx)),
+            "Thanks @marcus "
+        );
+
+        item.update_in(&mut cx, |item, window, cx| item.edit_draft(0, window, cx));
+        cx.run_until_parked();
+        let draft = composer(&item, &mut cx);
+        draft.update_in(&mut cx, |editor, window, cx| {
+            editor.set_text("", window, cx);
+            window.focus(&editor.focus_handle(cx), cx)
+        });
+        cx.simulate_input("@b");
+        cx.run_until_parked();
+        cx.dispatch_action(editor::actions::ConfirmCompletion::default());
+        cx.run_until_parked();
+        assert_eq!(draft.read_with(&cx, |editor, cx| editor.text(cx)), "@bob ");
+
+        cx.simulate_input("me@");
+        cx.run_until_parked();
+        assert!(
+            !draft.read_with(&cx, |editor, _| editor.has_visible_completions_menu()),
+            "an email address isn't a mention"
+        );
+        assert!(fake.requests().is_empty(), "nothing is fetched");
+    }
+
+    #[gpui::test]
+    async fn preview_shows_a_composer_as_it_will_be_posted(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_with_threads(
+            cx,
+            vec![review_thread(
+                "T1",
+                "src/login.rs",
+                3,
+                "bob",
+                "Why audit?",
+                false,
+            )],
+            vec![current_draft(
+                "src/login.rs",
+                2,
+                "    let user = user.trim();",
+            )],
+        )
+        .await;
+        let preview_source = |slot: &str, item: &Entity<ReviewItem>, cx: &mut VisualTestContext| {
+            item.read_with(cx, |item, cx| {
+                item.previews.get(slot).map(|body| {
+                    body.markdown
+                        .as_ref()
+                        .map(|markdown| markdown.read(cx).source().to_string())
+                })
+            })
+        };
+        let reply = reply_box(&item, "T1", &mut cx);
+        type_text(&reply, "**Agreed**", &mut cx);
+        click("photon-review-preview-reply:T1", &mut cx);
+        assert_eq!(
+            preview_source("reply:T1", &item, &mut cx),
+            Some(Some("**Agreed**".to_string()))
+        );
+        assert!(drawn("photon-review-preview-body", &mut cx));
+        click("photon-review-write-reply:T1", &mut cx);
+        assert!(!drawn("photon-review-preview-body", &mut cx));
+        assert_eq!(preview_source("reply:T1", &item, &mut cx), None);
+
+        item.update_in(&mut cx, |item, window, cx| item.edit_draft(0, window, cx));
+        cx.run_until_parked();
+        type_text(&composer(&item, &mut cx), " _really_", &mut cx);
+        click("photon-review-preview-draft:0", &mut cx);
+        assert_eq!(
+            preview_source("draft:0", &item, &mut cx),
+            Some(Some(
+                "about     let user = user.trim(); _really_".to_string()
+            ))
+        );
+        assert_eq!(
+            preview_source("reply:T1", &item, &mut cx),
+            None,
+            "each composer has its own toggle"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_author_chip_marks_only_the_authors_comments(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_with_threads(
+            cx,
+            vec![review_thread(
+                "T1",
+                "src/login.rs",
+                3,
+                "bob",
+                "Why audit?",
+                false,
+            )],
+            Vec::new(),
+        )
+        .await;
+        assert!(drawn("photon-review-thread-T1", &mut cx));
+        assert!(!drawn("photon-review-chip-author", &mut cx));
+        item.update(&mut cx, |item, cx| {
+            item.detail.threads[0].comments.push(crate::ThreadComment {
+                database_id: 900,
+                author: "alice".into(),
+                body: "It must run first.".into(),
+                created_at: "2026-10-21T10:00:00Z".into(),
+            });
+            item.show_comments(cx);
+        });
+        assert!(drawn("photon-review-chip-author", &mut cx));
     }
 }

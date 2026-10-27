@@ -1730,4 +1730,14 @@
       "alt-left": "photon_call_trails::MakeRoot",
     },
   },
+  {
+    // photon: move between and act on pull request review comments from the diff.
+    "context": "PhotonReview > Editor && mode == full",
+    "bindings": {
+      "n": "photon_review::NextComment",
+      "p": "photon_review::PreviousComment",
+      "r": "photon_review::ReplyToComment",
+      "shift-r": "photon_review::ResolveComment",
+    },
+  },
 ]
