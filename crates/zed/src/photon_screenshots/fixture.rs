@@ -902,13 +902,13 @@ esac
 const KUBECTL_SCRIPT: &str = r#"#!/bin/sh
 sleep 0.4
 cat <<'OUT'
-NAME                             READY   STATUS             RESTARTS      AGE
-billing-api-7d9f8c6b5-2xkqp      1/1     Running            0             3h12m
-billing-api-7d9f8c6b5-h8w4n      1/1     Running            0             3h12m
-billing-api-7d9f8c6b5-r6tzm      1/1     Running            0             3h11m
-billing-nightly-28814400-fq2lx   0/1     Completed          0             9h
-billing-worker-5c4b9d7f8-mz9vd   1/1     Running            2 (41m ago)   2d4h
-gateway-mock-6b8d5f9c4-p7k2s     0/1     CrashLoopBackOff   14 (2m ago)   52m
-ledger-db-0                      1/1     Running            0             12d
+NAME                 READY   STATUS             RESTARTS      AGE
+api-7d9f-2xkqp       1/1     Running            0             3h12m
+api-7d9f-h8w4n       1/1     Running            0             3h12m
+api-7d9f-r6tzm       1/1     Running            0             3h11m
+nightly-fq2lx        0/1     Completed          0             9h
+worker-mz9vd         1/1     Running            2 (41m ago)   2d4h
+gateway-p7k2s        0/1     CrashLoopBackOff   14 (2m ago)   52m
+ledger-db-0          1/1     Running            0             12d
 OUT
 "#;
