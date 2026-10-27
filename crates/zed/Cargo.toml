@@ -72,7 +72,7 @@ path = "src/visual_test_runner.rs"
 required-features = ["visual-tests"]
 
 # photon: website screenshot runner
-[[bin]]
+[[example]]
 name = "photon_screenshots"
 path = "src/photon_screenshots.rs"
 required-features = ["photon-screenshots"]

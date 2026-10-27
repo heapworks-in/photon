@@ -6,7 +6,7 @@
 //! Renders the screenshots on Photon's website with the app itself, offscreen, the way
 //! `zed_visual_test_runner` does: real Metal rendering, no Screen Recording permission.
 //!
-//!   cargo run -p zed --bin photon_screenshots --features photon-screenshots [-- OUTPUT_DIR]
+//!   cargo run -p zed --example photon_screenshots --features photon-screenshots [-- OUTPUT_DIR]
 //!
 //! Every scene opens a window on a fixture repository (a small billing service with one pull
 //! request), drives it like a user would, and saves `<scene>.webp` (2x) and `<scene>-1x.webp`
