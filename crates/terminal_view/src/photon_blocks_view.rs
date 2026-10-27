@@ -640,6 +640,10 @@ impl TerminalView {
             window.focus(&input.focus_handle(cx), cx);
         } else if !shown && self.block_input_focused(window, cx) {
             window.focus(&self.focus_handle, cx);
+            // Focus stays inside this view, so focus-in doesn't restart the blink, which may
+            // have timed out at the prompt.
+            self.blink_manager
+                .update(cx, editor::blink_manager::BlinkManager::pause_blinking);
         }
     }
 
