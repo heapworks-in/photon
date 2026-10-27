@@ -46,6 +46,9 @@ zlog.workspace = true
 
 [dev-dependencies]
 db = {workspace = true, features = ["test-support"]}
+# photon: GPUI test of the onboarding theme picker.
+gpui = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }
 
 [package.metadata.cargo-shear]
 ignored = ["component", "documented"]
