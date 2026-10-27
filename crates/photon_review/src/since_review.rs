@@ -152,6 +152,22 @@ pub fn author_changed_paths(old: &[FileDiff], new: &[FileDiff]) -> Vec<String> {
     paths
 }
 
+/// What a viewed step's mark is checked against: its files' hunk bodies, so a rebase that only
+/// moves lines keeps the mark, and an edit to any of them doesn't.
+pub fn diff_fingerprint<'a>(files: impl IntoIterator<Item = &'a FileDiff>) -> String {
+    use sha2::{Digest as _, Sha256};
+    let mut hasher = Sha256::new();
+    for file in files {
+        hasher.update(file.path.as_bytes());
+        for hunk in &file.hunks {
+            hasher.update([0]);
+            hasher.update(hunk.body.as_bytes());
+        }
+        hasher.update([1]);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
 /// Binary and submodule entries have no hunks to compare, so their blobs are compared instead.
 async fn opaque_changed_paths(
     checkout: &Checkout,
@@ -491,6 +507,22 @@ mod tests {
                 body: body.into(),
             }],
         }
+    }
+
+    #[test]
+    fn fingerprint_ignores_line_moves_but_not_edits() {
+        let print = |files: &[FileDiff]| diff_fingerprint(files);
+        let original = print(&[file("a.rs", 3, "+a\n"), file("b.rs", 1, "+b\n")]);
+        assert_eq!(
+            print(&[file("a.rs", 40, "+a\n"), file("b.rs", 9, "+b\n")]),
+            original
+        );
+        assert_ne!(
+            print(&[file("a.rs", 3, "+a\n"), file("b.rs", 1, "+c\n")]),
+            original
+        );
+        assert_ne!(print(&[file("a.rs", 3, "+a\n")]), original);
+        assert_eq!(original.len(), 64);
     }
 
     #[test]

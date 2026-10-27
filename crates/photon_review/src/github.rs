@@ -104,6 +104,8 @@ pub struct ReviewThread {
 pub struct PrFile {
     pub path: String,
     pub viewed: bool,
+    /// GitHub's `DISMISSED`: viewed, then changed by a later push.
+    pub changed_since_viewed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -792,6 +794,7 @@ pub fn parse_detail(key: &PrKey, json: &str) -> Result<PrDetail> {
                 .map(|file| PrFile {
                     path: file.path,
                     viewed: file.viewer_viewed_state == "VIEWED",
+                    changed_since_viewed: file.viewer_viewed_state == "DISMISSED",
                 })
                 .collect()
         })
@@ -1354,14 +1357,19 @@ mod tests {
             [
                 PrFile {
                     path: "src/upload.rs".into(),
-                    viewed: true
+                    viewed: true,
+                    changed_since_viewed: false,
                 },
                 PrFile {
                     path: "src/retry.rs".into(),
-                    viewed: false
+                    viewed: false,
+                    changed_since_viewed: false,
                 },
             ]
         );
+        let dismissed = DETAIL.replacen("\"VIEWED\"", "\"DISMISSED\"", 1);
+        let file = &parse_detail(&key(), &dismissed).expect("parse").files[0];
+        assert!(file.changed_since_viewed && !file.viewed);
         let thread = &detail.threads[0];
         assert_eq!(thread.id, "PRRT_1");
         assert_eq!((thread.line, thread.start_line), (Some(42), Some(40)));
@@ -1493,6 +1501,7 @@ mod tests {
             outdated: false,
             general: false,
             post_state: crate::PostState::Unposted,
+            from_agent: false,
         }
     }
 
@@ -1521,6 +1530,7 @@ mod tests {
             draft("src/upload.rs", 41, 41, "  "),
             crate::Draft {
                 post_state: crate::PostState::Sending,
+                from_agent: false,
                 ..draft("src/upload.rs", 41, 41, "Maybe posted")
             },
         ];

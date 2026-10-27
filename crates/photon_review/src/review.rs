@@ -41,8 +41,8 @@ use workspace::{
 use settings::{PrReviewChecklistContent, Settings as _, SettingsStore};
 
 use crate::{
-    AgentComment, PromptInput, agent_config_paths, parse_agent_comments, review_agent,
-    review_prompt,
+    AgentComment, DismissReason, Dismissal, PromptInput, Verdict, agent_config_paths,
+    parse_agent_comments, parse_verdicts, review_agent, review_prompt, verify_prompt,
 };
 use crate::{
     Answer, AutoCheck, AutoInputs, AutoResult, ChecklistItem, ChecklistSource, LocalRun,
@@ -66,6 +66,7 @@ use crate::{
 use crate::{CheckOutcome, MergeMethod, PrState, Readiness, remove_from_inbox};
 use crate::{Move, ViewFile, is_generated, open_feedback, push_command, simplified_bases};
 use crate::{TimelineEvent, issue_comment_request, parse_timeline, timeline_request};
+use crate::{ViewedMark, diff_fingerprint};
 use crate::{
     apply_suggestion, commit_file_request, file_at_commit_request, parse_file_contents,
     parse_suggestion, suggestion_block,
@@ -106,6 +107,13 @@ pub enum ContextState {
     Finding,
     Ready,
     Unavailable(SharedString),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewedState {
+    NotViewed,
+    Viewed,
+    ChangedSinceViewed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -287,7 +295,11 @@ pub struct ReviewItem {
     changed_rows: HashMap<String, Vec<Range<u32>>>,
     steps: Vec<Step>,
     selected: usize,
-    viewed_steps: HashSet<String>,
+    viewed_steps: HashMap<String, ViewedMark>,
+    /// Ticked steps whose files' diff changed since they were ticked.
+    stale_steps: HashSet<String>,
+    /// The head each file was marked viewed at on GitHub from here, by path.
+    viewed_heads: HashMap<String, String>,
     context_state: ContextState,
     editor: Entity<Editor>,
     multibuffer: Entity<MultiBuffer>,
@@ -326,12 +338,18 @@ pub struct ReviewItem {
     /// The agent pre-review: running, and what came of the last one.
     agent_reviewing: bool,
     agent_review_note: Option<(SharedString, Color)>,
+    /// Findings the agent's check couldn't confirm, with its reason, until the next pre-review.
+    dropped_findings: Vec<(AgentComment, String)>,
+    dropped_open: bool,
     _agent_review_task: Task<()>,
     workspace: Option<WeakEntity<Workspace>>,
     suggestion_notes: HashMap<String, SharedString>,
     marking_viewed: HashSet<String>,
     last_review: Option<String>,
     full_files: Option<Vec<LoadedFile>>,
+    /// Whether `full_files` is set aside for "Only what you haven't reviewed" rather than for the
+    /// changes since your review.
+    unreviewed_view: bool,
     hide_whitespace: bool,
     hide_moves: bool,
     hide_generated: bool,
@@ -829,6 +847,39 @@ fn comment_card(id: ElementId, block: &BlockContext) -> Stateful<Div> {
         .bg(colors.panel_background)
 }
 
+/// Deleting an agent draft asks why in one small menu, so later pre-reviews learn from it.
+fn dismiss_menu(
+    item: WeakEntity<ReviewItem>,
+    local_id: usize,
+    group: SharedString,
+) -> impl IntoElement {
+    ui::PopoverMenu::new(("photon-review-dismiss", local_id))
+        .trigger_with_tooltip(
+            IconButton::new("delete", IconName::Trash)
+                .icon_size(IconSize::Small)
+                .visible_on_hover(group),
+            Tooltip::text("Dismiss"),
+        )
+        .anchor(gpui::Anchor::TopRight)
+        .menu(move |window, cx| {
+            let item = item.clone();
+            Some(ui::ContextMenu::build(window, cx, move |menu, _, _| {
+                DismissReason::ALL.into_iter().fold(
+                    menu.header("Dismiss because"),
+                    |menu, reason| {
+                        let item = item.clone();
+                        menu.entry(reason.label(), None, move |_, cx| {
+                            item.update(cx, |item, cx| {
+                                item.dismiss_agent_draft(local_id, reason, cx)
+                            })
+                            .log_err();
+                        })
+                    },
+                )
+            }))
+        })
+}
+
 fn draft_renderer(
     item: WeakEntity<ReviewItem>,
     local_id: usize,
@@ -839,6 +890,7 @@ fn draft_renderer(
     composer: Option<Entity<Editor>>,
     sync: Arc<Mutex<DraftSync>>,
     can_suggest: bool,
+    from_agent: bool,
 ) -> RenderBlock {
     Arc::new(move |block: &mut BlockContext| {
         let error = sync.lock().error.clone();
@@ -891,19 +943,31 @@ fn draft_renderer(
                                         .debug_selector(move || {
                                             format!("photon-review-draft-delete-{local_id}")
                                         })
-                                        .child(
-                                            IconButton::new("delete", IconName::Trash)
-                                                .icon_size(IconSize::Small)
-                                                .visible_on_hover(group.clone())
-                                                .tooltip(Tooltip::text("Delete"))
-                                                .on_click(move |_, window, cx| {
-                                                    delete_item
-                                                        .update(cx, |item, cx| {
-                                                            item.cancel_draft(local_id, window, cx)
-                                                        })
-                                                        .log_err();
-                                                }),
-                                        ),
+                                        .map(|this| {
+                                            if from_agent {
+                                                this.child(dismiss_menu(
+                                                    delete_item.clone(),
+                                                    local_id,
+                                                    group.clone(),
+                                                ))
+                                            } else {
+                                                this.child(
+                                                    IconButton::new("delete", IconName::Trash)
+                                                        .icon_size(IconSize::Small)
+                                                        .visible_on_hover(group.clone())
+                                                        .tooltip(Tooltip::text("Delete"))
+                                                        .on_click(move |_, window, cx| {
+                                                            delete_item
+                                                                .update(cx, |item, cx| {
+                                                                    item.cancel_draft(
+                                                                        local_id, window, cx,
+                                                                    )
+                                                                })
+                                                                .log_err();
+                                                        }),
+                                                )
+                                            }
+                                        }),
                                 ),
                         )
                     }),
@@ -1313,6 +1377,10 @@ impl ReviewItem {
             .viewed_steps(&detail.summary.key)
             .log_err()
             .unwrap_or_default();
+        let viewed_heads = database
+            .viewed_files(&detail.summary.key)
+            .log_err()
+            .unwrap_or_default();
         subscriptions.push(cx.observe_global::<SettingsStore>(|this, cx| {
             this.rebuild_checklist(cx);
         }));
@@ -1349,6 +1417,8 @@ impl ReviewItem {
             steps: Vec::new(),
             selected: 0,
             viewed_steps,
+            stale_steps: HashSet::new(),
+            viewed_heads,
             context_state: ContextState::Finding,
             editor,
             multibuffer,
@@ -1382,12 +1452,15 @@ impl ReviewItem {
             finishing_threads: HashSet::new(),
             agent_reviewing: false,
             agent_review_note: None,
+            dropped_findings: Vec::new(),
+            dropped_open: false,
             _agent_review_task: Task::ready(()),
             workspace: None,
             suggestion_notes: HashMap::new(),
             marking_viewed: HashSet::new(),
             last_review,
             full_files: None,
+            unreviewed_view: false,
             hide_whitespace: false,
             hide_moves: false,
             hide_generated: false,
@@ -1447,7 +1520,214 @@ impl ReviewItem {
     }
 
     pub fn showing_changes_since_review(&self) -> bool {
-        self.full_files.is_some()
+        self.full_files.is_some() && !self.unreviewed_view
+    }
+
+    /// Offered once GitHub has one of this review's files viewed, or viewed and since changed.
+    pub fn unreviewed_offered(&self) -> bool {
+        self.unreviewed_view
+            || self.all_files().iter().any(|file| {
+                self.detail.files.iter().any(|state| {
+                    state.path == file.diff.path && (state.viewed || state.changed_since_viewed)
+                })
+            })
+    }
+
+    pub fn showing_unreviewed(&self) -> bool {
+        self.unreviewed_view && self.full_files.is_some()
+    }
+
+    fn cancel_subset_load(&mut self, cx: &mut Context<Self>) {
+        self.loading_since_review = false;
+        self._since_review_task = Task::ready(());
+        self.dismiss_toast::<NoteToast>(cx);
+        cx.notify();
+    }
+
+    /// Shows only what you haven't reviewed: files GitHub doesn't have viewed, in full, and files
+    /// changed since you viewed them as the diff from the head you viewed them at.
+    pub fn toggle_unreviewed(&mut self, cx: &mut Context<Self>) {
+        self.since_review_note = None;
+        if self.loading_since_review {
+            self.cancel_subset_load(cx);
+            return;
+        }
+        if let Some(full_files) = self.full_files.take() {
+            self._since_review_task = Task::ready(());
+            self.set_files(full_files, cx);
+            if std::mem::take(&mut self.unreviewed_view) {
+                return;
+            }
+        }
+        // A file shown in full keeps its entities, so nothing is loaded twice.
+        let share = |file: &LoadedFile| LoadedFile {
+            diff: file.diff.clone(),
+            contents: file.contents.clone(),
+            note: file.note.clone(),
+        };
+        let head = self.checkout.head_sha.clone();
+        let mut picks = Vec::new();
+        let mut unknown = 0;
+        for file in &self.files {
+            let state = self
+                .detail
+                .files
+                .iter()
+                .find(|state| state.path == file.diff.path);
+            match state {
+                Some(state) if state.viewed => {}
+                Some(state) if state.changed_since_viewed => {
+                    match self
+                        .viewed_heads
+                        .get(&file.diff.path)
+                        .filter(|viewed_at| **viewed_at != head)
+                    {
+                        Some(from) => picks.push((share(file), Some(from.clone()))),
+                        None => {
+                            unknown += 1;
+                            picks.push((share(file), None));
+                        }
+                    }
+                }
+                _ => picks.push((share(file), None)),
+            }
+        }
+        if picks.is_empty() {
+            self.set_note("You've viewed every file.".into(), cx);
+            return;
+        }
+        let mut froms: Vec<String> = picks.iter().filter_map(|(_, from)| from.clone()).collect();
+        froms.sort();
+        froms.dedup();
+        if froms.is_empty() {
+            self.show_unreviewed(
+                picks.into_iter().map(|(file, _)| file).collect(),
+                unknown,
+                cx,
+            );
+            return;
+        }
+        let checkout = self.checkout.clone();
+        let key = self.detail.summary.key.clone();
+        let url = fetch_url(&repo_id(&self.detail.summary));
+        let project = self.project.clone();
+        self.loading_since_review = true;
+        let item = cx.weak_entity();
+        self.show_toast(
+            Toast::new(
+                NotificationId::unique::<NoteToast>(),
+                "Loading what you haven't reviewed…",
+            )
+            .on_click("Cancel", move |_, cx| {
+                item.update(cx, |item, cx| {
+                    if item.loading_since_review {
+                        item.toggle_unreviewed(cx);
+                    }
+                })
+                .log_err();
+            }),
+            cx,
+        );
+        self._since_review_task = cx.spawn(async move |this, cx| {
+            let since: HashMap<String, Vec<(FileDiff, Option<String>)>> = cx
+                .background_spawn({
+                    let checkout = checkout.clone();
+                    async move {
+                        let mut since = HashMap::new();
+                        for from in froms {
+                            let plan = plan_since_review(&checkout, &key, &url, &from).await;
+                            if plan.message().is_some() {
+                                continue;
+                            }
+                            match since_review_files(&checkout, &plan).await {
+                                Ok(files) => {
+                                    since.insert(from, files);
+                                }
+                                Err(error) => log::warn!("diff since a viewed head: {error:#}"),
+                            }
+                        }
+                        since
+                    }
+                })
+                .await;
+            let mut unavailable = unknown;
+            let loads = cx.update(|cx| {
+                let mut loads = Vec::new();
+                for (file, from) in picks {
+                    let Some(from) = from else {
+                        loads.push(Task::ready(Ok(file)));
+                        continue;
+                    };
+                    let Some(files) = since.get(&from) else {
+                        unavailable += 1;
+                        loads.push(Task::ready(Ok(file)));
+                        continue;
+                    };
+                    // Not in the diff since then: only the base moved under it.
+                    let Some((diff, base)) = files
+                        .iter()
+                        .find(|(diff, _)| diff.path == file.diff.path)
+                        .cloned()
+                    else {
+                        continue;
+                    };
+                    loads.push(build_loaded_file(
+                        &project,
+                        checkout.worktree.join(&diff.path),
+                        &checkout.worktree,
+                        &checkout.head_sha,
+                        base,
+                        diff,
+                        cx,
+                    ));
+                }
+                loads
+            });
+            let loaded = try_join_all(loads).await;
+            this.update(cx, |this, cx| {
+                this.loading_since_review = false;
+                match loaded {
+                    Ok(files) if files.is_empty() => {
+                        this.set_note("Nothing has changed since you viewed it.".into(), cx)
+                    }
+                    Ok(files) => {
+                        this.dismiss_toast::<NoteToast>(cx);
+                        this.show_unreviewed(files, unavailable, cx);
+                    }
+                    Err(error) => this.set_note(format!("{error:#}").into(), cx),
+                }
+            })
+            .log_err();
+        });
+        cx.notify();
+    }
+
+    /// `unavailable` files changed since viewed are shown in full: the head they were viewed at
+    /// isn't known or couldn't be fetched.
+    fn show_unreviewed(
+        &mut self,
+        files: Vec<LoadedFile>,
+        unavailable: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let full = std::mem::take(&mut self.files);
+        self.full_files = Some(full);
+        self.unreviewed_view = true;
+        self.set_files(files, cx);
+        if unavailable > 0 {
+            self.set_note(
+                format!(
+                    "Showing the full diff of {unavailable} file{} changed since you viewed {}: \
+                     the commit you viewed {} at isn't available.",
+                    if unavailable == 1 { "" } else { "s" },
+                    if unavailable == 1 { "it" } else { "them" },
+                    if unavailable == 1 { "it" } else { "them" },
+                )
+                .into(),
+                cx,
+            );
+        }
+        cx.notify();
     }
 
     pub fn toggle_changes_since_review(
@@ -1458,16 +1738,15 @@ impl ReviewItem {
     ) {
         self.since_review_note = None;
         if self.loading_since_review {
-            self.loading_since_review = false;
-            self._since_review_task = Task::ready(());
-            self.dismiss_toast::<NoteToast>(cx);
-            cx.notify();
+            self.cancel_subset_load(cx);
             return;
         }
         if let Some(full_files) = self.full_files.take() {
             self._since_review_task = Task::ready(());
             self.set_files(full_files, cx);
-            return;
+            if !std::mem::take(&mut self.unreviewed_view) {
+                return;
+            }
         }
         let Some(reviewed) = self
             .last_review
@@ -1884,6 +2163,7 @@ impl ReviewItem {
                 unmarked |= state.error.is_some() || state.id.is_none();
                 drafts.push(Draft {
                     post_state: PostState::Unposted,
+                    from_agent: false,
                     ..latest.clone()
                 });
                 sent.push((*local_id, sync.clone(), latest.body.clone()));
@@ -2385,6 +2665,12 @@ impl ReviewItem {
             .iter()
             .map(|file| file.diff.path.clone())
             .collect();
+        let thoroughness = PrReviewSettings::get_global(cx).thoroughness;
+        let dismissals = self
+            .database
+            .dismissals(&self.detail.summary.key)
+            .log_err()
+            .unwrap_or_default();
         let prompt = review_prompt(&PromptInput {
             number: self.detail.summary.key.number,
             title: &self.detail.summary.title,
@@ -2397,53 +2683,222 @@ impl ReviewItem {
                 .filter(|item| item.paths.is_none() || item.matches_any(&paths))
                 .map(|item| item.text.as_str())
                 .collect(),
+            thoroughness,
+            dismissals: &dismissals,
         });
-        let reply = agent.review(
-            workspace,
-            prompt,
-            self.checkout.worktree.clone(),
-            window,
-            cx,
-        );
+        let work_dir = self.checkout.worktree.clone();
+        let reply = agent.review(workspace.clone(), prompt, work_dir.clone(), window, cx);
         self.agent_reviewing = true;
+        self.dropped_findings.clear();
         self.set_agent_note(
             "The agent is reviewing; follow it in the agent panel.".into(),
             Color::Muted,
             cx,
         );
-        self._agent_review_task = cx.spawn(async move |this, cx| {
-            let comments = reply
-                .await
-                .and_then(|reply| parse_agent_comments(&reply));
-            this.update(cx, |this, cx| {
-                this.agent_reviewing = false;
-                let (note, color) = match comments {
-                    Ok(comments) if comments.is_empty() => {
-                        ("The agent found nothing to comment on.".into(), Color::Muted)
-                    }
-                    Ok(comments) => {
-                        let count = comments.len();
-                        for comment in comments {
-                            let draft = this.agent_draft(comment, cx);
-                            let local_id = this.push_draft(draft);
-                            this.queue_save(local_id, cx);
-                        }
-                        this.show_comments(cx);
-                        (
-                            format!(
-                                "The agent added {count} draft comment{}. Read each one before you submit.",
-                                if count == 1 { "" } else { "s" }
-                            )
-                            .into(),
-                            Color::Accent,
+        let number = self.detail.summary.key.number;
+        let title = self.detail.summary.title.clone();
+        self._agent_review_task = cx.spawn_in(window, async move |this, cx| {
+            let findings = reply.await.and_then(|reply| parse_agent_comments(&reply));
+            let findings: Vec<AgentComment> = match findings {
+                Ok(findings) => findings
+                    .into_iter()
+                    .filter(|finding| finding.wanted_at(thoroughness))
+                    .collect(),
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        this.agent_reviewing = false;
+                        this.set_agent_note(format!("{error:#}").into(), Color::Error, cx);
+                    })
+                    .log_err();
+                    return;
+                }
+            };
+            if findings.is_empty() {
+                this.update(cx, |this, cx| {
+                    this.agent_reviewing = false;
+                    this.set_agent_note(
+                        "The agent found nothing to comment on.".into(),
+                        Color::Muted,
+                        cx,
+                    );
+                })
+                .log_err();
+                return;
+            }
+            let count = findings.len();
+            let Some(check) = this
+                .update_in(cx, |this, window, cx| {
+                    this.set_agent_note(
+                        format!(
+                            "The agent is checking its {count} finding{} against the code.",
+                            if count == 1 { "" } else { "s" }
                         )
-                    }
-                    Err(error) => (format!("{error:#}").into(), Color::Error),
-                };
-                this.set_agent_note(note, color, cx);
+                        .into(),
+                        Color::Muted,
+                        cx,
+                    );
+                    agent.review(
+                        workspace,
+                        verify_prompt(number, &title, &findings),
+                        work_dir,
+                        window,
+                        cx,
+                    )
+                })
+                .log_err()
+            else {
+                return;
+            };
+            let verdicts = check
+                .await
+                .and_then(|reply| parse_verdicts(&reply, findings.len()));
+            this.update(cx, |this, cx| {
+                this.add_checked_findings(findings, verdicts, cx)
             })
             .log_err();
         });
+    }
+
+    /// Kept findings become drafts; dropped ones are listed in the map. When the check itself
+    /// failed, every finding is added and the note says they weren't checked.
+    fn add_checked_findings(
+        &mut self,
+        findings: Vec<AgentComment>,
+        verdicts: Result<Vec<Verdict>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.agent_reviewing = false;
+        let total = findings.len();
+        let plural = |count: usize| if count == 1 { "" } else { "s" };
+        let (kept, note, color) = match verdicts {
+            Ok(verdicts) => {
+                let mut kept = Vec::new();
+                for (finding, verdict) in findings.into_iter().zip(verdicts) {
+                    if verdict.keep {
+                        kept.push(finding);
+                    } else {
+                        self.dropped_findings.push((finding, verdict.reason));
+                    }
+                }
+                let dropped = total - kept.len();
+                let summary = if dropped == 0 {
+                    format!(
+                        "Kept all {total} finding{} after checking them against the code.",
+                        plural(total)
+                    )
+                } else {
+                    format!(
+                        "Kept {} of {total} finding{}; dropped {dropped} it couldn't confirm.",
+                        kept.len(),
+                        plural(total)
+                    )
+                };
+                let note = if kept.is_empty() {
+                    summary
+                } else {
+                    format!("{summary} Read each draft before you submit.")
+                };
+                (kept, note, Color::Accent)
+            }
+            Err(error) => (
+                findings,
+                format!(
+                    "Couldn't check the findings ({error:#}), so all {total} are added unchecked. \
+                     Read each draft before you submit."
+                ),
+                Color::Warning,
+            ),
+        };
+        let added = !kept.is_empty();
+        for comment in kept {
+            let draft = self.agent_draft(comment, cx);
+            let local_id = self.push_draft(draft);
+            self.queue_save(local_id, cx);
+        }
+        if added {
+            self.show_comments(cx);
+        }
+        self.set_agent_note(note.into(), color, cx);
+    }
+
+    /// Deletes an agent draft and remembers why, so later pre-reviews of the repository don't
+    /// repeat it.
+    pub fn dismiss_agent_draft(
+        &mut self,
+        local_id: usize,
+        reason: DismissReason,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.draft_index(local_id) else {
+            return;
+        };
+        let draft = &self.drafts[index];
+        let dismissal = Dismissal {
+            path: draft.path.clone(),
+            body: draft.body.clone(),
+            reason,
+        };
+        let database = self.database.clone();
+        let key = self.detail.summary.key.clone();
+        cx.background_spawn(async move { database.add_dismissal(key, dismissal).await })
+            .detach_and_log_err(cx);
+        self.discard_draft(local_id, cx);
+    }
+
+    /// The findings the agent's check dropped, folded to one line.
+    fn render_dropped_findings(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let count = self.dropped_findings.len();
+        if count == 0 {
+            return None;
+        }
+        let colors = cx.theme().colors();
+        let section = v_flex().pb_2().gap_1().child(self.render_fold_line(
+            "photon-review-dropped",
+            self.dropped_open,
+            format!(
+                "Dropped {count} finding{} the agent couldn't confirm",
+                if count == 1 { "" } else { "s" }
+            ),
+            |this| &mut this.dropped_open,
+            cx,
+        ));
+        if !self.dropped_open {
+            return Some(section.into_any_element());
+        }
+        Some(
+            section
+                .child(
+                    v_flex()
+                        .debug_selector(|| "photon-review-dropped-list".into())
+                        .gap_1()
+                        .children(self.dropped_findings.iter().map(|(finding, reason)| {
+                            v_flex()
+                                .gap_0p5()
+                                .p_1()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(colors.border_variant)
+                                .child(
+                                    Label::new(match finding.line {
+                                        Some(line) => format!("{}:{line}", finding.path),
+                                        None => finding.path.clone(),
+                                    })
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted)
+                                    .truncate(),
+                                )
+                                .child(Label::new(finding.draft_text()).size(LabelSize::Small))
+                                .when(!reason.is_empty(), |this| {
+                                    this.child(
+                                        Label::new(format!("Why dropped: {reason}"))
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                    )
+                                })
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 
     pub fn agent_review_note(&self) -> Option<&(SharedString, Color)> {
@@ -2642,6 +3097,7 @@ impl ReviewItem {
             outdated: false,
             general,
             post_state: PostState::Unposted,
+            from_agent: true,
         }
     }
 
@@ -2865,12 +3321,15 @@ impl ReviewItem {
             };
             this.update(cx, |this, cx| {
                 this.marking_viewed.remove(&path);
-                if let Err(error) = &result {
-                    if this.file_viewed(&path) == viewed {
-                        this.set_local_file_viewed(&path, !viewed);
+                match &result {
+                    Ok(()) => this.record_viewed_head(&path, viewed, cx),
+                    Err(error) => {
+                        if this.file_viewed(&path) == viewed {
+                            this.set_local_file_viewed(&path, !viewed);
+                        }
+                        this.file_errors
+                            .insert(path.clone(), format!("{error:#}").into());
                     }
-                    this.file_errors
-                        .insert(path.clone(), format!("{error:#}").into());
                 }
                 cx.notify();
             })?;
@@ -2880,12 +3339,30 @@ impl ReviewItem {
 
     fn set_local_file_viewed(&mut self, path: &str, viewed: bool) {
         match self.detail.files.iter_mut().find(|file| file.path == path) {
-            Some(file) => file.viewed = viewed,
+            Some(file) => {
+                file.viewed = viewed;
+                file.changed_since_viewed = false;
+            }
             None => self.detail.files.push(crate::PrFile {
                 path: path.to_string(),
                 viewed,
+                changed_since_viewed: false,
             }),
         }
+    }
+
+    /// Remembers the head a file was marked viewed at, to show what changed since.
+    fn record_viewed_head(&mut self, path: &str, viewed: bool, cx: &mut Context<Self>) {
+        let head = viewed.then(|| self.checkout.head_sha.clone());
+        match &head {
+            Some(head) => self.viewed_heads.insert(path.to_string(), head.clone()),
+            None => self.viewed_heads.remove(path),
+        };
+        let database = self.database.clone();
+        let key = self.detail.summary.key.clone();
+        let path = path.to_string();
+        cx.background_spawn(async move { database.set_file_viewed_head(key, path, head).await })
+            .detach_and_log_err(cx);
     }
 
     fn file_viewed(&self, path: &str) -> bool {
@@ -2895,10 +3372,56 @@ impl ReviewItem {
             .any(|file| file.path == path && file.viewed)
     }
 
-    /// A step is viewed when ticked here, or when GitHub has all its files viewed.
     fn step_viewed(&self, step: &Step) -> bool {
-        self.viewed_steps.contains(&step.key)
-            || (!step.files.is_empty() && step.files.iter().all(|path| self.file_viewed(path)))
+        self.step_state(step) == ViewedState::Viewed
+    }
+
+    /// A step is viewed when ticked here, or when GitHub has all its files viewed. A tick from an
+    /// older head counts as changed once the step's diff differs or GitHub says a file changed.
+    fn step_state(&self, step: &Step) -> ViewedState {
+        let file = |path: &String| self.detail.files.iter().find(|file| file.path == *path);
+        if let Some(mark) = self.viewed_steps.get(&step.key) {
+            let ticked_at_head = mark.head.as_deref() == Some(self.checkout.head_sha.as_str());
+            let changed = !ticked_at_head
+                && (self.stale_steps.contains(&step.key)
+                    || step
+                        .files
+                        .iter()
+                        .any(|path| file(path).is_some_and(|file| file.changed_since_viewed)));
+            return if changed {
+                ViewedState::ChangedSinceViewed
+            } else {
+                ViewedState::Viewed
+            };
+        }
+        if step.files.is_empty() {
+            return ViewedState::NotViewed;
+        }
+        if step
+            .files
+            .iter()
+            .all(|path| file(path).is_some_and(|file| file.viewed))
+        {
+            ViewedState::Viewed
+        } else if step
+            .files
+            .iter()
+            .all(|path| file(path).is_some_and(|file| file.viewed || file.changed_since_viewed))
+        {
+            ViewedState::ChangedSinceViewed
+        } else {
+            ViewedState::NotViewed
+        }
+    }
+
+    fn step_fingerprint(&self, step: &Step) -> String {
+        let files = self.all_files();
+        diff_fingerprint(step.files.iter().filter_map(|path| {
+            files
+                .iter()
+                .find(|file| file.diff.path == *path)
+                .map(|file| &file.diff)
+        }))
     }
 
     /// Ticks a step. A file is marked viewed on GitHub once every step showing it is ticked;
@@ -2913,7 +3436,7 @@ impl ReviewItem {
                 .steps
                 .iter()
                 .filter(|step| step.files.contains(path))
-                .all(|step| self.viewed_steps.contains(&step.key));
+                .all(|step| self.step_viewed(step));
             let sync = if viewed { file_done } else { true };
             if sync && self.file_viewed(path) != viewed {
                 self.set_file_viewed(path, viewed, cx)
@@ -2927,16 +3450,24 @@ impl ReviewItem {
         if self.full_files.is_some() {
             return;
         }
-        if viewed {
-            self.viewed_steps.insert(step_key.to_string());
-        } else {
-            self.viewed_steps.remove(step_key);
-        }
+        self.stale_steps.remove(step_key);
+        let mark = viewed.then(|| ViewedMark {
+            head: Some(self.checkout.head_sha.clone()),
+            fingerprint: self
+                .steps
+                .iter()
+                .find(|step| step.key == step_key)
+                .map(|step| self.step_fingerprint(step)),
+        });
+        match &mark {
+            Some(mark) => self.viewed_steps.insert(step_key.to_string(), mark.clone()),
+            None => self.viewed_steps.remove(step_key),
+        };
         cx.notify();
         let database = self.database.clone();
         let key = self.detail.summary.key.clone();
         let step_key = step_key.to_string();
-        cx.background_spawn(async move { database.set_step_viewed(key, step_key, viewed).await })
+        cx.background_spawn(async move { database.set_step_viewed(key, step_key, mark).await })
             .detach_and_log_err(cx);
     }
 
@@ -3171,6 +3702,7 @@ impl ReviewItem {
             outdated: false,
             general: false,
             post_state: crate::PostState::Unposted,
+            from_agent: false,
         };
         let local_id = self.push_draft(draft);
         self.open_composer(local_id, window, cx);
@@ -3375,6 +3907,7 @@ impl ReviewItem {
                     view.composer.clone(),
                     view.sync.clone(),
                     draft.side == Side::Right && !draft.general,
+                    draft.from_agent,
                 ),
                 priority: 0,
             });
@@ -3790,6 +4323,20 @@ impl ReviewItem {
         self.selected = selected_key
             .and_then(|key| self.steps.iter().position(|step| step.key == key))
             .unwrap_or_else(|| self.selected.min(self.steps.len().saturating_sub(1)));
+        // Worked out here rather than per frame; a subset's steps say nothing about the full diff.
+        if self.full_files.is_none() {
+            self.stale_steps = self
+                .steps
+                .iter()
+                .filter(|step| {
+                    self.viewed_steps
+                        .get(&step.key)
+                        .and_then(|mark| mark.fingerprint.as_ref())
+                        .is_some_and(|print| *print != self.step_fingerprint(step))
+                })
+                .map(|step| step.key.clone())
+                .collect();
+        }
         self.show_step(cx);
         cx.notify();
     }
@@ -4013,13 +4560,29 @@ impl ReviewItem {
             .unwrap_or_default()
     }
 
+    /// What's left to review.
     fn progress_text(&self) -> String {
-        let viewed = self
+        let states: Vec<ViewedState> = self
             .steps
             .iter()
-            .filter(|step| self.step_viewed(step))
+            .map(|step| self.step_state(step))
+            .collect();
+        let left = states
+            .iter()
+            .filter(|state| **state != ViewedState::Viewed)
             .count();
-        format!("{viewed} of {} steps viewed", self.steps.len())
+        let changed = states
+            .iter()
+            .filter(|state| **state == ViewedState::ChangedSinceViewed)
+            .count();
+        if left == 0 && !states.is_empty() {
+            return "All steps viewed".to_string();
+        }
+        let mut text = format!("{left} of {} steps left to review", states.len());
+        if changed > 0 {
+            text.push_str(&format!(" · {changed} changed since viewed"));
+        }
+        text
     }
 
     fn all_files(&self) -> &[LoadedFile] {
@@ -4384,7 +4947,10 @@ impl ReviewItem {
         let (hide_whitespace, hide_moves, hide_generated) =
             (self.hide_whitespace, self.hide_moves, self.hide_generated);
         let since_offered = self.changes_since_review_offered();
-        let since_on = self.showing_changes_since_review() || self.loading_since_review;
+        let since_on = self.showing_changes_since_review()
+            || (self.loading_since_review && !self.unreviewed_view);
+        let unreviewed_offered = self.unreviewed_offered();
+        let unreviewed_on = self.showing_unreviewed();
         let anything_hidden =
             !self.moves.is_empty() || self.files.iter().any(|file| self.hidden_by_view(file));
         let show_hidden = self.show_hidden;
@@ -4394,6 +4960,8 @@ impl ReviewItem {
             .count();
         let label = if self.showing_changes_since_review() {
             "View · since review".to_string()
+        } else if unreviewed_on {
+            "View · not reviewed".to_string()
         } else {
             match hidden {
                 0 => "View".to_string(),
@@ -4405,7 +4973,7 @@ impl ReviewItem {
             .trigger_with_tooltip(
                 crate::button("photon-review-view-trigger", label)
                     .style(ButtonStyle::Outlined)
-                    .toggle_state(hidden > 0 || since_on)
+                    .toggle_state(hidden > 0 || since_on || unreviewed_on)
                     .end_icon(Icon::new(IconName::ChevronDown).size(IconSize::XSmall)),
                 Tooltip::text(if point_out_since {
                     "New: show only the changes since your review"
@@ -4459,9 +5027,25 @@ impl ReviewItem {
                                 }
                             },
                         )
+                        .when(since_offered || unreviewed_offered, |menu| {
+                            menu.separator().header("Show")
+                        })
+                        .when(unreviewed_offered, |menu| {
+                            let item = item.clone();
+                            menu.toggleable_entry(
+                                "Only what you haven't reviewed",
+                                unreviewed_on,
+                                IconPosition::Start,
+                                None,
+                                move |_, cx| {
+                                    item.update(cx, |item, cx| item.toggle_unreviewed(cx))
+                                        .log_err();
+                                },
+                            )
+                        })
                         .when(since_offered, |menu| {
                             let item = item.clone();
-                            menu.separator().header("Show").toggleable_entry(
+                            menu.toggleable_entry(
                                 "Only changes since your review",
                                 since_on,
                                 IconPosition::Start,
@@ -5156,6 +5740,7 @@ impl ReviewItem {
             .child(div().children(self.render_checklist(cx)));
         map = map.children(self.render_feedback(cx));
         map = map.children(self.render_outdated_drafts(cx));
+        map = map.children(self.render_dropped_findings(cx));
         map = map.children(self.render_unplaced_threads(cx));
         let comments = self.detail.comment_count;
         map = map.child(
@@ -5186,7 +5771,8 @@ impl ReviewItem {
         );
         for (index, step) in self.steps.iter().enumerate() {
             let selected = index == self.selected && !self.conversation_open;
-            let viewed = self.step_viewed(step);
+            let state = self.step_state(step);
+            let viewed = state == ViewedState::Viewed;
             map = map.child(
                 h_flex()
                     .id(("photon-review-step", index))
@@ -5232,6 +5818,19 @@ impl ReviewItem {
                                     .truncate()
                                     .when(viewed, |label| label.color(Color::Muted)),
                             )
+                            .when(state == ViewedState::ChangedSinceViewed, |this| {
+                                this.child(
+                                    div()
+                                        .debug_selector(move || {
+                                            format!("photon-review-step-changed-{index}")
+                                        })
+                                        .child(
+                                            Label::new("Changed since you viewed it")
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Accent),
+                                        ),
+                                )
+                            })
                             .when(selected, |this| {
                                 this.child(
                                     Label::new(step.subtitle.clone())
@@ -7509,6 +8108,7 @@ fn verify_password(user: &str, password: &str) -> bool {
             outdated: false,
             general: false,
             post_state: crate::PostState::Unposted,
+            from_agent: false,
         }
     }
 
@@ -7919,9 +8519,9 @@ fn verify_password(user: &str, password: &str) -> bool {
             item.read_with(&cx, |item, _| (item.selected, item.steps[1].key.clone()));
         click("photon-review-step-viewed-1", &mut cx);
         item.read_with(&cx, |item, _| {
-            assert!(item.viewed_steps.contains(&second));
+            assert!(item.viewed_steps.contains_key(&second));
             assert_eq!(item.selected, selected);
-            assert!(item.progress_text().starts_with("1 of 2 steps viewed"));
+            assert_eq!(item.progress_text(), "1 of 2 steps left to review");
         });
         assert_eq!(
             fake.requests()
@@ -7932,7 +8532,9 @@ fn verify_password(user: &str, password: &str) -> bool {
             "the step's only file is marked viewed on GitHub"
         );
         click("photon-review-step-viewed-1", &mut cx);
-        item.read_with(&cx, |item, _| assert!(!item.viewed_steps.contains(&second)));
+        item.read_with(&cx, |item, _| {
+            assert!(!item.viewed_steps.contains_key(&second))
+        });
     }
 
     #[gpui::test]
@@ -9067,7 +9669,7 @@ fn verify_password(user: &str, password: &str) -> bool {
     }
 
     struct FakeAgent {
-        reply: std::cell::RefCell<Option<Result<String>>>,
+        replies: std::cell::RefCell<std::collections::VecDeque<Result<String>>>,
         prompts: std::cell::RefCell<Vec<(String, PathBuf)>>,
     }
 
@@ -9082,17 +9684,25 @@ fn verify_password(user: &str, password: &str) -> bool {
         ) -> Task<Result<String>> {
             self.prompts.borrow_mut().push((prompt, work_dir));
             Task::ready(
-                self.reply
+                self.replies
                     .borrow_mut()
-                    .take()
+                    .pop_front()
                     .unwrap_or_else(|| Err(anyhow!("no reply"))),
             )
         }
     }
 
     fn install_agent(reply: Result<String>, cx: &mut VisualTestContext) -> std::rc::Rc<FakeAgent> {
+        install_agent_replies(vec![reply], cx)
+    }
+
+    /// The agent answers each prompt with the next reply: the review, then the check.
+    fn install_agent_replies(
+        replies: Vec<Result<String>>,
+        cx: &mut VisualTestContext,
+    ) -> std::rc::Rc<FakeAgent> {
         let agent = std::rc::Rc::new(FakeAgent {
-            reply: std::cell::RefCell::new(Some(reply)),
+            replies: std::cell::RefCell::new(replies.into()),
             prompts: Default::default(),
         });
         cx.update(|_, cx| crate::set_review_agent(agent.clone(), cx));
@@ -9102,8 +9712,11 @@ fn verify_password(user: &str, password: &str) -> bool {
     #[gpui::test]
     async fn agent_findings_become_drafts(cx: &mut TestAppContext) {
         let (item, mut cx, database) = open_with_drafts(cx, Vec::new()).await;
-        let agent = install_agent(
-            Ok("Here you go:\n```json\n[\n {\"path\": \"src/login.rs\", \"line\": 3, \"body\": \"Audit before the check?\"},\n {\"path\": \"src/other.rs\", \"line\": 7, \"body\": \"Not in this PR.\"}\n]\n```".into()),
+        let agent = install_agent_replies(
+            vec![
+                Ok("Here you go:\n```json\n[\n {\"path\": \"src/login.rs\", \"line\": 3, \"body\": \"Audit before the check?\"},\n {\"path\": \"src/other.rs\", \"line\": 7, \"body\": \"Not in this PR.\"}\n]\n```".into()),
+                Ok("```json\n[{\"finding\": 1, \"verdict\": \"keep\"}, {\"finding\": 2, \"verdict\": \"keep\"}]\n```".into()),
+            ],
             &mut cx,
         );
         item.update_in(&mut cx, |item, window, cx| {
@@ -9113,9 +9726,10 @@ fn verify_password(user: &str, password: &str) -> bool {
         cx.run_until_parked();
 
         let prompts = agent.prompts.borrow();
-        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts.len(), 2, "the review, then the check");
         assert!(prompts[0].0.contains("--- a/src/login.rs"));
         assert_eq!(prompts[0].1, PathBuf::from(path!("/repo")));
+        assert_eq!(prompts[1].1, PathBuf::from(path!("/repo")));
         item.read_with(&cx, |item, _| {
             let drafts = item.drafts();
             assert_eq!(drafts.len(), 2);
@@ -9134,10 +9748,170 @@ fn verify_password(user: &str, password: &str) -> bool {
             assert!(!item.agent_reviewing);
             assert!(
                 item.agent_review_note()
-                    .is_some_and(|(note, _)| note.contains("added 2 draft comments"))
+                    .is_some_and(|(note, _)| note.starts_with("Kept all 2 findings"))
             );
         });
         assert_eq!(bodies(&database).len(), 2);
+    }
+
+    const THREE_FINDINGS: &str = "```json\n[\n {\"path\": \"src/login.rs\", \"line\": 3, \"severity\": \"must fix\", \"category\": \"security\", \"body\": \"Audit before the check?\"},\n {\"path\": \"src/login.rs\", \"line\": 2, \"severity\": \"should fix\", \"category\": \"logic\", \"body\": \"Trim drops tabs.\"},\n {\"path\": \"src/login.rs\", \"line\": 4, \"severity\": \"must fix\", \"category\": \"logic\", \"body\": \"Wrong order.\"}\n]\n```";
+
+    fn start_pre_review(item: &Entity<ReviewItem>, cx: &mut VisualTestContext) {
+        set_login(item, false, cx);
+        item.update(cx, |item, _| {
+            item.workspace = Some(WeakEntity::new_invalid())
+        });
+        click("photon-review-more", cx);
+        click("MENU_ITEM-Pre-review with agent", cx);
+    }
+
+    #[gpui::test]
+    async fn the_check_keeps_only_confirmed_findings_and_lists_the_rest(cx: &mut TestAppContext) {
+        let (item, mut cx, database) = open_with_drafts(cx, Vec::new()).await;
+        let agent = install_agent_replies(
+            vec![
+                Ok(THREE_FINDINGS.into()),
+                Ok("```json\n[{\"finding\": 1, \"verdict\": \"keep\", \"reason\": \"Seen.\"}, {\"finding\": 2, \"verdict\": \"drop\", \"reason\": \"Tabs are trimmed too.\"}]\n```".into()),
+            ],
+            &mut cx,
+        );
+        start_pre_review(&item, &mut cx);
+
+        let check = agent.prompts.borrow()[1].0.clone();
+        assert!(
+            check.contains("1. src/login.rs:3 (must fix, security)\nAudit before the check?"),
+            "{check}"
+        );
+        assert!(check.contains("3. src/login.rs:4 (must fix, logic)\nWrong order."));
+        item.read_with(&cx, |item, _| {
+            assert_eq!(item.drafts().len(), 1);
+            assert!(item.drafts()[0].from_agent);
+            assert_eq!(
+                item.agent_review_note().map(|(note, _)| note.as_ref()),
+                Some(
+                    "Kept 1 of 3 findings; dropped 2 it couldn't confirm. Read each draft \
+                     before you submit."
+                )
+            );
+        });
+        assert_eq!(bodies(&database).len(), 1, "dropped findings aren't drafts");
+        assert!(drawn("photon-review-dropped", &mut cx));
+        assert!(!drawn("photon-review-dropped-list", &mut cx));
+        click("photon-review-dropped", &mut cx);
+        assert!(drawn("photon-review-dropped-list", &mut cx));
+        item.read_with(&cx, |item, _| {
+            let reasons: Vec<&str> = item
+                .dropped_findings
+                .iter()
+                .map(|(_, reason)| reason.as_str())
+                .collect();
+            assert_eq!(
+                reasons,
+                ["Tabs are trimmed too.", "The check didn't mention it."]
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn a_failed_check_adds_every_finding_with_a_warning(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        install_agent_replies(
+            vec![Ok(THREE_FINDINGS.into()), Ok("I looked; all fine.".into())],
+            &mut cx,
+        );
+        start_pre_review(&item, &mut cx);
+        item.read_with(&cx, |item, _| {
+            assert_eq!(item.drafts().len(), 3);
+            let (note, color) = item.agent_review_note().expect("note");
+            assert!(note.starts_with("Couldn't check the findings"), "{note}");
+            assert_eq!(*color, Color::Warning);
+        });
+    }
+
+    #[gpui::test]
+    async fn quiet_asks_for_and_keeps_only_must_fix_correctness(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        cx.update(|_, cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings
+                        .project
+                        .pr_review
+                        .get_or_insert_default()
+                        .agent_review
+                        .get_or_insert_default()
+                        .thoroughness = Some(settings::ReviewThoroughness::Quiet);
+                });
+            });
+        });
+        let agent = install_agent_replies(
+            vec![
+                Ok(THREE_FINDINGS.into()),
+                Ok("```json\n[{\"finding\": 1, \"verdict\": \"keep\"}, {\"finding\": 2, \"verdict\": \"keep\"}]\n```".into()),
+            ],
+            &mut cx,
+        );
+        start_pre_review(&item, &mut cx);
+        let prompts = agent.prompts.borrow();
+        assert!(prompts[0].0.contains("Report only must-fix problems"));
+        assert!(
+            !prompts[1].0.contains("Trim drops tabs."),
+            "{}",
+            prompts[1].0
+        );
+        item.read_with(&cx, |item, _| {
+            let bodies: Vec<&str> = item
+                .drafts()
+                .iter()
+                .map(|draft| draft.body.as_str())
+                .collect();
+            assert_eq!(
+                bodies,
+                [
+                    "**Security** (must fix): Audit before the check?",
+                    "**Logic** (must fix): Wrong order."
+                ]
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn dismissing_an_agent_draft_asks_why_and_feeds_the_next_review(cx: &mut TestAppContext) {
+        let (item, mut cx, database) = open_with_drafts(
+            cx,
+            vec![Draft {
+                body: "**Logic** (must fix): Audit before the check?".into(),
+                from_agent: true,
+                ..current_draft("src/login.rs", 3, "    audit(user);")
+            }],
+        )
+        .await;
+        hover("photon-review-draft-delete-0", &mut cx);
+        click("photon-review-draft-delete-0", &mut cx);
+        assert!(drawn("MENU_ITEM-Intentional", &mut cx));
+        assert!(drawn("MENU_ITEM-Not worth it", &mut cx));
+        click("MENU_ITEM-Wrong", &mut cx);
+        item.read_with(&cx, |item, _| assert!(item.drafts().is_empty()));
+        assert!(bodies(&database).is_empty());
+        assert_eq!(
+            database.dismissals(&key()).expect("dismissals"),
+            [Dismissal {
+                path: "src/login.rs".into(),
+                body: "**Logic** (must fix): Audit before the check?".into(),
+                reason: DismissReason::Wrong,
+            }]
+        );
+
+        let agent = install_agent(Ok("```json\n[]\n```".into()), &mut cx);
+        start_pre_review(&item, &mut cx);
+        let prompt = agent.prompts.borrow()[0].0.clone();
+        assert!(
+            prompt.contains("Past dismissals in this repository — don't repeat these.",),
+            "{prompt}"
+        );
+        assert!(prompt.contains(
+            "```text\n- src/login.rs [Wrong]: **Logic** (must fix): Audit before the check?\n```"
+        ));
     }
 
     #[gpui::test]
@@ -9432,7 +10206,7 @@ fn verify_password(user: &str, password: &str) -> bool {
         assert_eq!(marks(&fake), 1);
         item.read_with(&cx, |item, _| {
             assert!(item.file_viewed("src/retry.rs"));
-            assert!(item.progress_text().starts_with("3 of 3 steps viewed"));
+            assert_eq!(item.progress_text(), "All steps viewed");
         });
 
         item.update(&mut cx, |item, cx| item.toggle_step_viewed(0, false, cx));
@@ -9456,7 +10230,7 @@ fn verify_password(user: &str, password: &str) -> bool {
             database
                 .viewed_steps(&key())
                 .expect("steps")
-                .contains(&step)
+                .contains_key(&step)
         );
         assert_eq!(database.drafts(&key()).expect("drafts").len(), 4);
     }
@@ -9488,6 +10262,7 @@ fn verify_password(user: &str, password: &str) -> bool {
     async fn sending_row_reopens_marked_and_is_not_sent(cx: &mut TestAppContext) {
         let maybe_posted = Draft {
             post_state: crate::PostState::Sending,
+            from_agent: false,
             ..current_draft("src/login.rs", 3, "    audit(user);")
         };
         let (item, mut cx, database) = open_with_drafts(
@@ -9575,6 +10350,7 @@ fn verify_password(user: &str, password: &str) -> bool {
             outdated: true,
             general: true,
             post_state: PostState::Sending,
+            from_agent: false,
             ..stored_draft("src/login.rs", 2, "    gone();")
         };
         let (item, mut cx, database) = open_with_drafts(cx, vec![stuck.clone(), stuck]).await;
@@ -9911,6 +10687,210 @@ fn verify_password(user: &str, password: &str) -> bool {
         }
     }
 
+    fn reformatted_files() -> (serde_json::Value, Vec<PrFile>, Graph) {
+        (
+            json!({ "src": { "b.rs": B_HEAD, "c.rs": C_REFORMATTED_HEAD } }),
+            vec![
+                modified("src/b.rs", B_BASE),
+                modified("src/c.rs", C_REFORMATTED_BASE),
+            ],
+            Graph {
+                functions: vec![
+                    function("callee", "src/b.rs", 0, 2),
+                    function("other", "src/c.rs", 0, 2),
+                ],
+                calls: Vec::new(),
+            },
+        )
+    }
+
+    async fn open_reformatted_with(
+        cx: &mut TestAppContext,
+        database: ReviewDb,
+        files: Vec<crate::PrFile>,
+    ) -> (Entity<ReviewItem>, VisualTestContext) {
+        let (tree, changed, graph) = reformatted_files();
+        let mut detail = parse_detail(&key(), DETAIL).expect("detail");
+        detail.files = files;
+        let (item, mut cx, _) = open_item_with_detail(
+            cx,
+            tree,
+            changed,
+            graph,
+            true,
+            None,
+            false,
+            Some(database),
+            detail,
+        )
+        .await;
+        settle(&mut cx);
+        (item, cx)
+    }
+
+    fn github_file(path: &str, viewed: bool, changed_since_viewed: bool) -> crate::PrFile {
+        crate::PrFile {
+            path: path.into(),
+            viewed,
+            changed_since_viewed,
+        }
+    }
+
+    #[gpui::test]
+    async fn a_step_whose_diff_changed_since_it_was_ticked_is_left_to_review(
+        cx: &mut TestAppContext,
+    ) {
+        let database = test_database(cx);
+        let (first, first_cx) = open_reformatted_with(cx, database.clone(), Vec::new()).await;
+        let (keys, prints) = first.read_with(&first_cx, |item, _| {
+            let keys: Vec<String> = item.steps.iter().map(|step| step.key.clone()).collect();
+            let prints: Vec<String> = item
+                .steps
+                .iter()
+                .map(|step| item.step_fingerprint(step))
+                .collect();
+            (keys, prints)
+        });
+        assert_eq!(keys.len(), 2);
+        let older = |fingerprint: &str| ViewedMark {
+            head: Some("older".into()),
+            fingerprint: Some(fingerprint.into()),
+        };
+        database
+            .set_step_viewed(key(), keys[0].clone(), Some(older("before the push")))
+            .await
+            .expect("mark");
+        database
+            .set_step_viewed(key(), keys[1].clone(), Some(older(&prints[1])))
+            .await
+            .expect("mark");
+
+        let (item, mut cx) = open_reformatted_with(cx, database.clone(), Vec::new()).await;
+        assert!(drawn("photon-review-step-changed-0", &mut cx));
+        assert!(
+            !drawn("photon-review-step-changed-1", &mut cx),
+            "an unchanged diff stays viewed after a push"
+        );
+        item.read_with(&cx, |item, _| {
+            assert_eq!(
+                item.progress_text(),
+                "1 of 2 steps left to review · 1 changed since viewed"
+            );
+        });
+
+        let fake = install_fake(&mut cx);
+        fake.respond(
+            |request| {
+                request
+                    .stdin
+                    .as_deref()
+                    .is_some_and(|stdin| stdin.contains("FileAsViewed("))
+            },
+            Ok(r#"{"data":{"x":{}}}"#.to_string()),
+        );
+        click("photon-review-step-viewed-0", &mut cx);
+        assert!(!drawn("photon-review-step-changed-0", &mut cx));
+        item.read_with(&cx, |item, _| {
+            assert_eq!(item.progress_text(), "All steps viewed");
+        });
+        let stored = database.viewed_steps(&key()).expect("steps");
+        assert_eq!(stored[&keys[0]].head.as_deref(), Some("head"));
+        assert_eq!(stored[&keys[0]].fingerprint.as_ref(), Some(&prints[0]));
+        let viewed_at = database.viewed_files(&key()).expect("files");
+        assert_eq!(viewed_at.get("src/b.rs").map(String::as_str), Some("head"));
+    }
+
+    #[gpui::test]
+    async fn only_what_you_havent_reviewed_hides_viewed_files(cx: &mut TestAppContext) {
+        let database = test_database(cx);
+        let (_item, mut nothing_viewed) = open_reformatted_with(cx, database, Vec::new()).await;
+        click("photon-review-view", &mut nothing_viewed);
+        assert!(drawn("MENU_ITEM-Whitespace changes", &mut nothing_viewed));
+        assert!(!drawn(
+            "MENU_ITEM-Only what you haven't reviewed",
+            &mut nothing_viewed
+        ));
+
+        let database = test_database(cx);
+        let (item, mut cx) = open_reformatted_with(
+            cx,
+            database,
+            vec![
+                github_file("src/b.rs", true, false),
+                github_file("src/c.rs", false, true),
+            ],
+        )
+        .await;
+        item.read_with(&cx, |item, _| {
+            let states: Vec<ViewedState> = item
+                .steps
+                .iter()
+                .map(|step| item.step_state(step))
+                .collect();
+            assert_eq!(
+                states,
+                [ViewedState::Viewed, ViewedState::ChangedSinceViewed],
+                "GitHub's DISMISSED means changed since viewed"
+            );
+        });
+        click("photon-review-view", &mut cx);
+        click("MENU_ITEM-Only what you haven't reviewed", &mut cx);
+        settle(&mut cx);
+        assert_eq!(step_files(&item, &mut cx), ["src/c.rs"]);
+        item.read_with(&cx, |item, _| {
+            assert!(item.showing_unreviewed());
+            assert!(!item.showing_changes_since_review());
+            assert_eq!(
+                item.since_review_note.as_deref(),
+                Some(
+                    "Showing the full diff of 1 file changed since you viewed it: the commit \
+                     you viewed it at isn't available."
+                )
+            );
+        });
+
+        click("photon-review-view", &mut cx);
+        click("MENU_ITEM-Only what you haven't reviewed", &mut cx);
+        settle(&mut cx);
+        assert_eq!(step_files(&item, &mut cx), ["src/b.rs", "src/c.rs"]);
+        item.read_with(&cx, |item, _| assert!(!item.showing_unreviewed()));
+    }
+
+    #[gpui::test]
+    async fn a_file_changed_since_viewed_at_an_unfetchable_head_is_shown_in_full(
+        cx: &mut TestAppContext,
+    ) {
+        let database = test_database(cx);
+        database
+            // Not a commit id, so it's refused before any git command runs.
+            .set_file_viewed_head(key(), "src/c.rs".into(), Some("older".into()))
+            .await
+            .expect("head");
+        let (item, mut cx) = open_reformatted_with(
+            cx,
+            database,
+            vec![
+                github_file("src/b.rs", true, false),
+                github_file("src/c.rs", false, true),
+            ],
+        )
+        .await;
+        click("photon-review-view", &mut cx);
+        click("MENU_ITEM-Only what you haven't reviewed", &mut cx);
+        settle(&mut cx);
+        assert_eq!(step_files(&item, &mut cx), ["src/c.rs"]);
+        item.read_with(&cx, |item, _| {
+            assert!(!item.loading_since_review);
+            assert!(
+                item.since_review_note
+                    .as_deref()
+                    .is_some_and(|note| note.starts_with("Showing the full diff of 1 file")),
+                "{:?}",
+                item.since_review_note
+            );
+        });
+    }
+
     fn hover(selector: &'static str, cx: &mut VisualTestContext) {
         let bounds = cx
             .debug_bounds(selector)
@@ -10039,7 +11019,7 @@ fn verify_password(user: &str, password: &str) -> bool {
         assert!(drawn("photon-review-progress", &mut cx));
         item.read_with(&cx, |item, _| {
             let progress = item.progress_text();
-            assert!(progress.ends_with("steps viewed"), "{progress}");
+            assert!(progress.ends_with("steps left to review"), "{progress}");
         });
     }
 

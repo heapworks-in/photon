@@ -110,6 +110,34 @@ pub struct PrReviewSettingsContent {
     /// Checks Photon answers itself from evidence: "checks_pass", "threads_resolved",
     /// "tests_changed", "ran_locally", "no_debug_leftovers".
     pub auto_checks: Option<Vec<String>>,
+    /// The agent pre-review.
+    pub agent_review: Option<PrReviewAgentReviewContent>,
+}
+
+// photon: settings for the agent pre-review
+#[with_fallible_options]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct PrReviewAgentReviewContent {
+    /// What the agent reports: "quiet" (must-fix correctness and security problems only),
+    /// "normal" (must fix and should fix) or "thorough" (everything).
+    ///
+    /// Default: normal
+    pub thoroughness: Option<ReviewThoroughness>,
+}
+
+// photon: how much the agent pre-review reports
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, MergeFrom,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewThoroughness {
+    /// Must-fix correctness and security problems only.
+    Quiet,
+    /// Must fix and should fix.
+    #[default]
+    Normal,
+    /// Everything, small improvements included.
+    Thorough,
 }
 
 // photon: a review checklist, from settings or a repository's .photon/review.json

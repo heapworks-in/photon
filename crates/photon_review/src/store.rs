@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
@@ -86,10 +86,38 @@ impl Domain for ReviewDb {
             exit_code INTEGER NOT NULL,
             PRIMARY KEY(host, owner, repo, number)
         ) STRICT;",
+        "ALTER TABLE viewed_steps ADD COLUMN head_sha TEXT;
+        ALTER TABLE viewed_steps ADD COLUMN fingerprint TEXT;
+        CREATE TABLE viewed_files(
+            host TEXT NOT NULL,
+            owner TEXT NOT NULL,
+            repo TEXT NOT NULL,
+            number INTEGER NOT NULL,
+            path TEXT NOT NULL,
+            head_sha TEXT NOT NULL,
+            PRIMARY KEY(host, owner, repo, number, path)
+        ) STRICT;",
+        "ALTER TABLE drafts ADD COLUMN agent INTEGER NOT NULL DEFAULT 0;
+        CREATE TABLE agent_dismissals(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            host TEXT NOT NULL,
+            owner TEXT NOT NULL,
+            repo TEXT NOT NULL,
+            path TEXT NOT NULL,
+            body TEXT NOT NULL,
+            reason TEXT NOT NULL
+        ) STRICT;",
     ];
 }
 
 db::static_connection!(ReviewDb, []);
+
+/// When a step was ticked. Both are `None` for marks from before Photon recorded them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ViewedMark {
+    pub head: Option<String>,
+    pub fingerprint: Option<String>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tracked {
@@ -114,7 +142,47 @@ pub struct Draft {
     pub outdated: bool,
     pub general: bool,
     pub post_state: PostState,
+    /// Written by the agent pre-review, so deleting it asks why.
+    pub from_agent: bool,
 }
+
+/// Why an agent finding was dismissed, fed back to later pre-reviews of the repository.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DismissReason {
+    Intentional,
+    Wrong,
+    NotWorthIt,
+}
+
+impl DismissReason {
+    pub const ALL: [DismissReason; 3] = [
+        DismissReason::Intentional,
+        DismissReason::Wrong,
+        DismissReason::NotWorthIt,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DismissReason::Intentional => "Intentional",
+            DismissReason::Wrong => "Wrong",
+            DismissReason::NotWorthIt => "Not worth it",
+        }
+    }
+
+    fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|reason| reason.label() == label)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Dismissal {
+    pub path: String,
+    pub body: String,
+    pub reason: DismissReason,
+}
+
+/// Later prompts carry this many, so no more are kept.
+pub const KEPT_DISMISSALS: usize = 20;
 
 /// Stored in the `sending` column as 0, 1 or 2.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -155,7 +223,7 @@ thread_local! {
 
 type DraftRow = (
     (i64, String, String, i64, i64),
-    (String, String, String, bool, bool, i64),
+    (String, String, String, bool, bool, i64, bool),
 );
 
 type TrackedRow = (String, String, String, i64, String, String, String);
@@ -246,7 +314,7 @@ impl ReviewDb {
         let number = i64::try_from(key.number)?;
         self.select_bound::<(String, String, String, i64), DraftRow>(
             "SELECT id, path, side, start_line, end_line,
-                    commit_sha, anchor_text, body, outdated, general, sending
+                    commit_sha, anchor_text, body, outdated, general, sending, agent
              FROM drafts WHERE host = ?1 AND owner = ?2 AND repo = ?3 AND number = ?4
              ORDER BY id",
         )?((
@@ -259,7 +327,7 @@ impl ReviewDb {
         .map(
             |(
                 (id, path, side, start_line, end_line),
-                (commit, anchor_text, body, outdated, general, sending),
+                (commit, anchor_text, body, outdated, general, sending, from_agent),
             )| {
                 Ok(Draft {
                     id: Some(id),
@@ -277,6 +345,7 @@ impl ReviewDb {
                     outdated,
                     general,
                     post_state: PostState::from_column(sending),
+                    from_agent,
                 })
             },
         )
@@ -309,6 +378,7 @@ impl ReviewDb {
                 draft.outdated,
                 draft.general,
                 draft.post_state.to_column(),
+                draft.from_agent,
             ),
         );
         let key = draft.key;
@@ -317,15 +387,15 @@ impl ReviewDb {
                 connection.exec_bound::<(_, i64)>(
                     "UPDATE drafts SET path = ?1, side = ?2, start_line = ?3, end_line = ?4,
                         commit_sha = ?5, anchor_text = ?6, body = ?7, outdated = ?8, general = ?9,
-                        sending = ?10
-                     WHERE id = ?11",
+                        sending = ?10, agent = ?11
+                     WHERE id = ?12",
                 )?((fields, id))?;
                 Ok(id)
             }
             None => connection.select_row_bound::<_, i64>(
                 "INSERT INTO drafts(host, owner, repo, number, path, side, start_line,
-                        end_line, commit_sha, anchor_text, body, outdated, general, sending)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                        end_line, commit_sha, anchor_text, body, outdated, general, sending, agent)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                      RETURNING id",
             )?(((key.host, key.owner, key.repo, number), fields))?
             .context("insert returned no id"),
@@ -386,40 +456,138 @@ impl ReviewDb {
         .await
     }
 
-    pub fn viewed_steps(&self, key: &PrKey) -> Result<HashSet<String>> {
+    pub fn viewed_steps(&self, key: &PrKey) -> Result<HashMap<String, ViewedMark>> {
         let number = i64::try_from(key.number)?;
-        Ok(self.select_bound::<(String, String, String, i64), String>(
-            "SELECT step_key FROM viewed_steps
+        Ok(self
+            .select_bound::<(String, String, String, i64), (String, Option<String>, Option<String>)>(
+                "SELECT step_key, head_sha, fingerprint FROM viewed_steps
                  WHERE host = ?1 AND owner = ?2 AND repo = ?3 AND number = ?4",
-        )?((
-            key.host.clone(),
-            key.owner.clone(),
-            key.repo.clone(),
-            number,
-        ))?
-        .into_iter()
-        .collect())
+            )?((
+                key.host.clone(),
+                key.owner.clone(),
+                key.repo.clone(),
+                number,
+            ))?
+            .into_iter()
+            .map(|(step_key, head, fingerprint)| (step_key, ViewedMark { head, fingerprint }))
+            .collect())
     }
 
-    pub async fn set_step_viewed(&self, key: PrKey, step_key: String, viewed: bool) -> Result<()> {
+    /// `None` unticks the step.
+    pub async fn set_step_viewed(
+        &self,
+        key: PrKey,
+        step_key: String,
+        mark: Option<ViewedMark>,
+    ) -> Result<()> {
         let number = i64::try_from(key.number)?;
-        let query = if viewed {
-            "INSERT OR IGNORE INTO viewed_steps(host, owner, repo, number, step_key)
-             VALUES (?1, ?2, ?3, ?4, ?5)"
-        } else {
-            "DELETE FROM viewed_steps
-             WHERE host = ?1 AND owner = ?2 AND repo = ?3 AND number = ?4 AND step_key = ?5"
-        };
-        self.write(move |connection| {
-            connection.exec_bound::<(String, String, String, i64, String)>(query)?((
-                key.host, key.owner, key.repo, number, step_key,
-            ))
+        self.write(move |connection| match mark {
+            Some(mark) => connection.exec_bound::<(
+                (String, String, String, i64, String),
+                (Option<String>, Option<String>),
+            )>(
+                "INSERT OR REPLACE INTO viewed_steps(host, owner, repo, number, step_key, head_sha, fingerprint)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?((
+                (key.host, key.owner, key.repo, number, step_key),
+                (mark.head, mark.fingerprint),
+            )),
+            None => connection.exec_bound::<(String, String, String, i64, String)>(
+                "DELETE FROM viewed_steps
+                 WHERE host = ?1 AND owner = ?2 AND repo = ?3 AND number = ?4 AND step_key = ?5",
+            )?((key.host, key.owner, key.repo, number, step_key)),
+        })
+        .await
+    }
+
+    /// The head each file was marked viewed at on GitHub from Photon, by path.
+    pub fn viewed_files(&self, key: &PrKey) -> Result<HashMap<String, String>> {
+        let number = i64::try_from(key.number)?;
+        Ok(
+            self.select_bound::<(String, String, String, i64), (String, String)>(
+                "SELECT path, head_sha FROM viewed_files
+                 WHERE host = ?1 AND owner = ?2 AND repo = ?3 AND number = ?4",
+            )?((
+                key.host.clone(),
+                key.owner.clone(),
+                key.repo.clone(),
+                number,
+            ))?
+            .into_iter()
+            .collect(),
+        )
+    }
+
+    /// `None` forgets the file's head, for a file unmarked as viewed.
+    pub async fn set_file_viewed_head(
+        &self,
+        key: PrKey,
+        path: String,
+        head: Option<String>,
+    ) -> Result<()> {
+        let number = i64::try_from(key.number)?;
+        self.write(move |connection| match head {
+            Some(head) => connection.exec_bound::<(String, String, String, i64, String, String)>(
+                "INSERT OR REPLACE INTO viewed_files(host, owner, repo, number, path, head_sha)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?((key.host, key.owner, key.repo, number, path, head)),
+            None => connection.exec_bound::<(String, String, String, i64, String)>(
+                "DELETE FROM viewed_files
+                 WHERE host = ?1 AND owner = ?2 AND repo = ?3 AND number = ?4 AND path = ?5",
+            )?((key.host, key.owner, key.repo, number, path)),
         })
         .await
     }
 }
 
 impl ReviewDb {
+    /// The repository's dismissed agent findings, newest first.
+    pub fn dismissals(&self, key: &PrKey) -> Result<Vec<Dismissal>> {
+        Ok(
+            self.select_bound::<(String, String, String), (String, String, String)>(
+                "SELECT path, body, reason FROM agent_dismissals
+                 WHERE host = ?1 AND owner = ?2 AND repo = ?3
+                 ORDER BY id DESC",
+            )?((key.host.clone(), key.owner.clone(), key.repo.clone()))?
+            .into_iter()
+            .filter_map(|(path, body, reason)| {
+                Some(Dismissal {
+                    path,
+                    body,
+                    reason: DismissReason::from_label(&reason)?,
+                })
+            })
+            .collect(),
+        )
+    }
+
+    /// Keeps only the repository's newest `KEPT_DISMISSALS`.
+    pub async fn add_dismissal(&self, key: PrKey, dismissal: Dismissal) -> Result<()> {
+        let kept = i64::try_from(KEPT_DISMISSALS)?;
+        self.write(move |connection| {
+            connection.exec_bound::<(String, String, String, String, String, String)>(
+                "INSERT INTO agent_dismissals(host, owner, repo, path, body, reason)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?((
+                key.host.clone(),
+                key.owner.clone(),
+                key.repo.clone(),
+                dismissal.path,
+                dismissal.body,
+                dismissal.reason.label().to_string(),
+            ))?;
+            connection.exec_bound::<(String, String, String, i64)>(
+                "DELETE FROM agent_dismissals
+                 WHERE host = ?1 AND owner = ?2 AND repo = ?3 AND id NOT IN (
+                    SELECT id FROM agent_dismissals
+                    WHERE host = ?1 AND owner = ?2 AND repo = ?3
+                    ORDER BY id DESC LIMIT ?4
+                 )",
+            )?((key.host, key.owner, key.repo, kept))
+        })
+        .await
+    }
+
     pub fn checklist_answers(&self, key: &PrKey) -> Result<HashMap<String, Answer>> {
         let number = i64::try_from(key.number)?;
         Ok(
@@ -647,7 +815,48 @@ mod tests {
             outdated: false,
             general: false,
             post_state: crate::PostState::Unposted,
+            from_agent: false,
         }
+    }
+
+    #[gpui::test]
+    async fn dismissals_are_per_repository_and_capped(cx: &mut gpui::TestAppContext) {
+        let db = cx
+            .foreground_executor()
+            .block_test(ReviewDb::open_test_db("dismissals_round_trip"));
+        let dismissal = |index: usize, reason| Dismissal {
+            path: format!("src/{index}.rs"),
+            body: format!("Finding {index}"),
+            reason,
+        };
+        for index in 0..KEPT_DISMISSALS + 2 {
+            db.add_dismissal(key(7), dismissal(index, DismissReason::Wrong))
+                .await
+                .unwrap();
+        }
+        let mut other_repo = key(1);
+        other_repo.repo = "other".into();
+        db.add_dismissal(
+            other_repo.clone(),
+            dismissal(99, DismissReason::Intentional),
+        )
+        .await
+        .unwrap();
+        db.add_dismissal(key(8), dismissal(100, DismissReason::NotWorthIt))
+            .await
+            .unwrap();
+
+        let stored = db.dismissals(&key(7)).unwrap();
+        assert_eq!(stored.len(), KEPT_DISMISSALS);
+        assert_eq!(stored[0], dismissal(100, DismissReason::NotWorthIt));
+        assert_eq!(
+            stored[1],
+            dismissal(KEPT_DISMISSALS + 1, DismissReason::Wrong)
+        );
+        assert_eq!(
+            db.dismissals(&other_repo).unwrap(),
+            [dismissal(99, DismissReason::Intentional)]
+        );
     }
 
     #[gpui::test]
@@ -664,6 +873,7 @@ mod tests {
         second.outdated = true;
         second.general = true;
         second.post_state = PostState::EarlierVersionPosted;
+        second.from_agent = true;
         second.id = Some(db.save_draft(second.clone()).await.unwrap());
         let mut other = draft(8, "src/a.rs", 1);
         other.id = Some(db.save_draft(other.clone()).await.unwrap());
@@ -703,22 +913,44 @@ mod tests {
         assert_eq!(db.drafts(&key(8)).unwrap(), vec![]);
 
         assert!(db.viewed_steps(&key(7)).unwrap().is_empty());
-        db.set_step_viewed(key(7), "src/a.rs::f".into(), true)
+        let mark = |head: &str| ViewedMark {
+            head: Some(head.into()),
+            fingerprint: Some(format!("print-{head}")),
+        };
+        db.set_step_viewed(key(7), "src/a.rs::f".into(), Some(mark("h1")))
             .await
             .unwrap();
-        db.set_step_viewed(key(7), "src/a.rs::f".into(), true)
+        db.set_step_viewed(key(7), "src/a.rs::f".into(), Some(mark("h2")))
             .await
             .unwrap();
-        db.set_step_viewed(key(7), "src/b.rs".into(), true)
+        db.set_step_viewed(key(7), "src/b.rs".into(), Some(mark("h1")))
             .await
             .unwrap();
-        db.set_step_viewed(key(7), "src/b.rs".into(), false)
+        db.set_step_viewed(key(7), "src/b.rs".into(), None)
             .await
             .unwrap();
         assert_eq!(
             db.viewed_steps(&key(7)).unwrap(),
-            HashSet::from_iter(["src/a.rs::f".to_string()])
+            HashMap::from_iter([("src/a.rs::f".to_string(), mark("h2"))])
         );
         assert!(db.viewed_steps(&key(8)).unwrap().is_empty());
+
+        db.set_file_viewed_head(key(7), "src/a.rs".into(), Some("h1".into()))
+            .await
+            .unwrap();
+        db.set_file_viewed_head(key(7), "src/a.rs".into(), Some("h2".into()))
+            .await
+            .unwrap();
+        db.set_file_viewed_head(key(7), "src/b.rs".into(), Some("h1".into()))
+            .await
+            .unwrap();
+        db.set_file_viewed_head(key(7), "src/b.rs".into(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.viewed_files(&key(7)).unwrap(),
+            HashMap::from_iter([("src/a.rs".to_string(), "h2".to_string())])
+        );
+        assert!(db.viewed_files(&key(8)).unwrap().is_empty());
     }
 }

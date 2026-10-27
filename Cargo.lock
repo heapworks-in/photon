@@ -13821,6 +13821,7 @@ dependencies = [
  "serde",
  "serde_json",
  "settings",
+ "sha2",
  "similar",
  "task",
  "tempfile",

@@ -36,6 +36,7 @@ project.workspace = true
 globset.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 settings.workspace = true
 task.workspace = true
 photon_blocks.workspace = true
