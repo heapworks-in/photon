@@ -2,22 +2,28 @@ use call_hierarchy::{Call, CallHierarchyMode, CallHierarchyView};
 use collections::HashMap;
 use editor::{Editor, SelectionEffects, scroll::Autoscroll};
 use gpui::{
-    Action, App, AsyncWindowContext, ClickEvent, ClipboardItem, Context, DismissEvent, Entity,
-    EventEmitter, FocusHandle, Focusable, KeyContext, MouseDownEvent, Pixels, Point, Render,
-    ScrollStrategy, Subscription, Task, UniformListScrollHandle, WeakEntity, Window, actions,
-    anchored, deferred, px, uniform_list,
+    Action, App, AsyncWindowContext, Bounds, ClickEvent, ClipboardItem, Context, DismissEvent,
+    Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Global, KeyContext, MouseDownEvent,
+    Pixels, Point, Render, ScrollHandle, ScrollStrategy, StyledText, Subscription, Task,
+    UniformListScrollHandle, WeakEntity, Window, actions, anchored, deferred, point, px, size,
+    uniform_list,
 };
 use language::{Buffer, ToPoint as _};
 use project::{CallHierarchyItem, Project};
+use smallvec::SmallVec;
+use std::{ops::Range, rc::Rc};
 use ui::{
-    ContextMenu, Disclosure, ListItem, ToggleButtonGroup, ToggleButtonGroupStyle,
-    ToggleButtonSimple, prelude::*,
+    Chip, ContextMenu, Disclosure, IndentGuideColors, KeyBinding, ListItem, RenderedIndentGuide,
+    ToggleButtonGroup, ToggleButtonGroupStyle, ToggleButtonSimple, Tooltip, prelude::*,
+    rems_from_px,
 };
 use util::ResultExt as _;
 use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
 };
+
+mod map;
 
 actions!(
     photon_call_trails,
@@ -26,12 +32,35 @@ actions!(
         ShowInPanel,
         /// Toggles focus on the call hierarchy panel.
         ToggleFocus,
+        /// Shows or hides the selected call's call site.
+        ToggleCallSite,
+        /// Makes the selected function the root of the call hierarchy.
+        MakeRoot,
     ]
 );
 
 const PANEL_NAME: &str = "Call Hierarchy";
 const NO_FUNCTION: &str = "Put the cursor on a function to see its callers.";
 const UNSUPPORTED: &str = "This file's language server doesn't support call hierarchy.";
+const INDENT: Pixels = px(12.);
+
+/// What the app plugs into the panel, so this crate needs neither the review nor the agent crates.
+#[derive(Clone, Default)]
+pub struct CallTrailHooks {
+    /// The number of an open pull request review that changes these rows of the file at this
+    /// worktree-relative path.
+    #[allow(clippy::type_complexity)]
+    pub changed_in_review: Option<Rc<dyn Fn(&Workspace, &str, Range<u32>, &App) -> Option<u64>>>,
+    /// Asks the user's agent to explain a trail, given as a prompt.
+    #[allow(clippy::type_complexity)]
+    pub explain: Option<Rc<dyn Fn(&mut Workspace, String, &mut Window, &mut Context<Workspace>)>>,
+}
+
+impl Global for CallTrailHooks {}
+
+pub fn set_hooks(hooks: CallTrailHooks, cx: &mut App) {
+    cx.set_global(hooks);
+}
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -83,12 +112,30 @@ pub struct CallHierarchyPanel {
     project: Entity<Project>,
     focus_handle: FocusHandle,
     scroll_handle: UniformListScrollHandle,
+    map_scroll_handle: ScrollHandle,
     mode: CallHierarchyMode,
+    view: TrailView,
     content: Content,
+    root_header: RootHeader,
     selected: Option<usize>,
+    /// The rows last drawn, for the indent guides.
+    rows: Vec<Row>,
     root_task: Option<Task<()>>,
     child_tasks: HashMap<usize, Task<()>>,
     context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrailView {
+    List,
+    Map,
+}
+
+#[derive(Default)]
+struct RootHeader {
+    title: SharedString,
+    signature: Option<SharedString>,
+    changed_in_pr: Option<u64>,
 }
 
 enum Content {
@@ -96,6 +143,31 @@ enum Content {
     LoadingRoot,
     /// `nodes[0]` is the root; the rows show its descendants.
     Tree(Vec<Node>),
+}
+
+/// What kind of function a call is, when it's cheap to tell from its declaration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tag {
+    EntryPoint,
+    HttpHandler,
+    Test,
+}
+
+impl Tag {
+    fn label(self) -> &'static str {
+        match self {
+            Tag::EntryPoint => "entry point",
+            Tag::HttpHandler => "HTTP handler",
+            Tag::Test => "test",
+        }
+    }
+
+    fn color(self) -> Color {
+        match self {
+            Tag::EntryPoint | Tag::HttpHandler => Color::Warning,
+            Tag::Test => Color::Success,
+        }
+    }
 }
 
 struct Node {
@@ -106,17 +178,31 @@ struct Node {
     children: Option<Vec<usize>>,
     expanded: bool,
     recursive: bool,
+    tag: Option<Tag>,
+    /// The row of the first call site, in `call.target`'s buffer.
+    call_row: u32,
+    show_call_site: bool,
 }
 
 impl Node {
-    fn root(call: Call) -> Self {
+    fn new(call: Call, parent: Option<usize>, depth: usize, recursive: bool, cx: &App) -> Self {
+        let tag = tag_for(&call.item, cx);
+        let call_row = call
+            .target
+            .range
+            .start
+            .to_point(&call.target.buffer.read(cx).snapshot())
+            .row;
         Self {
             call,
-            parent: None,
-            depth: 0,
+            parent,
+            depth,
             children: None,
             expanded: false,
-            recursive: false,
+            recursive,
+            tag,
+            call_row,
+            show_call_site: false,
         }
     }
 }
@@ -124,8 +210,14 @@ impl Node {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Row {
     Node(usize),
-    Loading { depth: usize },
-    Empty { depth: usize },
+    Loading {
+        depth: usize,
+    },
+    /// One line of a call's call site: the call line and a line of context on each side.
+    CallSite {
+        node_ix: usize,
+        row: u32,
+    },
 }
 
 impl CallHierarchyPanel {
@@ -148,9 +240,13 @@ impl CallHierarchyPanel {
             project,
             focus_handle: cx.focus_handle(),
             scroll_handle: UniformListScrollHandle::new(),
+            map_scroll_handle: ScrollHandle::new(),
             mode: CallHierarchyMode::Incoming,
+            view: TrailView::List,
             content: Content::Message(NO_FUNCTION),
+            root_header: RootHeader::default(),
             selected: None,
+            rows: Vec::new(),
             root_task: None,
             child_tasks: HashMap::default(),
             context_menu: None,
@@ -230,12 +326,58 @@ impl CallHierarchyPanel {
         cx.notify();
     }
 
+    /// Never called while the workspace is being updated: the review hook reads it.
     fn show_root(&mut self, root: Call, window: &mut Window, cx: &mut Context<Self>) {
         self.root_task = None;
         self.child_tasks.clear();
         self.selected = None;
-        self.content = Content::Tree(vec![Node::root(root)]);
+        self.root_header = self.root_header(&root, cx);
+        self.content = Content::Tree(vec![Node::new(root, None, 0, false, cx)]);
         self.expand(0, window, cx);
+    }
+
+    fn root_header(&self, root: &Call, cx: &App) -> RootHeader {
+        let item = &root.item;
+        let snapshot = item.buffer.read(cx).snapshot();
+        let owner = snapshot
+            .symbols_containing(item.selection_range.start, None)
+            .iter()
+            .rev()
+            .find_map(|symbol| owner_name(&symbol.text).map(str::to_string));
+        let title = match owner {
+            Some(owner) => format!("{owner}::{}", item.name),
+            None => item.name.clone(),
+        };
+        let signature = item
+            .detail
+            .clone()
+            .filter(|detail| !detail.trim().is_empty())
+            .unwrap_or_else(|| {
+                let row = item.selection_range.start.to_point(&snapshot).row;
+                signature(&snapshot, row)
+            });
+        let changed_in_pr = (|| {
+            let hook = cx
+                .try_global::<CallTrailHooks>()?
+                .changed_in_review
+                .clone()?;
+            let workspace = self.workspace.upgrade()?;
+            let path = item
+                .buffer
+                .read(cx)
+                .file()?
+                .path()
+                .as_unix_str()
+                .to_string();
+            let rows = item.range.start.to_point(&snapshot).row
+                ..item.range.end.to_point(&snapshot).row + 1;
+            hook(workspace.read(cx), &path, rows, cx)
+        })();
+        RootHeader {
+            title: title.into(),
+            signature: (!signature.is_empty()).then(|| signature.into()),
+            changed_in_pr,
+        }
     }
 
     fn set_mode(&mut self, mode: CallHierarchyMode, window: &mut Window, cx: &mut Context<Self>) {
@@ -246,10 +388,21 @@ impl CallHierarchyPanel {
         self.make_root(0, window, cx);
     }
 
+    fn set_view(&mut self, view: TrailView, cx: &mut Context<Self>) {
+        self.view = view;
+        cx.notify();
+    }
+
     fn make_root(&mut self, node_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(node) = self.nodes().get(node_ix) {
             let root = node.call.clone();
             self.show_root(root, window, cx);
+        }
+    }
+
+    fn make_selected_root(&mut self, _: &MakeRoot, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(node_ix) = self.selected {
+            self.make_root(node_ix, window, cx);
         }
     }
 
@@ -260,12 +413,32 @@ impl CallHierarchyPanel {
         }
     }
 
+    /// Recursive calls, and callers of entry points and tests, aren't worth a fetch; nor is a
+    /// call already known to have none.
+    fn can_expand(&self, node: &Node) -> bool {
+        let leaf_by_kind = self.mode == CallHierarchyMode::Incoming
+            && matches!(node.tag, Some(Tag::EntryPoint | Tag::Test));
+        !node.recursive
+            && !(node.parent.is_some() && leaf_by_kind)
+            && node
+                .children
+                .as_ref()
+                .is_none_or(|children| !children.is_empty())
+    }
+
     fn expand(&mut self, node_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if !self
+            .nodes()
+            .get(node_ix)
+            .is_some_and(|node| self.can_expand(node))
+        {
+            return;
+        }
         let mode = self.mode;
         let Content::Tree(nodes) = &mut self.content else {
             return;
         };
-        let Some(node) = nodes.get_mut(node_ix).filter(|node| !node.recursive) else {
+        let Some(node) = nodes.get_mut(node_ix) else {
             return;
         };
         node.expanded = true;
@@ -303,14 +476,7 @@ impl CallHierarchyPanel {
                 ancestor = ancestor_node.parent;
             }
             children.push(nodes.len());
-            nodes.push(Node {
-                call,
-                parent: Some(parent_ix),
-                depth,
-                children: None,
-                expanded: false,
-                recursive,
-            });
+            nodes.push(Node::new(call, Some(parent_ix), depth, recursive, cx));
         }
         if let Some(parent) = nodes.get_mut(parent_ix) {
             parent.children = Some(children);
@@ -335,35 +501,197 @@ impl CallHierarchyPanel {
         }
     }
 
-    fn rows(&self) -> Vec<Row> {
+    fn toggle_call_site(&mut self, node_ix: usize, cx: &mut Context<Self>) {
+        // The root has no call site of its own.
+        if node_ix == 0 {
+            return;
+        }
+        if let Content::Tree(nodes) = &mut self.content
+            && let Some(node) = nodes.get_mut(node_ix)
+        {
+            node.show_call_site = !node.show_call_site;
+            cx.notify();
+        }
+    }
+
+    fn toggle_selected_call_site(
+        &mut self,
+        _: &ToggleCallSite,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(node_ix) = self.selected {
+            self.toggle_call_site(node_ix, cx);
+        }
+    }
+
+    fn rows(&self, cx: &App) -> Vec<Row> {
         let mut rows = Vec::new();
         if !self.nodes().is_empty() {
-            self.push_rows(0, &mut rows);
+            self.push_rows(0, &mut rows, cx);
         }
         rows
     }
 
-    fn push_rows(&self, node_ix: usize, rows: &mut Vec<Row>) {
+    fn push_rows(&self, node_ix: usize, rows: &mut Vec<Row>, cx: &App) {
         let nodes = self.nodes();
         let Some(node) = nodes.get(node_ix) else {
             return;
         };
-        match &node.children {
-            None => rows.push(Row::Loading {
+        let Some(children) = &node.children else {
+            rows.push(Row::Loading {
                 depth: node.depth + 1,
-            }),
-            Some(children) if children.is_empty() => rows.push(Row::Empty {
-                depth: node.depth + 1,
-            }),
-            Some(children) => {
-                for &child in children {
-                    rows.push(Row::Node(child));
-                    if nodes.get(child).is_some_and(|child| child.expanded) {
-                        self.push_rows(child, rows);
-                    }
+            });
+            return;
+        };
+        for &child_ix in children {
+            rows.push(Row::Node(child_ix));
+            let Some(child) = nodes.get(child_ix) else {
+                continue;
+            };
+            if child.show_call_site {
+                let last_row = child.call.target.buffer.read(cx).max_point().row;
+                for row in child.call_row.saturating_sub(1)..=(child.call_row + 1).min(last_row) {
+                    rows.push(Row::CallSite {
+                        node_ix: child_ix,
+                        row,
+                    });
                 }
             }
+            if child.expanded {
+                self.push_rows(child_ix, rows, cx);
+            }
         }
+    }
+
+    /// The selected call and its ancestors, ending with the root.
+    fn trail(&self) -> Vec<usize> {
+        let nodes = self.nodes();
+        let mut trail = Vec::new();
+        let mut current = self.selected.filter(|selected| *selected < nodes.len());
+        while let Some(node_ix) = current {
+            trail.push(node_ix);
+            current = nodes.get(node_ix).and_then(|node| node.parent);
+        }
+        if trail.is_empty() && !nodes.is_empty() {
+            trail.push(0);
+        }
+        trail
+    }
+
+    /// The trail in the order calls happen: outermost caller first.
+    fn trail_in_call_order(&self) -> Vec<usize> {
+        let mut trail = self.trail();
+        if self.mode == CallHierarchyMode::Incoming {
+            return trail;
+        }
+        trail.reverse();
+        trail
+    }
+
+    fn summary(&self) -> Option<String> {
+        let nodes = self.nodes();
+        let children = nodes.first()?.children.as_ref()?;
+        let noun = match self.mode {
+            CallHierarchyMode::Incoming => ("caller", "callers"),
+            CallHierarchyMode::Outgoing => ("call", "calls"),
+        };
+        if children.is_empty() {
+            return Some(format!("No {}", noun.1));
+        }
+        let mut counted: Vec<&CallHierarchyItem> = Vec::new();
+        let (mut entry_points, mut tests) = (0, 0);
+        for node in nodes.iter().skip(1) {
+            if node.recursive || counted.iter().any(|item| same_item(item, &node.call.item)) {
+                continue;
+            }
+            counted.push(&node.call.item);
+            match node.tag {
+                Some(Tag::EntryPoint | Tag::HttpHandler) => entry_points += 1,
+                Some(Tag::Test) => tests += 1,
+                None => {}
+            }
+        }
+        let count = |count: usize, (one, many): (&str, &str)| {
+            format!("{count} {}", if count == 1 { one } else { many })
+        };
+        let mut parts = vec![count(children.len(), noun)];
+        if entry_points > 0 {
+            parts.push(count(entry_points, ("entry point", "entry points")));
+        }
+        if tests > 0 {
+            parts.push(count(tests, ("test", "tests")));
+        }
+        Some(parts.join(" · "))
+    }
+
+    /// The selected trail for the user's agent: each function, and the line where it makes the
+    /// next call.
+    fn trail_prompt(&self, cx: &App) -> Option<String> {
+        self.selected?;
+        let nodes = self.nodes();
+        let trail = self.trail_in_call_order();
+        let mut prompt = String::from(
+            "Explain this call trail briefly: what each step does and why it calls the next.\n",
+        );
+        for (step, node_ix) in trail.iter().enumerate() {
+            let node = nodes.get(*node_ix)?;
+            let item = &node.call.item;
+            let snapshot = item.buffer.read(cx).snapshot();
+            let path = item
+                .buffer
+                .read(cx)
+                .file()
+                .map(|file| file.path().as_unix_str().to_string())
+                .unwrap_or_default();
+            let row = item.selection_range.start.to_point(&snapshot).row + 1;
+            prompt.push_str(&format!("\n{}. {} ({path}:{row})", step + 1, item.name));
+            let Some(next) = trail.get(step + 1).and_then(|next| nodes.get(*next)) else {
+                continue;
+            };
+            // The call site belongs to the deeper of the two nodes.
+            let site = if node.depth > next.depth { node } else { next };
+            let site_snapshot = site.call.target.buffer.read(cx).snapshot();
+            let site_path = site
+                .call
+                .target
+                .buffer
+                .read(cx)
+                .file()
+                .map(|file| file.path().as_unix_str().to_string())
+                .unwrap_or_default();
+            let line = site_snapshot
+                .text_for_range(
+                    language::Point::new(site.call_row, 0)
+                        ..language::Point::new(
+                            site.call_row,
+                            site_snapshot.line_len(site.call_row),
+                        ),
+                )
+                .collect::<String>();
+            prompt.push_str(&format!(
+                "\n   calls {} at {site_path}:{}: `{}`",
+                next.call.item.name,
+                site.call_row + 1,
+                line.trim()
+            ));
+        }
+        Some(prompt)
+    }
+
+    fn explain_trail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(explain) = cx
+            .try_global::<CallTrailHooks>()
+            .and_then(|hooks| hooks.explain.clone())
+        else {
+            return;
+        };
+        let Some(prompt) = self.trail_prompt(cx) else {
+            return;
+        };
+        self.workspace
+            .update(cx, |workspace, cx| explain(workspace, prompt, window, cx))
+            .log_err();
     }
 
     fn open_call(&mut self, node_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -401,7 +729,7 @@ impl CallHierarchyPanel {
     fn select(&mut self, node_ix: usize, cx: &mut Context<Self>) {
         self.selected = Some(node_ix);
         if let Some(row_ix) = self
-            .rows()
+            .rows(cx)
             .iter()
             .position(|row| *row == Row::Node(node_ix))
         {
@@ -413,11 +741,11 @@ impl CallHierarchyPanel {
 
     fn select_by_offset(&mut self, offset: isize, cx: &mut Context<Self>) {
         let node_rows = self
-            .rows()
+            .rows(cx)
             .into_iter()
             .filter_map(|row| match row {
                 Row::Node(node_ix) => Some(node_ix),
-                Row::Loading { .. } | Row::Empty { .. } => None,
+                Row::Loading { .. } | Row::CallSite { .. } => None,
             })
             .collect::<Vec<_>>();
         let current = self
@@ -470,7 +798,7 @@ impl CallHierarchyPanel {
         let Some(node) = self.nodes().get(node_ix) else {
             return;
         };
-        if node.expanded {
+        if node.expanded && self.can_expand(node) {
             self.collapse(node_ix, cx);
         } else if let Some(parent) = node.parent.filter(|parent| *parent != 0) {
             self.select(parent, cx);
@@ -498,13 +826,9 @@ impl CallHierarchyPanel {
             return;
         };
         self.select(node_ix, cx);
-        let this = cx.entity().downgrade();
         let context_menu = ContextMenu::build(window, cx, |menu, _, _| {
             menu.context(self.focus_handle.clone())
-                .entry("Make Root", None, move |window, cx| {
-                    this.update(cx, |this, cx| this.make_root(node_ix, window, cx))
-                        .ok();
-                })
+                .action("Make Root", Box::new(MakeRoot))
                 .entry("Copy Name", None, move |_, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(name.clone()));
                 })
@@ -517,87 +841,111 @@ impl CallHierarchyPanel {
         self.context_menu = Some((context_menu, position, subscription));
     }
 
-    fn empty_label(&self) -> &'static str {
-        match self.mode {
-            CallHierarchyMode::Incoming => "No callers",
-            CallHierarchyMode::Outgoing => "No calls",
+    fn render_row(&self, row: Row, cx: &mut Context<Self>) -> AnyElement {
+        match row {
+            Row::Node(node_ix) => self.render_node_row(node_ix, cx),
+            Row::CallSite { node_ix, row } => self.render_call_site_line(node_ix, row, cx),
+            Row::Loading { depth } => ListItem::new(("call-trail-loading", depth))
+                .height(row_height())
+                .indent_level(depth.saturating_sub(1))
+                .indent_step_size(INDENT)
+                .selectable(false)
+                .start_slot(div().w_4())
+                .child(
+                    Label::new("Loading…")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .into_any_element(),
         }
     }
 
-    fn render_row(&self, row: Row, cx: &mut Context<Self>) -> AnyElement {
-        let (depth, node_ix) = match row {
-            Row::Node(node_ix) => match self.nodes().get(node_ix) {
-                Some(node) => (node.depth, Some(node_ix)),
-                None => return div().into_any_element(),
-            },
-            Row::Loading { depth } | Row::Empty { depth } => (depth, None),
+    fn render_node_row(&self, node_ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(node) = self.nodes().get(node_ix) else {
+            return div().into_any_element();
         };
-        let indent = depth.saturating_sub(1);
-        let Some((node_ix, node)) = node_ix.and_then(|ix| Some((ix, self.nodes().get(ix)?))) else {
-            let text = match row {
-                Row::Empty { .. } => self.empty_label(),
-                _ => "Loading…",
-            };
-            return ListItem::new(("call-trail-note", depth))
-                .indent_level(indent)
-                .indent_step_size(px(12.))
-                .selectable(false)
-                .start_slot(div().w_4())
-                .child(Label::new(text).size(LabelSize::Small).color(Color::Muted))
-                .into_any_element();
-        };
-
         let call = &node.call;
-        let (name, detail) = call_hierarchy::render_item(call, std::iter::empty(), cx);
-        let path = call.display.path.clone().map(|path| {
-            let count_suffix = format!(" ({} calls)", call.site_count);
-            match path.strip_suffix(&count_suffix) {
-                Some(path) => SharedString::from(path.to_string()),
-                None => path,
-            }
+        let name = SharedString::from(call.item.name.clone());
+        let file = call.item.buffer.read(cx).file().map(|file| {
+            (
+                SharedString::from(file.file_name(cx).to_string()),
+                SharedString::from(file.full_path(cx).to_string_lossy().into_owned()),
+            )
         });
-        let disclosure = (!node.recursive).then(|| {
+        let disclosure = self.can_expand(node).then(|| {
             Disclosure::new(("call-trail-disclosure", node_ix), node.expanded).on_click(
                 cx.listener(move |this, _, window, cx| this.toggle_expanded(node_ix, window, cx)),
             )
         });
-        let name_selector = call.display.name.clone();
+        let sites_selector = name.clone();
+        let call_sites = div()
+            .id(("call-trail-sites", node_ix))
+            .debug_selector(move || format!("call-trail-sites-{sites_selector}"))
+            .px_1()
+            .rounded_sm()
+            .hover(|style| style.bg(cx.theme().colors().element_hover))
+            .child(
+                Label::new(format!("×{}", call.site_count))
+                    .size(LabelSize::XSmall)
+                    .color(if node.show_call_site {
+                        Color::Accent
+                    } else {
+                        Color::Muted
+                    }),
+            )
+            .tooltip(Tooltip::text(if node.show_call_site {
+                "Hide Call Site"
+            } else {
+                "Show Call Site"
+            }))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                this.selected = Some(node_ix);
+                this.toggle_call_site(node_ix, cx);
+            }));
+        let name_selector = name.clone();
         div()
             .debug_selector(move || format!("call-trail-{name_selector}"))
             .child(
                 ListItem::new(("call-trail", node_ix))
-                    .indent_level(indent)
-                    .indent_step_size(px(12.))
+                    .height(row_height())
+                    .indent_level(node.depth.saturating_sub(1))
+                    .indent_step_size(INDENT)
                     .toggle_state(self.selected == Some(node_ix))
                     .start_slot(h_flex().w_4().justify_center().children(disclosure))
                     .child(
                         h_flex()
-                            .gap_1()
+                            .gap_1p5()
                             .min_w_0()
                             .overflow_hidden()
-                            .child(div().flex_none().child(name))
-                            .children(detail.map(|detail| div().flex_none().child(detail)))
-                            .when(call.site_count > 1, |this| {
-                                this.child(
-                                    Label::new(format!("×{}", call.site_count))
+                            .child(glyph(node.tag, cx))
+                            .child(
+                                div().flex_none().child(
+                                    Label::new(name)
                                         .size(LabelSize::Small)
-                                        .color(Color::Muted),
-                                )
-                            })
+                                        .buffer_font(cx)
+                                        .single_line(),
+                                ),
+                            )
+                            .children(file.map(|(file_name, full_path)| {
+                                div()
+                                    .id(("call-trail-file", node_ix))
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .tooltip(Tooltip::text(full_path))
+                                    .child(
+                                        Label::new(file_name)
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted)
+                                            .truncate(),
+                                    )
+                            }))
+                            .children(node.tag.map(|tag| chip(tag.label(), tag.color(), cx)))
                             .when(node.recursive, |this| {
-                                this.child(
-                                    Label::new("↻ recursive")
-                                        .size(LabelSize::Small)
-                                        .color(Color::Muted),
-                                )
-                            })
-                            .children(path.map(|path| {
-                                Label::new(path)
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted)
-                                    .truncate()
-                            })),
+                                this.child(chip("↻ recursive", Color::Accent, cx))
+                            }),
                     )
+                    .end_slot(call_sites)
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.selected = Some(node_ix);
                         this.open_call(node_ix, window, cx);
@@ -612,54 +960,356 @@ impl CallHierarchyPanel {
             .into_any_element()
     }
 
-    fn render_header(&self, root: &Call, cx: &mut Context<Self>) -> AnyElement {
-        let (name, detail) = call_hierarchy::render_item(root, std::iter::empty(), cx);
-        h_flex()
+    fn render_call_site_line(
+        &self,
+        node_ix: usize,
+        row: u32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(node) = self.nodes().get(node_ix) else {
+            return div().into_any_element();
+        };
+        let snapshot = node.call.target.buffer.read(cx).snapshot();
+        let first_row = node.call_row.saturating_sub(1);
+        let last_row = (node.call_row + 1).min(snapshot.max_point().row);
+        // Drops the indentation the three lines share, so the narrow panel shows the code.
+        let indent = (first_row..=last_row)
+            .filter(|row| !snapshot.is_line_blank(*row))
+            .map(|row| snapshot.indent_size_for_line(row).len)
+            .min()
+            .unwrap_or(0);
+        let line_len = snapshot.line_len(row);
+        let code = snapshot.highlighted_text_for_range(
+            language::Point::new(row, indent.min(line_len))..language::Point::new(row, line_len),
+            None,
+            cx.theme().syntax(),
+        );
+        let is_call = row == node.call_row;
+        let colors = cx.theme().colors();
+        let selector = node.call.item.name.clone();
+        div()
+            .id(SharedString::from(format!(
+                "call-trail-site-{node_ix}-{row}"
+            )))
+            .debug_selector(move || format!("call-trail-site-{selector}-{}", row + 1))
+            .h(row_height())
+            .w_full()
+            .pl(INDENT * node.depth as f32 + px(12.))
+            .pr_2()
+            .child(
+                h_flex()
+                    .h_full()
+                    .w_full()
+                    .gap_2()
+                    .px_1p5()
+                    .overflow_hidden()
+                    .border_x_1()
+                    .border_color(colors.border_variant)
+                    .bg(if is_call {
+                        colors.editor_active_line_background
+                    } else {
+                        colors.editor_background
+                    })
+                    .when(row == first_row, |this| this.border_t_1().rounded_t_md())
+                    .when(row == last_row, |this| this.border_b_1().rounded_b_md())
+                    .cursor_pointer()
+                    .child(
+                        div()
+                            .flex_none()
+                            .min_w(rems_from_px(20_f32))
+                            .text_right()
+                            .child(
+                                Label::new((row + 1).to_string())
+                                    .size(LabelSize::XSmall)
+                                    .buffer_font(cx)
+                                    .color(if is_call { Color::Accent } else { Color::Muted }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .font_buffer(cx)
+                            .text_ui_xs(cx)
+                            .child(StyledText::new(code.text).with_highlights(code.highlights)),
+                    ),
+            )
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.selected = Some(node_ix);
+                this.open_call(node_ix, window, cx);
+            }))
+            .into_any_element()
+    }
+
+    fn render_header(&self, root: &Node, cx: &mut Context<Self>) -> AnyElement {
+        let header = &self.root_header;
+        let icon_button = |id: &'static str, icon: IconName, tooltip: &'static str, view| {
+            div().debug_selector(move || id.into()).child(
+                IconButton::new(id, icon)
+                    .icon_size(IconSize::Small)
+                    .toggle_state(self.view == view)
+                    .tooltip(Tooltip::text(tooltip))
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_view(view, cx))),
+            )
+        };
+        v_flex()
             .w_full()
             .px_2()
-            .py_1()
-            .gap_2()
-            .justify_between()
+            .py_1p5()
+            .gap_1()
             .border_b_1()
             .border_color(cx.theme().colors().border_variant)
             .child(
                 h_flex()
+                    .gap_1p5()
                     .min_w_0()
-                    .overflow_hidden()
-                    .child(name)
-                    .children(detail),
+                    .child(glyph(root.tag, cx))
+                    .child(
+                        div().min_w_0().overflow_hidden().child(
+                            Label::new(header.title.clone())
+                                .buffer_font(cx)
+                                .weight(FontWeight::SEMIBOLD)
+                                .truncate(),
+                        ),
+                    )
+                    .children(header.changed_in_pr.map(|number| {
+                        div()
+                            .debug_selector(|| "call-trail-pr-chip".into())
+                            .child(chip(
+                                format!("changed in PR #{number}"),
+                                Color::Modified,
+                                cx,
+                            ))
+                    })),
             )
-            .child(
-                ToggleButtonGroup::single_row(
-                    "call-trail-mode",
-                    [
-                        ToggleButtonSimple::new(
-                            "Callers",
-                            cx.listener(|this, _, window, cx| {
-                                this.set_mode(CallHierarchyMode::Incoming, window, cx)
-                            }),
-                        ),
-                        ToggleButtonSimple::new(
-                            "Calls",
-                            cx.listener(|this, _, window, cx| {
-                                this.set_mode(CallHierarchyMode::Outgoing, window, cx)
-                            }),
-                        ),
-                    ],
+            .children(header.signature.clone().map(|signature| {
+                div().pl(rems_from_px(22_f32)).min_w_0().child(
+                    Label::new(signature)
+                        .size(LabelSize::XSmall)
+                        .buffer_font(cx)
+                        .color(Color::Muted)
+                        .truncate(),
                 )
-                .style(ToggleButtonGroupStyle::Outlined)
-                .auto_width()
-                .selected_index(match self.mode {
-                    CallHierarchyMode::Incoming => 0,
-                    CallHierarchyMode::Outgoing => 1,
-                }),
+            }))
+            .child(
+                h_flex()
+                    .pt_1()
+                    .gap_1()
+                    .child(
+                        ToggleButtonGroup::single_row(
+                            "call-trail-mode",
+                            [
+                                ToggleButtonSimple::new(
+                                    "Callers",
+                                    cx.listener(|this, _, window, cx| {
+                                        this.set_mode(CallHierarchyMode::Incoming, window, cx)
+                                    }),
+                                ),
+                                ToggleButtonSimple::new(
+                                    "Calls",
+                                    cx.listener(|this, _, window, cx| {
+                                        this.set_mode(CallHierarchyMode::Outgoing, window, cx)
+                                    }),
+                                ),
+                            ],
+                        )
+                        .style(ToggleButtonGroupStyle::Outlined)
+                        .auto_width()
+                        .selected_index(match self.mode {
+                            CallHierarchyMode::Incoming => 0,
+                            CallHierarchyMode::Outgoing => 1,
+                        }),
+                    )
+                    .child(icon_button(
+                        "call-trail-view-list",
+                        IconName::ListTree,
+                        "List",
+                        TrailView::List,
+                    ))
+                    .child(icon_button(
+                        "call-trail-view-map",
+                        IconName::GitGraph,
+                        "Map",
+                        TrailView::Map,
+                    ))
+                    .child(div().flex_1())
+                    .children(self.summary().map(|summary| {
+                        div().min_w_0().child(
+                            Label::new(summary)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted)
+                                .truncate(),
+                        )
+                    })),
             )
             .into_any_element()
+    }
+
+    fn render_breadcrumb(&self, cx: &mut Context<Self>) -> AnyElement {
+        let nodes = self.nodes();
+        let trail = self.trail_in_call_order();
+        let last = trail.len().saturating_sub(1);
+        let mut crumbs = h_flex()
+            .px_2()
+            .py_1()
+            .gap_1()
+            .min_w_0()
+            .overflow_hidden()
+            .border_b_1()
+            .border_color(cx.theme().colors().border_variant)
+            .child(
+                Label::new("trail")
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            );
+        for (position, node_ix) in trail.iter().copied().enumerate() {
+            let Some(node) = nodes.get(node_ix) else {
+                continue;
+            };
+            let name = SharedString::from(node.call.item.name.clone());
+            let is_selected = self.selected == Some(node_ix) || (node_ix == 0 && trail.len() == 1);
+            let selector = name.clone();
+            crumbs = crumbs.child(
+                div()
+                    .id(("call-trail-crumb", node_ix))
+                    .debug_selector(move || format!("call-trail-crumb-{selector}"))
+                    .min_w_0()
+                    .overflow_hidden()
+                    .when(node_ix != 0, |this| {
+                        this.cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| this.select(node_ix, cx)))
+                    })
+                    .child(
+                        Label::new(name)
+                            .size(LabelSize::XSmall)
+                            .buffer_font(cx)
+                            .color(if is_selected {
+                                Color::Default
+                            } else {
+                                Color::Muted
+                            })
+                            .truncate(),
+                    ),
+            );
+            if position < last {
+                crumbs = crumbs.child(Label::new("›").size(LabelSize::XSmall).color(Color::Muted));
+            }
+        }
+        crumbs.into_any_element()
+    }
+
+    fn render_footer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let hint = |action: &dyn Action, label: &'static str, cx: &App| {
+            h_flex()
+                .flex_none()
+                .gap_1()
+                .child(
+                    KeyBinding::for_action_in(action, &self.focus_handle, cx)
+                        .size(rems_from_px(11_f32)),
+                )
+                .child(
+                    Label::new(label)
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                )
+        };
+        let can_explain = cx
+            .try_global::<CallTrailHooks>()
+            .is_some_and(|hooks| hooks.explain.is_some());
+        h_flex()
+            .w_full()
+            .px_2()
+            .py_1()
+            .gap_3()
+            .overflow_hidden()
+            .border_t_1()
+            .border_color(cx.theme().colors().border_variant)
+            .child(hint(&menu::Confirm, "open", cx))
+            .when(self.view == TrailView::List, |this| {
+                this.child(hint(&ToggleCallSite, "call site", cx))
+            })
+            .child(hint(&MakeRoot, "make root", cx))
+            .child(div().flex_1())
+            .when(can_explain, |this| {
+                this.child(
+                    div().debug_selector(|| "call-trail-explain".into()).child(
+                        Button::new("call-trail-explain", "Explain this trail…")
+                            .label_size(LabelSize::XSmall)
+                            .color(Color::Muted)
+                            .disabled(self.selected.is_none())
+                            .tooltip(Tooltip::text("Ask your agent how this trail works"))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.explain_trail(window, cx)),
+                            ),
+                    ),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let rows = self.rows(cx);
+        self.rows = rows.clone();
+        uniform_list(
+            "call-trails",
+            rows.len(),
+            cx.processor(move |this, range: Range<usize>, _, cx| {
+                rows.get(range)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|row| this.render_row(*row, cx))
+                    .collect()
+            }),
+        )
+        .flex_1()
+        .py_1()
+        .track_scroll(&self.scroll_handle)
+        .with_decoration(
+            ui::indent_guides(INDENT, IndentGuideColors::panel(cx))
+                .with_compute_indents_fn(cx.entity(), |this, range, _, _| {
+                    let nodes = this.nodes();
+                    this.rows
+                        .get(range)
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|row| match row {
+                            Row::Node(node_ix) => nodes
+                                .get(*node_ix)
+                                .map_or(0, |node| node.depth.saturating_sub(1)),
+                            Row::CallSite { node_ix, .. } => {
+                                nodes.get(*node_ix).map_or(0, |node| node.depth)
+                            }
+                            Row::Loading { depth } => depth.saturating_sub(1),
+                        })
+                        .collect()
+                })
+                .with_render_fn(cx.entity(), |_, params, _, _| {
+                    const LEFT_OFFSET: Pixels = px(15.);
+                    params
+                        .indent_guides
+                        .into_iter()
+                        .map(|layout| RenderedIndentGuide {
+                            bounds: Bounds::new(
+                                point(
+                                    layout.offset.x * params.indent_size + LEFT_OFFSET,
+                                    layout.offset.y * params.item_height,
+                                ),
+                                size(px(1.), layout.length * params.item_height),
+                            ),
+                            layout,
+                            is_active: false,
+                            hitbox: None,
+                        })
+                        .collect::<SmallVec<_>>()
+                }),
+        )
+        .into_any_element()
     }
 }
 
 impl Render for CallHierarchyPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut key_context = KeyContext::new_with_defaults(cx.platform_info().os);
         key_context.add("CallHierarchyPanel");
         key_context.add("menu");
@@ -671,8 +1321,12 @@ impl Render for CallHierarchyPanel {
         let header = self
             .nodes()
             .first()
-            .map(|root| self.render_header(&root.call, cx));
-        let rows = self.rows();
+            .map(|root| self.render_header(root, cx));
+        let has_tree = header.is_some();
+        let body = has_tree.then(|| match self.view {
+            TrailView::List => self.render_list(cx),
+            TrailView::Map => self.render_map(window, cx),
+        });
         v_flex()
             .id("call-hierarchy-panel")
             .key_context(key_context)
@@ -683,6 +1337,8 @@ impl Render for CallHierarchyPanel {
             .on_action(cx.listener(Self::select_child))
             .on_action(cx.listener(Self::select_parent))
             .on_action(cx.listener(Self::confirm))
+            .on_action(cx.listener(Self::toggle_selected_call_site))
+            .on_action(cx.listener(Self::make_selected_root))
             .children(message.map(|message| {
                 div()
                     .px_2()
@@ -690,24 +1346,9 @@ impl Render for CallHierarchyPanel {
                     .child(Label::new(message).color(Color::Muted))
             }))
             .children(header)
-            .when(!rows.is_empty(), |this| {
-                this.child(
-                    uniform_list(
-                        "call-trails",
-                        rows.len(),
-                        cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                            rows.get(range)
-                                .unwrap_or_default()
-                                .iter()
-                                .map(|row| this.render_row(*row, cx))
-                                .collect()
-                        }),
-                    )
-                    .flex_1()
-                    .py_1()
-                    .track_scroll(&self.scroll_handle),
-                )
-            })
+            .when(has_tree, |this| this.child(self.render_breadcrumb(cx)))
+            .children(body)
+            .when(has_tree, |this| this.child(self.render_footer(cx)))
             .children(self.context_menu.as_ref().map(|(menu, position, _)| {
                 deferred(
                     anchored()
@@ -748,7 +1389,7 @@ impl Panel for CallHierarchyPanel {
     fn set_position(&mut self, _: DockPosition, _: &mut Window, _: &mut Context<Self>) {}
 
     fn default_size(&self, _: &Window, _: &App) -> Pixels {
-        px(300.)
+        px(380.)
     }
 
     fn icon(&self, _: &Window, _: &App) -> Option<IconName> {
@@ -793,6 +1434,191 @@ impl Panel for CallHierarchyPanel {
         }
         cx.notify();
     }
+}
+
+fn row_height() -> Rems {
+    rems_from_px(24_f32)
+}
+
+/// A small square marking what kind of function a row is.
+fn glyph(tag: Option<Tag>, cx: &App) -> AnyElement {
+    let (color, mark) = match tag {
+        Some(Tag::Test) => (Color::Success, Some(IconName::Check)),
+        Some(Tag::EntryPoint | Tag::HttpHandler) => (Color::Warning, Some(IconName::PlayFilled)),
+        None => (Color::Accent, None),
+    };
+    div()
+        .flex_none()
+        .size(rems_from_px(16_f32))
+        .rounded_sm()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(color.color(cx).alpha(0.14))
+        .map(|this| match mark {
+            Some(icon) => this.child(Icon::new(icon).size(IconSize::XSmall).color(color)),
+            None => this.child(
+                Label::new("ƒ")
+                    .size(LabelSize::XSmall)
+                    .buffer_font(cx)
+                    .color(color),
+            ),
+        })
+        .into_any_element()
+}
+
+fn chip(label: impl Into<SharedString>, color: Color, cx: &App) -> Chip {
+    let hsla = color.color(cx);
+    Chip::new(label)
+        .label_color(color)
+        .bg_color(hsla.alpha(0.1))
+        .border_color(hsla.alpha(0.25))
+}
+
+/// The type a method belongs to, from an outline item's text like `impl Gateway`,
+/// `impl<T> Display for Wrapper<T>` or `class Gateway`.
+fn owner_name(text: &str) -> Option<&str> {
+    let rest = if let Some(rest) = text.strip_prefix("impl") {
+        let rest = rest.trim_start();
+        let rest = match rest.strip_prefix('<') {
+            Some(generics) => generics.split_once('>').map_or("", |(_, rest)| rest),
+            None => rest,
+        };
+        rest.rsplit(" for ").next().unwrap_or(rest)
+    } else {
+        ["class ", "struct ", "trait ", "interface ", "enum "]
+            .iter()
+            .find_map(|keyword| text.strip_prefix(keyword))?
+    };
+    let rest = rest.trim_start();
+    let end = rest
+        .find(|character: char| {
+            !(character.is_alphanumeric() || character == '_' || character == ':')
+        })
+        .unwrap_or(rest.len());
+    let name = rest.get(..end)?.trim_end_matches(':');
+    (!name.is_empty()).then_some(name)
+}
+
+/// The declaration from `row` up to its body, on one line.
+fn signature(snapshot: &language::BufferSnapshot, row: u32) -> String {
+    let mut signature = String::new();
+    for row in row..=(row + 5).min(snapshot.max_point().row) {
+        let line = snapshot
+            .text_for_range(
+                language::Point::new(row, 0)..language::Point::new(row, snapshot.line_len(row)),
+            )
+            .collect::<String>();
+        let (line, ends) = match line.find('{') {
+            Some(brace) => (line.get(..brace).unwrap_or_default().to_string(), true),
+            None => (line, false),
+        };
+        if !signature.is_empty() && !signature.ends_with('(') {
+            signature.push(' ');
+        }
+        signature.push_str(line.trim());
+        if ends {
+            break;
+        }
+    }
+    signature
+        .replace("( ", "(")
+        .replace(", )", ")")
+        .trim()
+        .to_string()
+}
+
+/// Tags a function from its name, the attribute lines above it and its signature: cheap checks
+/// on text the buffer already has.
+fn tag_for(item: &CallHierarchyItem, cx: &App) -> Option<Tag> {
+    let snapshot = item.buffer.read(cx).snapshot();
+    let start = item.range.start.to_point(&snapshot).row;
+    let name_row = item.selection_range.start.to_point(&snapshot).row;
+    let line = |row: u32| {
+        snapshot
+            .text_for_range(
+                language::Point::new(row, 0)..language::Point::new(row, snapshot.line_len(row)),
+            )
+            .collect::<String>()
+    };
+    let mut attributes = Vec::new();
+    // Language servers differ on whether a function's range includes its attributes.
+    let mut row = start.min(name_row);
+    for _ in 0..6 {
+        let text = line(row);
+        let trimmed = text.trim_start();
+        if trimmed.starts_with("#[") || trimmed.starts_with('@') {
+            attributes.push(trimmed.to_string());
+        }
+        if row == 0 {
+            break;
+        }
+        row -= 1;
+        let above = line(row);
+        let above = above.trim_start();
+        if !(above.starts_with("#[") || above.starts_with('@') || above.starts_with("///")) {
+            break;
+        }
+    }
+    let in_test_module = snapshot
+        .symbols_containing(item.selection_range.start, None)
+        .iter()
+        .any(|symbol| symbol.text == "mod tests" || symbol.text == "mod test");
+    detect_tag(
+        &item.name,
+        &attributes,
+        &signature(&snapshot, name_row),
+        in_test_module,
+    )
+}
+
+fn detect_tag(
+    name: &str,
+    attributes: &[String],
+    signature: &str,
+    in_test_module: bool,
+) -> Option<Tag> {
+    const ROUTE_ATTRIBUTES: &[&str] = &[
+        "#[get(",
+        "#[post(",
+        "#[put(",
+        "#[patch(",
+        "#[delete(",
+        "#[route(",
+        "#[handler",
+        "@app.",
+        "@router.",
+        "@Get",
+        "@Post",
+        "@Put",
+        "@Delete",
+        "@RequestMapping",
+        "@GetMapping",
+        "@PostMapping",
+    ];
+    const HANDLER_PARAMETERS: &[&str] =
+        &["State(", "State<", "HttpRequest", "web::Json<", "Request<"];
+    let is_test_attribute = |attribute: &String| {
+        attribute.contains("test]") || attribute.contains("::test") || attribute.contains("test(")
+    };
+    if attributes.iter().any(is_test_attribute) || name.starts_with("test_") {
+        return Some(Tag::Test);
+    }
+    if name == "main" {
+        return Some(Tag::EntryPoint);
+    }
+    let parameters = signature.split("->").next().unwrap_or(signature);
+    if attributes.iter().any(|attribute| {
+        ROUTE_ATTRIBUTES
+            .iter()
+            .any(|route| attribute.starts_with(route))
+    }) || HANDLER_PARAMETERS
+        .iter()
+        .any(|parameter| parameters.contains(parameter))
+    {
+        return Some(Tag::HttpHandler);
+    }
+    in_test_module.then_some(Tag::Test)
 }
 
 fn same_item(left: &CallHierarchyItem, right: &CallHierarchyItem) -> bool {
@@ -841,7 +1667,7 @@ mod tests {
     use util::{path, rel_path::rel_path};
     use workspace::{AppState, MultiWorkspace};
 
-    const SOURCE: &str = "fn main() { helper(); helper(); }\nfn helper() { leaf(); helper(); }\nfn leaf() {}\nfn other() { leaf(); }\n";
+    const SOURCE: &str = "fn main() { helper(); helper(); }\nfn helper() { leaf(); helper(); }\nfn leaf() {}\nfn other() { leaf(); }\n#[test]\nfn other_works() { other(); }\n";
 
     struct Setup<'a> {
         workspace: Entity<Workspace>,
@@ -881,6 +1707,7 @@ mod tests {
             "main" => 0,
             "helper" => 1,
             "leaf" => 2,
+            "other_works" => 5,
             _ => 3,
         }
     }
@@ -896,7 +1723,7 @@ mod tests {
     }
 
     /// Callers and callees of [`SOURCE`]: main calls helper twice, helper calls leaf and itself,
-    /// other calls leaf.
+    /// other calls leaf, and the test other_works calls other.
     fn incoming(name: &str, uri: &lsp::Uri) -> Vec<lsp::CallHierarchyIncomingCall> {
         let call = |from: &str, sites: Vec<lsp::Range>| lsp::CallHierarchyIncomingCall {
             from: item(from, uri, line_of(from)),
@@ -911,6 +1738,7 @@ mod tests {
                 call("helper", vec![site(1, 14)]),
                 call("other", vec![site(3, 13)]),
             ],
+            "other" => vec![call("other_works", vec![site(5, 19)])],
             _ => Vec::new(),
         }
     }
@@ -927,6 +1755,7 @@ mod tests {
                 call("helper", vec![site(1, 22)]),
             ],
             "other" => vec![call("leaf", vec![site(3, 13)])],
+            "other_works" => vec![call("other", vec![site(5, 19)])],
             _ => Vec::new(),
         }
     }
@@ -1013,6 +1842,7 @@ mod tests {
                         1 => "helper",
                         2 => "leaf",
                         3 => "other",
+                        5 => "other_works",
                         _ => return Ok(None),
                     };
                     Ok(Some(vec![item(name, &uri, line)]))
@@ -1076,9 +1906,9 @@ mod tests {
         }
 
         fn node(&mut self, name: &str) -> usize {
-            self.panel.read_with(self.cx, |panel, _| {
+            self.panel.read_with(self.cx, |panel, cx| {
                 panel
-                    .rows()
+                    .rows(cx)
                     .into_iter()
                     .find_map(|row| match row {
                         Row::Node(ix) if panel.nodes()[ix].call.item.name == name => Some(ix),
@@ -1103,10 +1933,10 @@ mod tests {
         }
 
         fn selected_row(&mut self) -> Option<usize> {
-            self.panel.read_with(self.cx, |panel, _| {
+            self.panel.read_with(self.cx, |panel, cx| {
                 let selected = panel.selected?;
                 panel
-                    .rows()
+                    .rows(cx)
                     .iter()
                     .position(|row| *row == Row::Node(selected))
             })
@@ -1129,12 +1959,13 @@ mod tests {
                 })
         }
 
-        /// The visible rows, two spaces of indent per level.
+        /// The visible rows, two spaces of indent per level; call-site lines show their line
+        /// number, with `>` on the call.
         fn tree(&mut self) -> Vec<String> {
-            self.panel.read_with(self.cx, |panel, _| {
+            self.panel.read_with(self.cx, |panel, cx| {
                 let nodes = panel.nodes();
                 panel
-                    .rows()
+                    .rows(cx)
                     .into_iter()
                     .map(|row| match row {
                         Row::Node(ix) => {
@@ -1147,11 +1978,23 @@ mod tests {
                             if node.recursive {
                                 text.push_str(" ↻");
                             }
+                            if let Some(tag) = node.tag {
+                                text.push_str(&format!(" [{}]", tag.label()));
+                            }
                             text
                         }
                         Row::Loading { depth } => format!("{}Loading…", "  ".repeat(depth - 1)),
-                        Row::Empty { depth } => {
-                            format!("{}{}", "  ".repeat(depth - 1), panel.empty_label())
+                        Row::CallSite { node_ix, row } => {
+                            let node = &nodes[node_ix];
+                            let snapshot = node.call.target.buffer.read(cx).snapshot();
+                            let line = snapshot
+                                .text_for_range(
+                                    language::Point::new(row, 0)
+                                        ..language::Point::new(row, snapshot.line_len(row)),
+                                )
+                                .collect::<String>();
+                            let mark = if row == node.call_row { ">" } else { "" };
+                            format!("{}| {}{mark} {line}", "  ".repeat(node.depth), row + 1)
                         }
                     })
                     .collect()
@@ -1184,6 +2027,66 @@ mod tests {
             self.cx.run_until_parked();
         }
 
+        fn select(&mut self, name: &str) {
+            let node = self.node(name);
+            self.panel
+                .update(self.cx, |panel, cx| panel.select(node, cx));
+            self.cx.run_until_parked();
+        }
+
+        fn summary(&mut self) -> Option<String> {
+            self.panel.read_with(self.cx, |panel, _| panel.summary())
+        }
+
+        /// The breadcrumb's names, in the order it shows them.
+        fn crumbs(&mut self) -> Vec<String> {
+            self.panel.read_with(self.cx, |panel, _| {
+                panel
+                    .trail_in_call_order()
+                    .into_iter()
+                    .map(|node_ix| panel.nodes()[node_ix].call.item.name.clone())
+                    .collect()
+            })
+        }
+
+        fn double_click(&mut self, selector: &'static str) {
+            let position = self
+                .cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is drawn"))
+                .center();
+            for click_count in [1, 2] {
+                self.cx.simulate_event(gpui::MouseDownEvent {
+                    position,
+                    modifiers: gpui::Modifiers::none(),
+                    button: gpui::MouseButton::Left,
+                    click_count,
+                    first_mouse: false,
+                });
+                self.cx.simulate_event(gpui::MouseUpEvent {
+                    position,
+                    modifiers: gpui::Modifiers::none(),
+                    button: gpui::MouseButton::Left,
+                    click_count,
+                });
+            }
+            self.cx.run_until_parked();
+        }
+
+        fn bind_panel_keys(&mut self) {
+            self.cx.update(|_, cx| {
+                cx.bind_keys([
+                    gpui::KeyBinding::new("down", menu::SelectNext, Some("CallHierarchyPanel")),
+                    gpui::KeyBinding::new("up", menu::SelectPrevious, Some("CallHierarchyPanel")),
+                    gpui::KeyBinding::new("right", menu::SelectChild, Some("CallHierarchyPanel")),
+                    gpui::KeyBinding::new("left", menu::SelectParent, Some("CallHierarchyPanel")),
+                    gpui::KeyBinding::new("enter", menu::Confirm, Some("CallHierarchyPanel")),
+                    gpui::KeyBinding::new("space", ToggleCallSite, Some("CallHierarchyPanel")),
+                    gpui::KeyBinding::new("alt-left", MakeRoot, Some("CallHierarchyPanel")),
+                ]);
+            });
+        }
+
         fn cursor(&mut self) -> language::Point {
             let editor = self
                 .workspace
@@ -1205,7 +2108,7 @@ mod tests {
 
         setup.show_in_panel(1);
         assert_eq!(setup.root().as_deref(), Some("helper"));
-        assert_eq!(setup.tree(), ["main ×2", "helper ↻"]);
+        assert_eq!(setup.tree(), ["main ×2 [entry point]", "helper ↻"]);
         assert_eq!(setup.take_requests(), ["callers of helper"]);
     }
 
@@ -1218,22 +2121,37 @@ mod tests {
 
         setup.expand("helper");
         assert_eq!(setup.take_requests(), ["callers of helper"]);
-        assert_eq!(setup.tree(), ["helper", "  main ×2", "  helper ↻", "other"]);
+        assert_eq!(
+            setup.tree(),
+            ["helper", "  main ×2 [entry point]", "  helper ↻", "other"]
+        );
 
         setup.expand("other");
         assert_eq!(setup.take_requests(), ["callers of other"]);
         assert_eq!(
             setup.tree(),
-            ["helper", "  main ×2", "  helper ↻", "other", "  No callers"]
+            [
+                "helper",
+                "  main ×2 [entry point]",
+                "  helper ↻",
+                "other",
+                "  other_works [test]"
+            ]
         );
 
         setup.collapse("helper");
-        assert_eq!(setup.tree(), ["helper", "other", "  No callers"]);
+        assert_eq!(setup.tree(), ["helper", "other", "  other_works [test]"]);
         setup.expand("helper");
         assert_eq!(setup.take_requests(), Vec::<String>::new());
         assert_eq!(
             setup.tree(),
-            ["helper", "  main ×2", "  helper ↻", "other", "  No callers"]
+            [
+                "helper",
+                "  main ×2 [entry point]",
+                "  helper ↻",
+                "other",
+                "  other_works [test]"
+            ]
         );
     }
 
@@ -1247,14 +2165,18 @@ mod tests {
             .update_in(setup.cx, |panel, window, cx| panel.expand(node, window, cx));
         assert_eq!(setup.tree(), ["helper", "  Loading…", "other"]);
         setup.cx.run_until_parked();
-        assert_eq!(setup.tree(), ["helper", "  main ×2", "  helper ↻", "other"]);
+        assert_eq!(
+            setup.tree(),
+            ["helper", "  main ×2 [entry point]", "  helper ↻", "other"]
+        );
     }
 
     #[gpui::test]
     async fn switching_to_calls_shows_outgoing_calls(cx: &mut TestAppContext) {
         let mut setup = setup(true, cx).await;
         setup.show_in_panel(0);
-        assert_eq!(setup.tree(), ["No callers"]);
+        assert_eq!(setup.tree(), Vec::<String>::new());
+        assert_eq!(setup.summary().as_deref(), Some("No callers"));
         setup.take_requests();
 
         setup.panel.update_in(setup.cx, |panel, window, cx| {
@@ -1270,10 +2192,46 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn a_call_with_no_calls_is_a_leaf_not_a_no_callers_row(cx: &mut TestAppContext) {
+        let mut setup = setup(true, cx).await;
+        setup.show_in_panel(0);
+        setup.panel.update_in(setup.cx, |panel, window, cx| {
+            panel.set_mode(CallHierarchyMode::Outgoing, window, cx)
+        });
+        setup.cx.run_until_parked();
+        setup.expand("helper");
+        let leaf = setup.node("leaf");
+        let expandable = |setup: &mut Setup| {
+            setup
+                .panel
+                .read_with(setup.cx, |panel, _| panel.can_expand(&panel.nodes()[leaf]))
+        };
+        assert!(expandable(&mut setup), "unknown until fetched");
+
+        setup.expand("leaf");
+        assert_eq!(
+            setup.take_requests().last().map(String::as_str),
+            Some("calls of leaf")
+        );
+        assert_eq!(setup.tree(), ["helper ×2", "  leaf", "  helper ↻"]);
+        assert!(!expandable(&mut setup), "a known leaf has no chevron");
+    }
+
+    #[gpui::test]
+    async fn entry_points_and_tests_are_leaves_without_a_fetch(cx: &mut TestAppContext) {
+        let mut setup = setup(true, cx).await;
+        setup.show_in_panel(1);
+        setup.take_requests();
+        setup.expand("main");
+        assert_eq!(setup.take_requests(), Vec::<String>::new());
+        assert_eq!(setup.tree(), ["main ×2 [entry point]", "helper ↻"]);
+    }
+
+    #[gpui::test]
     async fn recursive_calls_are_marked_and_not_expandable(cx: &mut TestAppContext) {
         let mut setup = setup(true, cx).await;
         setup.show_in_panel(1);
-        assert_eq!(setup.tree(), ["main ×2", "helper ↻"]);
+        assert_eq!(setup.tree(), ["main ×2 [entry point]", "helper ↻"]);
         let recursive = setup.node("helper");
         setup.take_requests();
         setup.panel.update_in(setup.cx, |panel, window, cx| {
@@ -1281,7 +2239,131 @@ mod tests {
         });
         setup.cx.run_until_parked();
         assert_eq!(setup.take_requests(), Vec::<String>::new());
-        assert_eq!(setup.tree(), ["main ×2", "helper ↻"]);
+        assert_eq!(setup.tree(), ["main ×2 [entry point]", "helper ↻"]);
+    }
+
+    #[gpui::test]
+    async fn header_summarizes_callers_entry_points_and_tests(cx: &mut TestAppContext) {
+        let mut setup = setup(true, cx).await;
+        setup.show_in_panel(1);
+        assert_eq!(
+            setup.summary().as_deref(),
+            Some("2 callers · 1 entry point")
+        );
+
+        setup.show_in_panel(2);
+        assert_eq!(setup.summary().as_deref(), Some("2 callers"));
+        setup.expand("other");
+        assert_eq!(setup.summary().as_deref(), Some("2 callers · 1 test"));
+        setup.expand("helper");
+        assert_eq!(
+            setup.summary().as_deref(),
+            Some("2 callers · 1 entry point · 1 test")
+        );
+
+        setup.panel.update_in(setup.cx, |panel, window, cx| {
+            panel.set_mode(CallHierarchyMode::Outgoing, window, cx)
+        });
+        setup.cx.run_until_parked();
+        assert_eq!(setup.summary().as_deref(), Some("No calls"));
+    }
+
+    #[gpui::test]
+    async fn header_marks_a_root_changed_in_an_open_review(cx: &mut TestAppContext) {
+        let mut setup = setup(true, cx).await;
+        setup.cx.update(|_, cx| {
+            set_hooks(
+                CallTrailHooks {
+                    changed_in_review: Some(Rc::new(|_, path, rows, _| {
+                        (path == "src/main.rs" && rows.contains(&1)).then_some(214)
+                    })),
+                    explain: None,
+                },
+                cx,
+            )
+        });
+        setup.show_in_panel(1);
+        let changed = |setup: &mut Setup| {
+            setup
+                .panel
+                .read_with(setup.cx, |panel, _| panel.root_header.changed_in_pr)
+        };
+        assert_eq!(changed(&mut setup), Some(214));
+        assert!(setup.cx.debug_bounds("call-trail-pr-chip").is_some());
+
+        setup.show_in_panel(2);
+        assert_eq!(changed(&mut setup), None);
+        assert!(setup.cx.debug_bounds("call-trail-pr-chip").is_none());
+    }
+
+    #[gpui::test]
+    async fn breadcrumb_follows_the_selection_in_call_order(cx: &mut TestAppContext) {
+        let mut setup = setup(true, cx).await;
+        setup.show_in_panel(2);
+        assert_eq!(setup.crumbs(), ["leaf"]);
+        setup.expand("helper");
+        setup.select("main");
+        assert_eq!(setup.crumbs(), ["main", "helper", "leaf"]);
+        for selector in [
+            "call-trail-crumb-main",
+            "call-trail-crumb-helper",
+            "call-trail-crumb-leaf",
+        ] {
+            assert!(setup.cx.debug_bounds(selector).is_some(), "{selector}");
+        }
+
+        setup.click("call-trail-crumb-helper");
+        assert_eq!(setup.crumbs(), ["helper", "leaf"]);
+        assert_eq!(setup.selected_row(), Some(0));
+
+        setup.show_in_panel(0);
+        setup.panel.update_in(setup.cx, |panel, window, cx| {
+            panel.set_mode(CallHierarchyMode::Outgoing, window, cx)
+        });
+        setup.cx.run_until_parked();
+        setup.expand("helper");
+        setup.select("leaf");
+        assert_eq!(setup.crumbs(), ["main", "helper", "leaf"]);
+    }
+
+    #[gpui::test]
+    async fn call_site_shows_the_call_line_with_context(cx: &mut TestAppContext) {
+        let mut setup = setup(true, cx).await;
+        setup.bind_panel_keys();
+        setup.show_in_panel(2);
+        setup.click("call-trail-sites-other");
+        assert_eq!(
+            setup.tree(),
+            [
+                "helper",
+                "other",
+                "  | 3 fn leaf() {}",
+                "  | 4> fn other() { leaf(); }",
+                "  | 5 #[test]",
+            ]
+        );
+
+        setup.click("call-trail-site-other-4");
+        assert_eq!(setup.cursor(), language::Point::new(3, 13));
+    }
+
+    #[gpui::test]
+    async fn space_toggles_the_selected_call_site(cx: &mut TestAppContext) {
+        let mut setup = setup(true, cx).await;
+        setup.bind_panel_keys();
+        setup.show_in_panel(1);
+        setup.cx.simulate_keystrokes("down space");
+        assert_eq!(
+            setup.tree(),
+            [
+                "main ×2 [entry point]",
+                "  | 1> fn main() { helper(); helper(); }",
+                "  | 2 fn helper() { leaf(); helper(); }",
+                "helper ↻",
+            ]
+        );
+        setup.cx.simulate_keystrokes("space");
+        assert_eq!(setup.tree(), ["main ×2 [entry point]", "helper ↻"]);
     }
 
     #[gpui::test]
@@ -1297,15 +2379,7 @@ mod tests {
     #[gpui::test]
     async fn keyboard_moves_expands_collapses_and_opens(cx: &mut TestAppContext) {
         let mut setup = setup(true, cx).await;
-        setup.cx.update(|_, cx| {
-            cx.bind_keys([
-                gpui::KeyBinding::new("down", menu::SelectNext, Some("CallHierarchyPanel")),
-                gpui::KeyBinding::new("up", menu::SelectPrevious, Some("CallHierarchyPanel")),
-                gpui::KeyBinding::new("right", menu::SelectChild, Some("CallHierarchyPanel")),
-                gpui::KeyBinding::new("left", menu::SelectParent, Some("CallHierarchyPanel")),
-                gpui::KeyBinding::new("enter", menu::Confirm, Some("CallHierarchyPanel")),
-            ]);
-        });
+        setup.bind_panel_keys();
         setup.show_in_panel(2);
         let focused = setup.panel.update_in(setup.cx, |panel, window, _| {
             panel.focus_handle.is_focused(window)
@@ -1314,7 +2388,10 @@ mod tests {
 
         setup.cx.simulate_keystrokes("down right");
         setup.cx.run_until_parked();
-        assert_eq!(setup.tree(), ["helper", "  main ×2", "  helper ↻", "other"]);
+        assert_eq!(
+            setup.tree(),
+            ["helper", "  main ×2 [entry point]", "  helper ↻", "other"]
+        );
         assert_eq!(setup.selected_row(), Some(0));
         setup.cx.simulate_keystrokes("right down");
         assert_eq!(setup.selected_row(), Some(2));
@@ -1338,7 +2415,7 @@ mod tests {
         setup.click("MENU_ITEM-Make Root");
         assert_eq!(setup.root().as_deref(), Some("helper"));
         assert_eq!(setup.take_requests(), ["callers of helper"]);
-        assert_eq!(setup.tree(), ["main ×2", "helper ↻"]);
+        assert_eq!(setup.tree(), ["main ×2 [entry point]", "helper ↻"]);
 
         setup.right_click("call-trail-main");
         setup.click("MENU_ITEM-Copy Name");
@@ -1346,6 +2423,115 @@ mod tests {
             .cx
             .update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
         assert_eq!(copied.as_deref(), Some("main"));
+    }
+
+    #[gpui::test]
+    async fn option_left_makes_the_selection_the_root(cx: &mut TestAppContext) {
+        let mut setup = setup(true, cx).await;
+        setup.bind_panel_keys();
+        setup.show_in_panel(2);
+        setup.take_requests();
+        setup.cx.simulate_keystrokes("down alt-left");
+        setup.cx.run_until_parked();
+        assert_eq!(setup.root().as_deref(), Some("helper"));
+        assert_eq!(setup.take_requests(), ["callers of helper"]);
+        assert_eq!(setup.crumbs(), ["helper"]);
+    }
+
+    #[gpui::test]
+    async fn map_draws_the_explored_tree_and_opens_a_clicked_node(cx: &mut TestAppContext) {
+        let mut setup = setup(true, cx).await;
+        setup.show_in_panel(2);
+        setup.expand("helper");
+        setup.click("call-trail-view-map");
+        let layout = setup.panel.read_with(setup.cx, |panel, _| {
+            map::layout(panel.nodes())
+                .into_iter()
+                .map(|placed| {
+                    let node = &panel.nodes()[placed.node_ix];
+                    let parent = node
+                        .parent
+                        .map(|parent| panel.nodes()[parent].call.item.name.clone());
+                    (
+                        node.call.item.name.clone(),
+                        placed.column,
+                        placed.row,
+                        parent,
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+        let named = |name: &str, column, row, parent: Option<&str>| {
+            (name.to_string(), column, row, parent.map(str::to_string))
+        };
+        assert_eq!(
+            layout,
+            [
+                named("main", 2, 0., Some("helper")),
+                named("helper", 2, 1., Some("helper")),
+                named("helper", 1, 0.5, Some("leaf")),
+                named("other", 1, 2., Some("leaf")),
+                named("leaf", 0, 1.25, None),
+            ]
+        );
+        for selector in [
+            "call-trail-map-main",
+            "call-trail-map-other",
+            "call-trail-map-leaf",
+        ] {
+            assert!(setup.cx.debug_bounds(selector).is_some(), "{selector}");
+        }
+
+        setup.click("call-trail-map-other");
+        assert_eq!(setup.cursor(), language::Point::new(3, 13));
+        assert_eq!(setup.crumbs(), ["other", "leaf"]);
+
+        setup.take_requests();
+        setup.double_click("call-trail-map-other");
+        assert_eq!(setup.take_requests(), ["callers of other"]);
+        assert!(
+            setup
+                .cx
+                .debug_bounds("call-trail-map-other_works")
+                .is_some(),
+            "double-click expands the node"
+        );
+    }
+
+    #[gpui::test]
+    async fn explain_sends_the_selected_trail_only_when_clicked(cx: &mut TestAppContext) {
+        let mut setup = setup(true, cx).await;
+        let prompts = Rc::new(std::cell::RefCell::new(Vec::new()));
+        setup.cx.update(|_, cx| {
+            set_hooks(
+                CallTrailHooks {
+                    changed_in_review: None,
+                    explain: Some(Rc::new({
+                        let prompts = prompts.clone();
+                        move |_, prompt, _, _| prompts.borrow_mut().push(prompt)
+                    })),
+                },
+                cx,
+            )
+        });
+        setup.show_in_panel(2);
+        setup.expand("helper");
+        setup.select("main");
+        assert!(prompts.borrow().is_empty(), "nothing runs until clicked");
+
+        setup.click("call-trail-explain");
+        let prompts = prompts.borrow();
+        let prompt = prompts.first().expect("the trail was sent");
+        let expected = [
+            "1. main (src/main.rs:1)",
+            "   calls helper at src/main.rs:1: `fn main() { helper(); helper(); }`",
+            "2. helper (src/main.rs:2)",
+            "   calls leaf at src/main.rs:2: `fn helper() { leaf(); helper(); }`",
+            "3. leaf (src/main.rs:3)",
+        ];
+        for line in expected {
+            assert!(prompt.contains(line), "{line:?} in {prompt}");
+        }
     }
 
     #[gpui::test]
@@ -1434,17 +2620,54 @@ mod tests {
         assert_eq!(setup.message(), Some(UNSUPPORTED));
     }
 
-    #[gpui::test]
-    async fn rows_show_the_path_without_the_popup_call_count(cx: &mut TestAppContext) {
-        let mut setup = setup(true, cx).await;
-        setup.show_in_panel(1);
-        let path = setup.panel.read_with(setup.cx, |panel, _| {
-            panel.nodes()[1].call.display.path.clone()
-        });
-        let path = path.expect("calls have a path");
-        assert!(
-            path.ends_with(":1 (2 calls)"),
-            "the popup's path suffix this panel replaces with ×N changed: {path}"
+    #[test]
+    fn tags_come_from_names_attributes_and_signatures() {
+        let tag = |name: &str, attributes: &[&str], signature: &str| {
+            let attributes = attributes.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+            detect_tag(name, &attributes, signature, false)
+        };
+        assert_eq!(tag("main", &[], "fn main()"), Some(Tag::EntryPoint));
+        assert_eq!(tag("works", &["#[test]"], "fn works()"), Some(Tag::Test));
+        assert_eq!(
+            tag("works", &["#[tokio::test]"], "async fn works()"),
+            Some(Tag::Test)
         );
+        assert_eq!(tag("test_login", &[], "def test_login():"), Some(Tag::Test));
+        assert_eq!(
+            tag(
+                "charge_invoice",
+                &[],
+                "pub async fn charge_invoice(State(state): State<AppState>, Path(id): Path<InvoiceId>) -> Result<Json<ChargeResponse>, (StatusCode, String)>"
+            ),
+            Some(Tag::HttpHandler)
+        );
+        assert_eq!(
+            tag("index", &["#[get(\"/\")]"], "async fn index()"),
+            Some(Tag::HttpHandler)
+        );
+        assert_eq!(
+            tag(
+                "charge",
+                &[],
+                "pub async fn charge(&self, invoice: &Invoice) -> Result<Receipt, ChargeError>"
+            ),
+            None
+        );
+        assert_eq!(
+            detect_tag("helper", &[], "fn helper()", true),
+            Some(Tag::Test)
+        );
+    }
+
+    #[test]
+    fn owner_names_come_from_impl_and_class_outlines() {
+        assert_eq!(owner_name("impl Gateway"), Some("Gateway"));
+        assert_eq!(
+            owner_name("impl<T> Display for Wrapper<T>"),
+            Some("Wrapper")
+        );
+        assert_eq!(owner_name("class Gateway"), Some("Gateway"));
+        assert_eq!(owner_name("pub async fn charge(&self)"), None);
+        assert_eq!(owner_name("mod tests"), None);
     }
 }

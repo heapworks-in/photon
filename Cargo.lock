@@ -13776,6 +13776,8 @@ dependencies = [
  "menu",
  "project",
  "serde_json",
+ "smallvec",
+ "theme",
  "tree-sitter-rust",
  "ui",
  "util",

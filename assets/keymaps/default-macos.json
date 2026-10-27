@@ -1899,4 +1899,12 @@
       "right": ["tabular_data::MoveFocusedCell", { "direction": "right" }],
     },
   },
+  // photon: Call Trails keys: show the selected call site, make the selection the root.
+  {
+    "context": "CallHierarchyPanel",
+    "bindings": {
+      "space": "photon_call_trails::ToggleCallSite",
+      "alt-left": "photon_call_trails::MakeRoot",
+    },
+  },
 ]
