@@ -1867,7 +1867,7 @@ mod mac {
                 .context("plan-facts isn't drawn")?;
             self.cx.simulate_event(
                 win.handle.into(),
-                gpui::ScrollWheelEvent {
+                gpui::ScrollEvent {
                     position: bounds.center(),
                     delta: gpui::ScrollDelta::Pixels(point(px(0.), px(by))),
                     ..Default::default()

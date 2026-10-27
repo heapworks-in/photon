@@ -994,7 +994,6 @@ fn signature_at(lines: &[&str]) -> String {
         .trim_end_matches(',')
         .trim()
         .replace(",)", ")")
-        .to_string()
 }
 
 #[cfg(test)]

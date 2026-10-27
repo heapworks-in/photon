@@ -158,9 +158,9 @@ impl PlanReviewDb {
     }
 
     pub fn status(&self, plan_path: &str) -> Result<Option<String>> {
-        Ok(self.select_row_bound::<String, String>(
+        self.select_row_bound::<String, String>(
             "SELECT status FROM plan_status WHERE plan_path = ?1",
-        )?(plan_path.to_string())?)
+        )?(plan_path.to_string())
     }
 
     pub async fn set_status(&self, plan_path: String, status: String) -> Result<()> {
