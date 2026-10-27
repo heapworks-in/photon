@@ -286,3 +286,25 @@ b { font-weight: 600; color: var(--text); }
 .gitrow .acts { margin-left: auto; }
 .see { font: 600 12.5px "Plex"; color: var(--accent); background: none; border: 1px solid #2a2a2a; border-radius: 6px; padding: 1px 8px; cursor: pointer; margin-left: 4px; }
 .see:hover { border-color: var(--accent); }
+
+/* Showcase: one large, clean screenshot per band on a soft glow, the way a product page should. */
+.showcase { position: relative; margin: 8px auto 36px; }
+.showcase .glow { position: absolute; left: 12%; right: 12%; top: 10%; bottom: 10%; background: radial-gradient(ellipse at center, #19aad833, transparent 70%); filter: blur(60px); pointer-events: none; }
+.showcase picture { position: relative; display: block; border-radius: 14px; overflow: hidden; border: 1px solid #2a2a2a; box-shadow: 0 50px 120px -40px #000, 0 0 0 1px #00000080; background: #000; cursor: zoom-in; }
+.showcase img { display: block; width: 100%; height: auto; }
+.showcase figcaption { position: relative; color: var(--muted); font-size: 15px; margin-top: 14px; max-width: 70ch; }
+.facts3 { display: grid; grid-template-columns: 1fr; gap: 22px 36px; margin-top: 12px; }
+@media (min-width: 860px) { .facts3 { grid-template-columns: repeat(3, 1fr); } }
+.facts3 h3 { font: 600 16.5px/1.35 "Plex"; margin-bottom: 6px; }
+.facts3 p { color: var(--muted); font-size: 15px; line-height: 1.6; }
+.facts3 div { padding-left: 14px; border-left: 2px solid #2a2a2a; }
+
+/* The agent turn, drawn */
+.turn { max-width: 760px; margin: 8px 0 40px; background: var(--panel); border: 1px solid #2a2a2a; border-radius: 12px; padding: 14px 16px; font-size: 14px; box-shadow: 0 30px 80px -30px #000; }
+.turn-prompt { color: var(--text); margin-bottom: 10px; } .turn-prompt .who { font: 600 12px "Plex"; color: var(--dim); margin-right: 10px; }
+.turn-steps { display: grid; gap: 4px; color: var(--muted); font-size: 13.5px; padding-left: 12px; border-left: 2px solid #2a2a2a; margin-bottom: 12px; }
+.turn-steps .g { color: var(--green); font-style: normal; }
+.turn-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.chip-file { font: 12.5px "Lilex"; color: var(--text); background: var(--raised); border: 1px solid #2a2a2a; border-radius: 6px; padding: 2px 8px; }
+.chip-file i { font-style: normal; } .chip-file .g { color: var(--green); } .chip-file .r { color: var(--red); }
+.turn-btn { margin-left: auto; font: 600 12.5px "Plex"; color: var(--text); background: var(--raised); border: 1px solid #2a2a2a; border-radius: 6px; padding: 3px 10px; }

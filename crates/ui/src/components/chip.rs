@@ -122,10 +122,10 @@ impl RenderOnce for Chip {
                 )
             })
             .child(
+                // photon: chips use the UI font like the text around them; only code is monospace.
                 Label::new(self.label.clone())
                     .size(self.label_size)
                     .color(self.label_color)
-                    .buffer_font(cx)
                     .truncate(),
             )
             .id(self.label.clone())
