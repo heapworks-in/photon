@@ -868,7 +868,7 @@ pub(crate) fn render_buffer_header(
                                                 Label::new(filename)
                                                     .single_line()
                                                     .color(file_status_label_color(file_status))
-                                                    .buffer_font(cx)
+                                                    // photon: file headers are chrome, in the UI font.
                                                     .when(
                                                         file_status.is_some_and(|s| s.is_deleted()),
                                                         |label| label.strikethrough(),
@@ -896,18 +896,14 @@ pub(crate) fn render_buffer_header(
                                     )
                                     .when_some(parent_path, |then, path| {
                                         then.child(
-                                            Label::new(path)
-                                                .buffer_font(cx)
-                                                .truncate_start()
-                                                .color(
-                                                    if file_status
-                                                        .is_some_and(FileStatus::is_deleted)
-                                                    {
-                                                        Color::Custom(colors.text_disabled)
-                                                    } else {
-                                                        Color::Custom(colors.text_muted)
-                                                    },
-                                                ),
+                                            // photon: file headers are chrome, in the UI font.
+                                            Label::new(path).truncate_start().color(
+                                                if file_status.is_some_and(FileStatus::is_deleted) {
+                                                    Color::Custom(colors.text_disabled)
+                                                } else {
+                                                    Color::Custom(colors.text_muted)
+                                                },
+                                            ),
                                         )
                                     })
                                     .when(!buffer.capability.editable(), |el| {

@@ -51,3 +51,23 @@ pub fn init(cx: &mut App) {
 pub(crate) fn button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Button {
     Button::new(id, label).size(ButtonSize::Medium)
 }
+
+/// Every chip in the review UI comes from here. Like `ui::Chip`, but in the UI font: chips are
+/// chrome, and the buffer font is for code.
+pub(crate) fn chip(
+    label: impl Into<SharedString>,
+    color: ui::Color,
+    size: ui::LabelSize,
+    cx: &App,
+) -> gpui::Div {
+    use ui::prelude::*;
+    let tint = color.color(cx);
+    h_flex()
+        .flex_none()
+        .px_1()
+        .border_1()
+        .rounded_sm()
+        .border_color(tint.opacity(0.3))
+        .bg(tint.opacity(0.12))
+        .child(Label::new(label).size(size).color(color))
+}

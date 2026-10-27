@@ -125,6 +125,9 @@ pub struct PrDetail {
     pub merge: MergeStatus,
     /// General comments on the conversation, not counting review comments on lines.
     pub comment_count: usize,
+    /// Who reviewed, and who is asked to, for `@` completion.
+    pub reviewers: Vec<String>,
+    pub requested_reviewers: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -405,6 +408,41 @@ struct RawPullRequest {
     review_decision: Option<String>,
     #[serde(default)]
     comments: Option<RawCount>,
+    #[serde(default)]
+    latest_reviews: Option<Nodes<RawReviewAuthor>>,
+    #[serde(default)]
+    review_requests: Option<Nodes<RawReviewRequest>>,
+}
+
+#[derive(Deserialize)]
+struct RawReviewAuthor {
+    author: Option<RawLogin>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawReviewRequest {
+    requested_reviewer: Option<RawTeamOrUser>,
+}
+
+/// A team asked to review has no login.
+#[derive(Deserialize)]
+struct RawTeamOrUser {
+    #[serde(default)]
+    login: Option<String>,
+}
+
+fn logins<T>(nodes: Option<Nodes<T>>, login: impl Fn(T) -> Option<String>) -> Vec<String> {
+    nodes
+        .map(|nodes| {
+            nodes
+                .nodes
+                .into_iter()
+                .flatten()
+                .filter_map(login)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Deserialize)]
@@ -730,6 +768,8 @@ pub fn detail_request(key: &PrKey, login: &str) -> GhRequest {
          {PR_SUMMARY_FIELDS} state additions deletions body headRefName \
          headRepository {{ nameWithOwner }} \
          isDraft mergeable mergeStateStatus reviewDecision comments {{ totalCount }} \
+         latestReviews(first: 50) {{ nodes {{ author {{ login }} }} }} \
+         reviewRequests(first: 50) {{ nodes {{ requestedReviewer {{ ... on User {{ login }} }} }} }} \
          lastCommit: commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ \
          contexts(first: 50) {{ nodes {{ \
          ... on CheckRun {{ name status conclusion detailsUrl }} \
@@ -852,6 +892,12 @@ pub fn parse_detail(key: &PrKey, json: &str) -> Result<PrDetail> {
         comment_count: pull_request
             .comments
             .map_or(0, |comments| comments.total_count),
+        reviewers: logins(pull_request.latest_reviews, |review| {
+            review.author.map(|author| author.login)
+        }),
+        requested_reviewers: logins(pull_request.review_requests, |request| {
+            request.requested_reviewer?.login
+        }),
     })
 }
 
@@ -1680,6 +1726,8 @@ mod tests {
             "viewerDefaultMergeMethod",
             "isDraft mergeable mergeStateStatus reviewDecision comments { totalCount }",
             "... on CheckRun { name status conclusion detailsUrl }",
+            "latestReviews(first: 50) { nodes { author { login } } }",
+            "requestedReviewer { ... on User { login } }",
         ] {
             assert!(query.contains(field), "{field} in {query}");
         }
@@ -1690,6 +1738,26 @@ mod tests {
         let mut json: serde_json::Value = serde_json::from_str(DETAIL).expect("fixture");
         change(&mut json["data"]["repository"]["pullRequest"]);
         parse_detail(&key(), &json.to_string()).expect("parse")
+    }
+
+    #[test]
+    fn detail_reads_reviewers_and_requested_users() {
+        let detail = detail_with(|pull_request| {
+            pull_request["latestReviews"] =
+                serde_json::json!({"nodes": [{"author": {"login": "maya"}}, {"author": null}]});
+            pull_request["reviewRequests"] = serde_json::json!({"nodes": [
+                {"requestedReviewer": {"login": "marcus"}},
+                {"requestedReviewer": {}},
+            ]});
+        });
+        assert_eq!(detail.reviewers, ["maya"]);
+        assert_eq!(detail.requested_reviewers, ["marcus"]);
+        assert!(
+            parse_detail(&key(), DETAIL)
+                .expect("parse")
+                .reviewers
+                .is_empty()
+        );
     }
 
     #[test]
