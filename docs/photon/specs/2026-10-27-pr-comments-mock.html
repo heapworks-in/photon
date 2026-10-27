@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>PR comments: upgrade mock</title>
+<style>
+  :root { --bg:#050505; --panel:#0d0d0d; --raised:#141414; --line:#222; --txt:#c0caf5; --dim:#565f89; --mid:#737aa2;
+    --kw:#bb9af7; --fn:#7aa2f7; --str:#9ece6a; --ty:#2ac3de; --num:#ff9e64; --add:#9ece6a; --del:#f7768e; --accent:#7dcfff; --warn:#e0af68; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:#161616; color:#dcdcdc; font:13px/1.45 -apple-system, "Helvetica Neue", sans-serif; padding:24px; }
+  h1 { font-size:18px; margin:0 0 4px; } .intro { color:#9a9a9a; margin:0 0 18px; max-width:100ch; }
+  .label { font-weight:600; color:#9a9a9a; margin:24px 0 10px; }
+  .win { background:var(--bg); color:var(--txt); border:1px solid #2a2a2a; border-radius:10px; overflow:hidden; display:flex; flex-direction:column; font-size:12.5px; }
+  .head { padding:9px 14px 8px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:10px; }
+  .title { font-weight:600; font-size:14px; } .meta { color:var(--dim); font-size:11.5px; }
+  .pill { font:11px "SF Mono", Menlo, monospace; padding:1px 7px; border-radius:4px; color:var(--add); background:color-mix(in srgb, var(--add) 14%, transparent); }
+  .btn { font:600 11.5px -apple-system, "Helvetica Neue", sans-serif; color:var(--txt); background:var(--raised); border:1px solid #2c2c2c; border-radius:6px; padding:3px 9px; }
+  .primary { color:#07111a; background:var(--accent); border-color:transparent; } .quiet { background:none; border-color:transparent; color:var(--mid); } .right { margin-left:auto; display:flex; gap:6px; }
+  .body { display:grid; grid-template-columns:300px 1fr; min-height:0; }
+  .side { border-right:1px solid var(--line); padding:6px 0; }
+  .side .h { display:flex; align-items:center; gap:8px; padding:6px 12px 4px; color:var(--dim); font-size:11px; }
+  .filters { display:flex; gap:4px; padding:4px 12px 8px; flex-wrap:wrap; }
+  .chip { font:11px -apple-system, "Helvetica Neue", sans-serif; padding:1px 8px; border-radius:10px; border:1px solid #2c2c2c; color:var(--mid); } .chip.on { color:var(--txt); background:var(--raised); border-color:#3a3a3a; }
+  .th { padding:6px 12px; border-left:2px solid transparent; }
+  .th.sel { background:#ffffff0d; border-left-color:var(--accent); }
+  .th .who { display:flex; gap:6px; align-items:center; font-size:11.5px; color:var(--dim); } .th .who b { color:var(--txt); font-weight:600; }
+  .th .txt { color:var(--txt); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:1px; }
+  .th .where { color:var(--dim); font:11px "SF Mono", Menlo, monospace; margin-top:1px; }
+  .tag { white-space:nowrap; font:10.5px -apple-system, "Helvetica Neue", sans-serif; padding:0 6px; border-radius:4px; background:#ffffff12; color:var(--mid); }
+  .tag.ai { color:var(--accent); background:color-mix(in srgb, var(--accent) 14%, transparent); } .tag.warn { color:var(--warn); background:color-mix(in srgb, var(--warn) 16%, transparent); } .tag.author { color:var(--num); background:color-mix(in srgb, var(--num) 16%, transparent); } .tag.ok { color:var(--add); background:color-mix(in srgb, var(--add) 14%, transparent); }
+  .diff { padding:8px 12px 12px; font:12px/1.6 "SF Mono", Menlo, monospace; }
+  .dl { display:flex; } .dl .n { width:30px; color:#3c3f55; flex:none; } .dl span.t { white-space:pre; }
+  .add { background:color-mix(in srgb, var(--add) 9%, transparent); box-shadow:inset 2px 0 0 var(--add); }
+  .k { color:var(--kw); } .f { color:var(--fn); } .s { color:var(--str); } .ty { color:var(--ty); } .nm { color:var(--num); }
+  .card { margin:6px 0 8px 30px; background:var(--raised); border:1px solid #2a2a2a; border-radius:8px; padding:8px 10px; font:12.5px/1.5 -apple-system, "Helvetica Neue", sans-serif; }
+  .card.ai { border-left:2px solid var(--accent); } .card.mine { border-left:2px solid var(--accent); }
+  .ch { display:flex; gap:6px; align-items:center; color:var(--dim); font-size:11px; margin-bottom:3px; } .ch b { color:var(--txt); font-weight:600; } .ch .sp { margin-left:auto; display:flex; gap:4px; }
+  .cb { color:var(--txt); } .cb code { color:var(--str); font:11.5px "SF Mono", Menlo, monospace; }
+  .cb blockquote { margin:4px 0 6px; padding:2px 10px; border-left:2px solid #3a3a3a; color:var(--mid); }
+  .reply { margin-top:8px; padding-top:8px; border-top:1px solid var(--line); }
+  .acts { display:flex; gap:6px; justify-content:flex-end; margin-top:8px; align-items:center; }
+  .box { background:#0a0a0a; border:1px solid var(--line); border-radius:6px; padding:6px 8px; color:var(--txt); min-height:34px; position:relative; }
+  .box .ph { color:var(--dim); }
+  .pop { position:absolute; left:12px; top:30px; background:var(--panel); border:1px solid #2c2c2c; border-radius:8px; box-shadow:0 12px 30px #000c; padding:4px; z-index:2; font-size:12px; min-width:220px; }
+  .pop div { padding:4px 8px; border-radius:5px; display:flex; gap:8px; } .pop div.on { background:#ffffff10; } .pop small { color:var(--dim); margin-left:auto; }
+  .toggle { display:inline-flex; border:1px solid var(--line); border-radius:6px; overflow:hidden; font-size:11px; margin-right:auto; } .toggle span { padding:2px 9px; color:var(--mid); } .toggle .on { background:var(--raised); color:var(--txt); }
+  .compact { margin:4px 0 4px 30px; display:flex; gap:8px; align-items:center; padding:4px 10px; background:var(--raised); border:1px solid #2a2a2a; border-radius:6px; font:12px -apple-system, "Helvetica Neue", sans-serif; color:var(--mid); }
+  .compact b { color:var(--txt); font-weight:600; } .compact .t { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--txt); }
+  .foot { border-top:1px solid var(--line); padding:6px 12px; color:var(--dim); font-size:11.5px; display:flex; gap:14px; }
+  kbd { font:10.5px "SF Mono", Menlo, monospace; border:1px solid #333; border-bottom-width:2px; border-radius:4px; padding:0 4px; color:var(--mid); }
+  .notes { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-top:22px; } .notes div { background:#111; border:1px solid #262626; border-radius:9px; padding:12px 14px; color:#9a9a9a; font-size:12.5px; } .notes b { color:#e4e4e4; display:block; margin-bottom:4px; }
+</style></head><body>
+<h1>PR comments, upgraded</h1>
+<p class="intro">Tokyo Night on Photon Black. Left: a Comments view that lists every thread with filters and keys to move between them. Right: the cards with the author chip, Done, quote-reply, @-completion and a draft you can preview. Below: compact mode for files with many comments.</p>
+
+<div class="label">Comments view and the upgraded cards</div>
+<div class="win">
+  <div class="head"><span class="title">Retry declined card charges with backoff</span><span class="meta">#214 · priya → main</span><span class="pill">Ready to merge</span><span class="right"><span class="btn">View ▾</span><span class="btn">Squash and Merge ▾</span><span class="btn primary">Submit review</span></span></div>
+  <div class="body">
+    <div class="side">
+      <div class="h"><span style="color:var(--txt);font-weight:600;font-size:12px">Comments</span><span>7 · 4 open</span><span style="margin-left:auto">Steps ›</span></div>
+      <div class="filters"><span class="chip on">Open</span><span class="chip">Resolved</span><span class="chip">Mine</span><span class="chip">AI</span><span class="chip">This file</span></div>
+      <div class="th sel"><div class="who"><b>devon</b><span>22d</span><span class="tag">2 replies</span></div><div class="txt">Jitter is added after the cap, so `max` isn't really the maximum.</div><div class="where">src/retry.rs:27</div></div>
+      <div class="th"><div class="who"><b>you</b><span class="tag ai">AI</span><span class="tag warn">should fix</span></div><div class="txt">With these defaults the four attempts can wait about 8 s…</div><div class="where">src/retry.rs:25</div></div>
+      <div class="th"><div class="who"><b>maya</b><span>21d</span><span class="tag ok">suggestion</span></div><div class="txt">If max should be a real ceiling, cap after adding the jitter:</div><div class="where">src/retry.rs:29</div></div>
+      <div class="th"><div class="who"><b>you</b><span class="tag">draft</span></div><div class="txt">Where does `is_retryable` come from?</div><div class="where">src/payments.rs:57</div></div>
+      <div class="h" style="margin-top:6px">Resolved · 3</div>
+      <div class="th" style="opacity:.6"><div class="who"><b>maya</b><span>21d</span></div><div class="txt">Can `saturating_pow` overflow before the multiply?</div><div class="where">src/retry.rs:26</div></div>
+    </div>
+    <div class="diff">
+      <div class="dl"><span class="n">26</span><span class="t">        <span class="k">let</span> exponential = self.initial.saturating_mul(<span class="nm">2u32</span>.saturating_pow(attempt));</span></div>
+      <div class="dl add"><span class="n">27</span><span class="t">        <span class="k">let</span> jitter = rand::rng().random_range(<span class="nm">0</span>..=capped.as_millis() / <span class="nm">4</span>);</span></div>
+      <div class="card">
+        <div class="ch"><b>devon</b><span>22 days ago</span><span class="sp"><span class="tag">2 replies</span></span></div>
+        <div class="cb">Jitter is added after the cap, so <code>max</code> isn't really the maximum: the last wait can reach 6.25 s. Cap after adding it?</div>
+        <div class="reply"><div class="ch"><b>priya</b><span class="tag author">author</span><span>22 days ago</span></div>
+          <div class="cb"><blockquote>the last wait can reach 6.25 s</blockquote>That's on purpose: the spread above the cap keeps the nightly job from retrying in lockstep. I'll say so in the doc comment.</div></div>
+        <div class="reply"><div class="ch"><b>you</b><span class="tag">draft</span></div>
+          <div class="box">Fine by me once it's documented. <span style="color:var(--accent)">@ma</span><span class="ph">|</span>
+            <div class="pop"><div class="on"><b>maya</b><small>reviewed</small></div><div><b>marcus</b><small>requested</small></div></div></div>
+          <div class="acts"><span class="toggle"><span class="on">Write</span><span>Preview</span></span><span class="btn quiet">Quote</span><span class="btn">Reply</span><span class="btn">Done</span></div></div>
+      </div>
+      <div class="dl add"><span class="n">28</span><span class="t">        capped + Duration::from_millis(jitter)</span></div>
+      <div class="dl"><span class="n">29</span><span class="t">    }</span></div>
+    </div>
+  </div>
+  <div class="foot"><span><kbd>n</kbd> next comment</span><span><kbd>p</kbd> previous</span><span><kbd>r</kbd> reply</span><span><kbd>⇧R</kbd> resolve</span><span style="margin-left:auto">Done = reply "Done" and resolve</span></div>
+</div>
+
+<div class="label">Compact mode · a file with many comments, one line each until you open one</div>
+<div class="win" style="max-width:860px">
+  <div class="diff">
+    <div class="dl add"><span class="n">25</span><span class="t">    <span class="k">pub fn</span> <span class="f">delay</span>(&amp;self, attempt: <span class="ty">u32</span>) → <span class="ty">Duration</span> {</span></div>
+    <div class="compact"><span class="tag ai">AI</span><span class="tag warn">should fix</span><b>you</b><span class="t">With these defaults the four attempts can wait about 8 s in total while charge_invoice holds the HTTP request…</span><span style="margin-left:auto">▸</span></div>
+    <div class="dl add"><span class="n">26</span><span class="t">        <span class="k">let</span> exponential = self.initial.saturating_mul(<span class="nm">2u32</span>.saturating_pow(attempt));</span></div>
+    <div class="compact" style="opacity:.6"><span class="tag ok">resolved</span><b>maya</b><span class="t">Can saturating_pow overflow before the multiply?</span><span style="margin-left:auto">▸</span></div>
+    <div class="dl add"><span class="n">27</span><span class="t">        <span class="k">let</span> jitter = rand::rng().random_range(<span class="nm">0</span>..=capped.as_millis() / <span class="nm">4</span>);</span></div>
+    <div class="compact"><b>devon</b><span class="tag">2 replies</span><span class="t">Jitter is added after the cap, so max isn't really the maximum: the last wait can reach 6.25 s.</span><span style="margin-left:auto">▸</span></div>
+    <div class="dl add"><span class="n">28</span><span class="t">        capped + Duration::from_millis(jitter)</span></div>
+  </div>
+  <div class="foot"><span>View ▾ › Comments: <b style="color:var(--txt)">Compact</b> · Comfortable</span><span style="margin-left:auto"><kbd>space</kbd> open the comment under the cursor</span></div>
+</div>
+
+<div class="notes">
+  <div><b>Comments view</b>All threads across the PR in one list: open first, then resolved. Filters are chips, not a menu. Click a thread to jump to it in the diff; <kbd>n</kbd>/<kbd>p</kbd> walk the open ones in order. "Steps ›" switches back.</div>
+  <div><b>Replies that cost one click</b><b>Done</b> replies "Done" and resolves. <b>Quote</b> inserts the selected text as a quote. Typing <code>@</code> offers the PR's participants. Write/Preview shows your Markdown rendered before you send.</div>
+  <div><b>Author chip, compact mode</b>Comments by the PR's author are marked. Compact mode (View menu) folds every comment to one line with its chips and first sentence; open one with a click or <kbd>space</kbd>, and the rest stay folded.</div>
+</div>
+</body></html>
