@@ -712,6 +712,9 @@ async fn place_review(
                     project, detail, login, checkout, files, database, window, cx,
                 );
                 item.set_team_checklists(team_checklists, team_error, cx);
+                if item.opens_on_conversation() {
+                    item.open_conversation(window, cx);
+                }
                 item
             });
             let pane = existing.as_ref().and_then(|existing| {
@@ -1600,6 +1603,17 @@ impl ReviewItem {
         this._context_task = this.load_context(cx);
         this._reanchor_task = this.reanchor_drafts(cx);
         this
+    }
+
+    /// A first look at a PR reads its description before the code: nothing viewed, no review
+    /// of yours, no drafts, and there is a description to read.
+    pub fn opens_on_conversation(&self) -> bool {
+        !self.detail.body.trim().is_empty()
+            && self.last_review.is_none()
+            && self.drafts.is_empty()
+            && self.viewed_steps.is_empty()
+            && self.viewed_heads.is_empty()
+            && !self.detail.files.iter().any(|file| file.viewed)
     }
 
     pub fn changes_since_review_offered(&self) -> bool {
@@ -4921,37 +4935,59 @@ impl ReviewItem {
     fn render_header(&self, cx: &Context<Self>) -> impl IntoElement {
         let summary = &self.detail.summary;
         let files = self.all_files().len();
+        let title = SharedString::from(summary.title.clone());
         h_flex()
-            .gap_2()
-            .px_2()
-            .py_1()
+            .items_start()
+            .gap_3()
+            .px_3()
+            .pt_2()
+            .pb_1p5()
             .border_b_1()
             .border_color(cx.theme().colors().border)
             .child(
-                h_flex()
+                v_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap_2()
-                    .child(div().min_w_0().child(
-                        Label::new(format!("#{} {}", summary.key.number, summary.title)).truncate(),
-                    ))
+                    .gap_1()
                     .child(
-                        div().flex_none().child(
-                            Label::new(format!("{} → {}", summary.author, summary.base_ref))
-                                .size(LabelSize::Small)
-                                .color(Color::Accent),
-                        ),
+                        div()
+                            .id("photon-review-title")
+                            .debug_selector(|| "photon-review-title".into())
+                            .min_w_0()
+                            .tooltip(Tooltip::text(title.clone()))
+                            .child(
+                                Label::new(title)
+                                    .size(LabelSize::Large)
+                                    .weight(gpui::FontWeight::SEMIBOLD)
+                                    .line_clamp(3),
+                            ),
                     )
                     .child(
-                        ui::DiffStat::new(
-                            "photon-review-diff-stat",
-                            usize::try_from(self.detail.additions).unwrap_or(usize::MAX),
-                            usize::try_from(self.detail.deletions).unwrap_or(usize::MAX),
-                        )
-                        .tooltip(format!(
-                            "{files} file{} changed",
-                            if files == 1 { "" } else { "s" }
-                        )),
+                        h_flex()
+                            .gap_2()
+                            .flex_wrap()
+                            .child(
+                                Label::new(format!("#{}", summary.key.number))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .child(
+                                Label::new(format!("{} → {}", summary.author, summary.base_ref))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .child(
+                                ui::DiffStat::new(
+                                    "photon-review-diff-stat",
+                                    usize::try_from(self.detail.additions).unwrap_or(usize::MAX),
+                                    usize::try_from(self.detail.deletions).unwrap_or(usize::MAX),
+                                )
+                                .tooltip(format!(
+                                    "{files} file{} changed",
+                                    if files == 1 { "" } else { "s" }
+                                )),
+                            )
+                            .child(self.render_readiness()),
                     ),
             )
             .child(
@@ -4960,7 +4996,6 @@ impl ReviewItem {
                     .gap_1()
                     .child(self.render_view_menu(cx))
                     .child(self.render_more_menu(cx))
-                    .child(self.render_readiness())
                     .children(self.render_merge(cx))
                     .child(self.render_submit_controls(cx)),
             )
@@ -6384,12 +6419,21 @@ impl ReviewItem {
                 .child(Label::new(author).size(LabelSize::Small))
                 .child(Label::new(time).size(LabelSize::XSmall).color(Color::Muted))
         };
-        let description = div()
+        let description = v_flex()
             .debug_selector(|| "photon-review-description".into())
-            .pb_2()
+            .gap_2()
+            .pb_4()
             .border_b_1()
             .border_color(colors.border_variant)
-            .child(byline(self.detail.summary.author.clone(), String::new()))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Label::new(self.detail.summary.author.clone())
+                            .weight(gpui::FontWeight::SEMIBOLD),
+                    )
+                    .child(Label::new("opened this pull request").color(Color::Muted)),
+            )
             .child(if self.detail.body.trim().is_empty() {
                 Label::new("No description provided.")
                     .size(LabelSize::Small)
@@ -6471,11 +6515,23 @@ impl ReviewItem {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .p_3()
-                    .gap_3()
-                    .child(description)
-                    .children(events)
-                    .children(status),
+                    .px_6()
+                    .py_4()
+                    .child(
+                        // A comfortable line length for prose, however wide the pane.
+                        v_flex()
+                            .w_full()
+                            .max_w(px(760.))
+                            .gap_3()
+                            .child(description)
+                            .child(
+                                Label::new("Activity")
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .children(events)
+                            .children(status),
+                    ),
             )
             .child(
                 v_flex()
@@ -7953,6 +8009,8 @@ fn verify_password(user: &str, password: &str) -> bool {
         window: gpui::WindowHandle<MultiWorkspace>,
         user_workspace: Entity<Workspace>,
         /// The head the inbox shows, when it lags behind GitHub.
+        /// What GitHub answers for the PR.
+        detail: String,
         inbox_head: Option<String>,
         cx: VisualTestContext,
     }
@@ -7996,13 +8054,14 @@ fn verify_password(user: &str, password: &str) -> bool {
             window,
             user_workspace,
             inbox_head: None,
+            detail: DETAIL.to_string(),
             cx,
         })
     }
 
     impl ReloadSetup {
         fn summary(&self) -> PrSummary {
-            let mut summary = parse_detail(&key(), DETAIL).expect("detail").summary;
+            let mut summary = parse_detail(&key(), &self.detail).expect("detail").summary;
             summary.head_sha = self
                 .inbox_head
                 .clone()
@@ -8028,7 +8087,7 @@ fn verify_password(user: &str, password: &str) -> bool {
                         .as_deref()
                         .is_some_and(|stdin| stdin.contains("pullRequest"))
                 },
-                Ok(DETAIL.into()),
+                Ok(self.detail.clone()),
             );
             let summary = self.summary();
             let fetch_url = self.fixture.upstream_url.clone();
@@ -8297,6 +8356,57 @@ fn verify_password(user: &str, password: &str) -> bool {
             .review()
             .read_with(&setup.cx, |item, _| item.checkout.head_sha.clone());
         assert_eq!(head, setup.fixture.pr_sha);
+    }
+
+    /// The fixture PR as it looks to someone who never reviewed it or viewed a file.
+    fn unseen_detail() -> String {
+        let detail = DETAIL
+            .replace("\"VIEWED\"", "\"UNVIEWED\"")
+            .replace(
+                "\"reviews\": {\n     \"nodes\": [\n      {\n       \"commit\": {\n        \"oid\": \"a1\"\n       }\n      }\n     ]\n    }",
+                "\"reviews\": {\n     \"nodes\": []\n    }",
+            );
+        let summary = parse_detail(&key(), &detail).expect("detail").summary;
+        assert_eq!(
+            summary.last_review_commit, None,
+            "the fixture changed shape"
+        );
+        detail
+    }
+
+    #[gpui::test]
+    async fn a_first_open_starts_on_the_description(cx: &mut TestAppContext) {
+        let Some(mut setup) = reload_setup("a_first_open_starts_on_the_description", cx).await
+        else {
+            return;
+        };
+        setup.detail = unseen_detail();
+        setup.open(None).await.expect("opened");
+        let review = setup.review();
+        assert!(review.read_with(&setup.cx, |item, _| item.conversation_open));
+        assert!(drawn("photon-review-description", &mut setup.cx));
+    }
+
+    #[gpui::test]
+    async fn a_later_open_keeps_its_usual_step(cx: &mut TestAppContext) {
+        let Some(mut setup) = reload_setup("a_later_open_keeps_its_usual_step", cx).await else {
+            return;
+        };
+        // GitHub has a review of yours and a viewed file.
+        setup.open_first_head().await;
+        let review = setup.review();
+        assert!(!review.read_with(&setup.cx, |item, _| item.conversation_open));
+        assert!(!drawn("photon-review-description", &mut setup.cx));
+        // The title has a line of its own, taller than the details row below it.
+        let title = setup
+            .cx
+            .debug_bounds("photon-review-title")
+            .expect("title drawn");
+        let stat = setup
+            .cx
+            .debug_bounds("photon-review-readiness")
+            .expect("readiness drawn");
+        assert!(title.bottom() <= stat.top(), "{title:?} {stat:?}");
     }
 
     fn worktree_trusted(project: &Entity<Project>, cx: &mut TestAppContext) -> bool {
