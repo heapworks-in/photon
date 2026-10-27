@@ -181,7 +181,7 @@
         <li><b>Told when it's done.</b> A long build that finishes in the background sends a notification; click it to land on the block.</li>
       </ul>
     </div>
-    <div class="trio">
+    <div class="rows">
       <figure class="win"><picture>
         <source type="image/webp" srcset="img/app/cu-terminal-tests-1x.webp 1x, img/app/cu-terminal-tests.webp 2x">
         <img src="img/app/cu-terminal-tests-1x.webp" loading="lazy" alt="A cargo test block summarised as 2 failed, 7 passed, with Re-run failed and Open errors actions.">
@@ -328,7 +328,7 @@
       <source type="image/webp" srcset="img/app/cu-call-map-1x.webp 1x, img/app/cu-call-map.webp 2x">
       <img src="img/app/cu-call-map-1x.webp" loading="lazy" alt="The call map: callers of charge drawn left to right with the selected trail from main lit up.">
     </picture><figcaption>The call map: the trail you selected is lit, the rest dimmed. Click a function to open it.</figcaption></figure>
-    <div class="trio trio-2">
+    <div class="rows">
       <figure class="win"><picture>
         <source type="image/webp" srcset="img/app/cu-call-tree-1x.webp 1x, img/app/cu-call-tree.webp 2x">
         <img src="img/app/cu-call-tree-1x.webp" loading="lazy" alt="The Call Trails panel: callers of charge as a tree with entry points and tests marked, and a call site expanded.">
@@ -384,6 +384,7 @@
 </section>
 
 </main>
+<div class="lightbox" id="lightbox" hidden><button type="button" class="lb-close" aria-label="Close">×</button><img alt=""></div>
 
 <footer class="foot">
   <div class="wrap">
@@ -437,6 +438,22 @@
     scenes.forEach((s) => { s.classList.remove("is-active"); });
     play(current);
   }
+  // Click a screenshot to see it at full size.
+  const lightbox = document.getElementById("lightbox");
+  const lightboxImage = lightbox.querySelector("img");
+  const closeLightbox = () => { lightbox.hidden = true; lightboxImage.src = ""; };
+  for (const figure of document.querySelectorAll(".win picture")) {
+    figure.style.cursor = "zoom-in";
+    figure.addEventListener("click", () => {
+      const source = figure.querySelector("source");
+      const best = (source?.srcset || "").split(",").map((s) => s.trim().split(" ")[0]).pop() || figure.querySelector("img").src;
+      lightboxImage.src = best;
+      lightboxImage.alt = figure.querySelector("img").alt;
+      lightbox.hidden = false;
+    });
+  }
+  lightbox.addEventListener("click", closeLightbox);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeLightbox(); });
   for (const tabs of document.querySelectorAll("[data-tabs]")) {
     const buttons = [...tabs.querySelectorAll("[role=tab]")];
     const panels = [...tabs.querySelectorAll("[role=tabpanel]")];
