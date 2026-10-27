@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Call Trails mock</title>
+<style>
+  :root { --bg:#050505; --panel:#0c0c0c; --raised:#141414; --line:#232323; --text:#ededed; --muted:#9a9a9a; --dim:#6a6a6a;
+    --accent:#19aad8; --green:#b4fa72; --red:#ff8272; --yellow:#fefdc2; --blue:#a5d5fe; --magenta:#ff8ffd; --lav:#d0d1fe; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#1a1a1a; color:var(--text); font:13px/1.45 -apple-system, "IBM Plex Sans", sans-serif; padding:28px; }
+  h1 { font:600 20px -apple-system; margin:0 0 4px; } .intro { color:var(--muted); margin:0 0 24px; max-width:90ch; }
+  .label { font-weight:600; color:var(--muted); margin:28px 0 10px; font-size:13px; }
+  .win { display:flex; border:1px solid #2a2a2a; border-radius:10px; overflow:hidden; background:var(--bg); height:640px; box-shadow:0 20px 60px #000a; }
+  .editor { flex:1; font:12.5px/1.65 "SF Mono", Menlo, monospace; padding:10px 0; color:#d6d6d6; overflow:hidden; }
+  .editor .l { display:flex; } .editor .n { width:46px; text-align:right; padding-right:14px; color:#555; } .hl { background:#19aad814; }
+  .k { color:var(--magenta); } .f { color:var(--blue); } .t { color:var(--yellow); } .s { color:var(--green); } .c { color:#6a6a6a; font-style:italic; }
+  .panel { width:430px; border-left:1px solid var(--line); background:var(--panel); display:flex; flex-direction:column; }
+  .ph { padding:12px 14px 10px; border-bottom:1px solid var(--line); }
+  .root { display:flex; align-items:center; gap:8px; }
+  .glyph { width:18px; height:18px; border-radius:5px; display:grid; place-items:center; font:700 10px "SF Mono",monospace; flex:none; }
+  .g-fn { background:#a5d5fe1f; color:var(--blue); } .g-test { background:#b4fa721f; color:var(--green); } .g-entry { background:#fefdc21f; color:var(--yellow); }
+  .rname { font:600 14px "SF Mono",Menlo,monospace; }
+  .sig { color:var(--dim); font:11.5px "SF Mono",Menlo,monospace; margin:4px 0 0 26px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .bar { display:flex; align-items:center; gap:8px; margin-top:10px; }
+  .seg { display:inline-flex; border:1px solid var(--line); border-radius:7px; overflow:hidden; }
+  .seg span { padding:3px 10px; color:var(--muted); font-size:12px; } .seg .on { background:var(--raised); color:var(--text); }
+  .summary { color:var(--dim); font-size:12px; margin-left:auto; }
+  .icon-btn { width:24px; height:24px; border-radius:6px; display:grid; place-items:center; color:var(--muted); border:1px solid transparent; }
+  .icon-btn.on { border-color:var(--line); background:var(--raised); color:var(--text); }
+  .crumbs { display:flex; flex-wrap:wrap; align-items:center; gap:4px; padding:8px 14px; border-bottom:1px solid var(--line); font:11.5px "SF Mono",Menlo,monospace; color:var(--muted); background:#0a0a0a; }
+  .crumbs b { color:var(--text); font-weight:600; } .crumbs i { color:var(--dim); font-style:normal; }
+  .tree { padding:6px 0; overflow:auto; flex:1; }
+  .row { position:relative; display:flex; align-items:center; gap:7px; height:26px; padding-right:12px; }
+  .row:hover { background:#ffffff08; } .row.sel { background:#19aad81c; box-shadow:inset 2px 0 0 var(--accent); }
+  .guide { position:absolute; top:0; bottom:0; width:1px; background:#262626; }
+  .chev { width:12px; color:var(--dim); font-size:10px; text-align:center; flex:none; }
+  .name { font:12.5px "SF Mono",Menlo,monospace; white-space:nowrap; }
+  .file { color:var(--dim); font-size:11.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .chip { font-size:10.5px; padding:0 6px; border-radius:4px; line-height:16px; white-space:nowrap; }
+  .c-entry { color:var(--yellow); background:#fefdc214; } .c-test { color:var(--green); background:#b4fa7214; } .c-rec { color:var(--lav); background:#d0d1fe14; } .c-pr { color:var(--red); background:#ff827214; }
+  .count { margin-left:auto; color:var(--dim); font-size:11px; }
+  .site { margin:2px 12px 6px 0; border:1px solid var(--line); border-radius:6px; background:#090909; font:11.5px/1.6 "SF Mono",Menlo,monospace; overflow:hidden; }
+  .site .l { display:flex; padding-right:8px; white-space:pre; } .site .n { width:34px; text-align:right; padding-right:8px; color:#4c4c4c; flex:none; }
+  .site .call { background:#19aad81a; } .site .call .n { color:var(--accent); }
+  .site-h { display:flex; justify-content:space-between; padding:3px 8px; color:var(--dim); font:11px -apple-system; border-bottom:1px solid #1a1a1a; }
+  .foot { border-top:1px solid var(--line); padding:7px 14px; color:var(--dim); font-size:11.5px; display:flex; gap:14px; }
+  kbd { font:10.5px "SF Mono",monospace; border:1px solid #333; border-bottom-width:2px; border-radius:4px; padding:0 4px; color:var(--muted); }
+  /* Graph view */
+  .graph { flex:1; position:relative; overflow:hidden; background:radial-gradient(circle at 1px 1px, #1c1c1c 1px, transparent 0) 0 0/18px 18px; }
+  .node { position:absolute; display:flex; align-items:center; gap:6px; padding:5px 9px; border:1px solid #2c2c2c; border-radius:8px; background:var(--raised); font:12px "SF Mono",Menlo,monospace; white-space:nowrap; }
+  .node small { color:var(--dim); font:10.5px -apple-system; }
+  .node.root-n { border-color:var(--accent); box-shadow:0 0 0 3px #19aad822; }
+  .node.trail { border-color:#19aad888; }
+  .node.dim { opacity:.55; }
+  svg.edges { position:absolute; inset:0; width:100%; height:100%; }
+  .notes { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-top:22px; }
+  .notes div { background:#111; border:1px solid #262626; border-radius:9px; padding:12px 14px; color:var(--muted); font-size:12.5px; }
+  .notes b { color:var(--text); display:block; margin-bottom:4px; }
+</style>
+</head>
+<body>
+<h1>Call Trails, redesigned</h1>
+<p class="intro">One panel, two views of the same trail: a <b>list</b> that shows <i>how</i> each function is called (the call-site lines), and a <b>map</b> that shows the shape at a glance. Selecting anything shows the trail back to the root as a breadcrumb. All data comes from the language server, live and local; no AI needed. An optional "Explain this trail" can ask your own agent, Devin-style.</p>
+
+<div class="label">List view (default) · Callers of charge, two levels open, one call site expanded</div>
+<div class="win">
+  <div class="editor">
+    <div class="l"><span class="n">48</span><span class="c">/// Charges the invoice's card. The idempotency key stays the same on every attempt.</span></div>
+    <div class="l hl"><span class="n">50</span><span><span class="k">pub async fn</span> <span class="f">charge</span>(&amp;<span class="k">self</span>, invoice: &amp;<span class="t">Invoice</span>) -&gt; <span class="t">Result</span>&lt;<span class="t">Receipt</span>, <span class="t">ChargeError</span>&gt; {</span></div>
+    <div class="l"><span class="n">51</span><span>    <span class="k">let</span> request = <span class="t">ChargeRequest</span> {</span></div>
+    <div class="l"><span class="n">52</span><span>        amount_cents: invoice.<span class="f">total_cents</span>(),</span></div>
+    <div class="l"><span class="n">53</span><span>        idempotency_key: <span class="f">format!</span>(<span class="s">"invoice-{}"</span>, invoice.id),</span></div>
+    <div class="l"><span class="n">54</span><span>    };</span></div>
+    <div class="l"><span class="n">55</span><span>    <span class="f">retry_with_backoff</span>(<span class="k">self</span>.backoff, is_retryable, |attempt| {</span></div>
+    <div class="l"><span class="n">56</span><span>        <span class="k">self</span>.<span class="f">send_charge</span>(&amp;request)</span></div>
+    <div class="l"><span class="n">57</span><span>    }).<span class="k">await</span></span></div>
+    <div class="l"><span class="n">58</span><span>}</span></div>
+  </div>
+  <div class="panel">
+    <div class="ph">
+      <div class="root"><span class="glyph g-fn">ƒ</span><span class="rname">Gateway::charge</span><span class="chip c-pr">changed in PR #214</span></div>
+      <div class="sig">async fn charge(&amp;self, invoice: &amp;Invoice) -&gt; Result&lt;Receipt, ChargeError&gt;</div>
+      <div class="bar">
+        <span class="seg"><span class="on">← Callers</span><span>Calls →</span></span>
+        <span class="icon-btn on" title="List">≣</span><span class="icon-btn" title="Map">⌗</span>
+        <span class="summary">4 callers · 2 entry points · 1 test</span>
+      </div>
+    </div>
+    <div class="crumbs"><i>trail</i> main <i>›</i> run_nightly <i>›</i> retry_failed_invoices <i>›</i> <b>charge</b></div>
+    <div class="tree">
+      <div class="row" style="padding-left:12px"><span class="chev">▾</span><span class="glyph g-fn">ƒ</span><span class="name">charge_invoice</span><span class="file">api.rs</span><span class="chip c-entry">HTTP handler</span><span class="count">×1</span></div>
+      <div style="padding-left:48px">
+        <div class="site"><div class="site-h"><span>src/api.rs:61</span><span>open ↵</span></div>
+          <div class="l"><span class="n">60</span>    let invoice = store.invoice(id).await?;</div>
+          <div class="l call"><span class="n">61</span>    let receipt = gateway.charge(&amp;invoice).await?;</div>
+          <div class="l"><span class="n">62</span>    ledger.record(&amp;receipt).await?;</div>
+        </div>
+      </div>
+      <div class="row sel" style="padding-left:12px"><span class="chev">▾</span><span class="glyph g-fn">ƒ</span><span class="name">retry_failed_invoices</span><span class="file">jobs.rs</span><span class="count">×2</span></div>
+      <div class="row" style="padding-left:30px"><span class="guide" style="left:18px"></span><span class="chev">▾</span><span class="glyph g-fn">ƒ</span><span class="name">run_nightly</span><span class="file">jobs.rs</span><span class="count">×1</span></div>
+      <div class="row" style="padding-left:48px"><span class="guide" style="left:18px"></span><span class="guide" style="left:36px"></span><span class="chev"></span><span class="glyph g-entry">▶</span><span class="name">main</span><span class="file">main.rs</span><span class="chip c-entry">entry point</span></div>
+      <div class="row" style="padding-left:12px"><span class="chev">▸</span><span class="glyph g-test">✓</span><span class="name">retries_gateway_timeouts</span><span class="file">payments.rs</span><span class="chip c-test">test</span><span class="count">×1</span></div>
+      <div class="row" style="padding-left:12px"><span class="chev">▸</span><span class="glyph g-fn">ƒ</span><span class="name">charge_with_fallback</span><span class="file">payments.rs</span><span class="chip c-rec">↺ recursive</span><span class="count">×1</span></div>
+    </div>
+    <div class="foot"><span><kbd>↵</kbd> open</span><span><kbd>space</kbd> show call site</span><span><kbd>⌥←</kbd> make root</span><span style="margin-left:auto">Explain this trail…</span></div>
+  </div>
+</div>
+
+<div class="label">Map view · the same trail as a diagram; the selected path is lit, everything else dims</div>
+<div class="win" style="height:420px">
+  <div class="panel" style="width:100%; border-left:0">
+    <div class="ph">
+      <div class="root"><span class="glyph g-fn">ƒ</span><span class="rname">Gateway::charge</span>
+        <span style="margin-left:auto" class="seg"><span class="on">← Callers</span><span>Calls →</span></span>
+        <span class="icon-btn" title="List">≣</span><span class="icon-btn on" title="Map">⌗</span></div>
+    </div>
+    <div class="graph">
+      <svg class="edges" viewBox="0 0 1000 330" preserveAspectRatio="none">
+        <g fill="none" stroke="#2f2f2f" stroke-width="1.5">
+          <path d="M 520 52 C 600 52, 610 165, 660 165"/>
+          <path d="M 520 250 C 600 250, 610 165, 660 165"/>
+          <path d="M 520 298 C 600 298, 610 165, 660 165"/>
+        </g>
+        <g fill="none" stroke="#19aad8" stroke-width="2">
+          <path d="M 145 165 L 225 165"/>
+          <path d="M 345 165 L 395 165"/>
+          <path d="M 570 165 L 660 165"/>
+        </g>
+      </svg>
+      <div class="node trail" style="left:3%; top:45%"><span class="glyph g-entry">▶</span>main <small>main.rs</small></div>
+      <div class="node trail" style="left:22.5%; top:45%"><span class="glyph g-fn">ƒ</span>run_nightly <small>jobs.rs</small></div>
+      <div class="node trail" style="left:39.5%; top:45%"><span class="glyph g-fn">ƒ</span>retry_failed_invoices <small>×2</small></div>
+      <div class="node dim" style="left:39.5%; top:9%"><span class="glyph g-entry">▶</span>charge_invoice <small>HTTP handler</small></div>
+      <div class="node dim" style="left:39.5%; top:70%"><span class="glyph g-test">✓</span>retries_gateway_timeouts <small>test</small></div>
+      <div class="node dim" style="left:39.5%; top:85%"><span class="glyph g-fn">ƒ</span>charge_with_fallback <small>↺</small></div>
+      <div class="node root-n" style="left:66%; top:45%"><span class="glyph g-fn">ƒ</span>Gateway::charge <small>payments.rs:50</small></div>
+    </div>
+  </div>
+</div>
+
+<div class="notes">
+  <div><b>Why each part is there</b>The header says what you're looking at and how big it is. The call-site lines answer "how is it called?" without leaving the panel. The breadcrumb answers "how did I get here?".</div>
+  <div><b>Signals, not noise</b>Entry points (main, handlers), tests and recursion are marked; "×2" counts call sites. No "No callers" rows: a leaf is just a leaf. In a PR review, functions the PR changed are flagged.</div>
+  <div><b>Stays lean and Zed-like</b>Built from Zed's list, indent guides, chips and colours; everything loads lazily from the language server as you expand. The map is drawn by Photon (no web view). "Explain this trail" is optional and uses your own agent.</div>
+</div>
+</body>
+</html>
