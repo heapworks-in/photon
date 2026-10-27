@@ -181,19 +181,36 @@
         <li><b>Told when it's done.</b> A long build that finishes in the background sends a notification; click it to land on the block.</li>
       </ul>
     </div>
-    <div class="rows">
-      <figure class="win"><picture>
-        <source type="image/webp" srcset="img/app/cu-terminal-tests-1x.webp 1x, img/app/cu-terminal-tests.webp 2x">
-        <img src="img/app/cu-terminal-tests-1x.webp" loading="lazy" alt="A cargo test block summarised as 2 failed, 7 passed, with Re-run failed and Open errors actions.">
-      </picture><figcaption><b>Test runs you can act on.</b> <code>cargo test</code>, <code>pytest</code>, <code>jest</code> and friends are summarised. Rerun only the failures; <kbd>F8</kbd> jumps to each error.</figcaption></figure>
-      <figure class="win"><picture>
-        <source type="image/webp" srcset="img/app/cu-terminal-table-1x.webp 1x, img/app/cu-terminal-table.webp 2x">
-        <img src="img/app/cu-terminal-table-1x.webp" loading="lazy" alt="kubectl get pods output opened as a table above its block.">
-      </picture><figcaption><b>Output as a table.</b> JSON, <code>kubectl get</code> and <code>docker ps</code> output open as a table, or copy as CSV.</figcaption></figure>
-      <figure class="win"><picture>
-        <source type="image/webp" srcset="img/app/cu-terminal-git-1x.webp 1x, img/app/cu-terminal-git.webp 2x">
-        <img src="img/app/cu-terminal-git-1x.webp" loading="lazy" alt="git status output with stage, diff and discard actions beside each file.">
-      </picture><figcaption><b>git status, in place.</b> Stage, diff or discard each file right where <code>git status</code> listed it.</figcaption></figure>
+    <div class="details">
+      <div class="detail">
+        <div class="dblock">
+          <div class="bh"><span class="path">~/code/billing</span><span class="branch">retry-card-charges</span><span class="chip-fail">2 failed · 7 passed</span><span class="acts"><button type="button" tabindex="-1">Re-run failed</button><button type="button" tabindex="-1">Open errors</button></span></div>
+          <div class="cmd">cargo test</div>
+          <div class="out"><span class="l">test retry::tests::delays_double_up_to_the_cap ... <span class="g">ok</span></span><span class="l">test retry::tests::delay_never_passes_max ... <span class="r">FAILED</span></span></div>
+        </div>
+        <h3>Test runs you can act on</h3>
+        <p><code>cargo test</code>, <code>pytest</code>, <code>jest</code> and friends are summarised. Rerun only the failures; <kbd>F8</kbd> jumps to each error.</p>
+      </div>
+      <div class="detail">
+        <div class="dblock">
+          <div class="bh"><span class="path">~/code/billing</span><span class="branch">main</span><span class="chip-ok">table</span><span class="acts"><button type="button" tabindex="-1">Copy as CSV</button></span></div>
+          <div class="cmd">kubectl get pods</div>
+          <table class="mini"><tr><th>name</th><th>ready</th><th>status</th><th>age</th></tr><tr><td>billing-api-7c9</td><td>1/1</td><td>Running</td><td>3d</td></tr><tr><td>billing-worker-f2</td><td>0/1</td><td class="r">CrashLoopBackOff</td><td>12m</td></tr><tr><td>postgres-0</td><td>1/1</td><td>Running</td><td>21d</td></tr></table>
+        </div>
+        <h3>Output as a table</h3>
+        <p>JSON, <code>kubectl get</code> and <code>docker ps</code> output open as a table, sortable, or copy as CSV.</p>
+      </div>
+      <div class="detail">
+        <div class="dblock">
+          <div class="bh"><span class="path">~/code/billing</span><span class="branch">retry-card-charges</span></div>
+          <div class="cmd">git status</div>
+          <div class="gitrow"><span class="m">M</span>src/payments.rs<span class="acts"><button type="button" tabindex="-1">Stage</button><button type="button" tabindex="-1">Diff</button><button type="button" tabindex="-1">Discard</button></span></div>
+          <div class="gitrow"><span class="a">A</span>src/retry.rs<span class="acts"><button type="button" tabindex="-1">Stage</button><button type="button" tabindex="-1">Diff</button></span></div>
+          <div class="gitrow"><span class="u">?</span>docs/plans/retry.md<span class="acts"><button type="button" tabindex="-1">Stage</button></span></div>
+        </div>
+        <h3>git status, in place</h3>
+        <p>Stage, diff or discard each file right where <code>git status</code> listed it.</p>
+      </div>
     </div>
   </div>
 </section>
@@ -328,16 +345,11 @@
       <source type="image/webp" srcset="img/app/cu-call-map-1x.webp 1x, img/app/cu-call-map.webp 2x">
       <img src="img/app/cu-call-map-1x.webp" loading="lazy" alt="The call map: callers of charge drawn left to right with the selected trail from main lit up.">
     </picture><figcaption>The call map: the trail you selected is lit, the rest dimmed. Click a function to open it.</figcaption></figure>
-    <div class="rows">
-      <figure class="win"><picture>
-        <source type="image/webp" srcset="img/app/cu-call-tree-1x.webp 1x, img/app/cu-call-tree.webp 2x">
-        <img src="img/app/cu-call-tree-1x.webp" loading="lazy" alt="The Call Trails panel: callers of charge as a tree with entry points and tests marked, and a call site expanded.">
-      </picture><figcaption><b>Call Trails.</b> Callers and calls as a tree with the trail back to your function, entry points and tests marked, and the actual calling lines one keystroke away.</figcaption></figure>
-      <figure class="win"><picture>
-        <source type="image/webp" srcset="img/app/cu-ls-help-1x.webp 1x, img/app/cu-ls-help.webp 2x">
-        <img src="img/app/cu-ls-help-1x.webp" loading="lazy" alt="Language server help explaining that jdtls needs Java 21, with the install command.">
-      </picture><figcaption><b>Language server help.</b> When a server can't start, the status bar says why, with the command that fixes it, Restart and Show Log. Without a server, <kbd>⌘</kbd>-click still finds the definition.</figcaption></figure>
-    </div>
+    <ul class="points points-row">
+      <li><b>Call Trails.</b> The same callers and calls as a tree: the trail back to your function, entry points and tests marked, and the calling lines one keystroke away. <button type="button" class="see" data-see="img/app/cu-call-tree.webp" data-alt="The Call Trails panel: callers of charge as a tree with entry points and tests marked, and a call site expanded.">See it</button></li>
+      <li><b>Language server help.</b> When a server can't start, the status bar says why, with the command that fixes it, Restart and Show Log. <button type="button" class="see" data-see="img/app/cu-ls-help.webp" data-alt="Language server help explaining that jdtls needs Java 21, with the install command.">See it</button></li>
+      <li><b>Navigation without a server.</b> <kbd>⌘</kbd>-click still finds the definition when no language server runs, by searching the project.</li>
+    </ul>
   </div>
 </section>
 
@@ -451,6 +463,9 @@
       lightboxImage.alt = figure.querySelector("img").alt;
       lightbox.hidden = false;
     });
+  }
+  for (const button of document.querySelectorAll("[data-see]")) {
+    button.addEventListener("click", () => { lightboxImage.src = button.dataset.see; lightboxImage.alt = button.dataset.alt || ""; lightbox.hidden = false; });
   }
   lightbox.addEventListener("click", closeLightbox);
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeLightbox(); });
