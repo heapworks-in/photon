@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result, bail};
 use gpui::{
     AnyWindowHandle, App, AppContext as _, AsyncWindowContext, Context, Entity, Global, Task,
     Window,
@@ -12,7 +12,7 @@ use settings::{ProjectSettingsContent, RegisterSetting, RootUserSettings as _, S
 use terminal::{Event as TerminalEvent, Terminal};
 use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
 use util::ResultExt as _;
-use workspace::{AppState, Toast, Workspace, notifications::NotificationId};
+use workspace::{AppState, MultiWorkspace, Toast, Workspace, notifications::NotificationId};
 
 use crate::{
     AutoCheck, Checkout, FetchedCheckout, InboxSection, LocalRun, PrKey, PrSummary, ReviewDb,
@@ -141,52 +141,59 @@ pub(crate) async fn finish_local_checkout(
     Ok(checkout)
 }
 
-/// Moving an open window's worktree to new code would leave its language servers running on
+/// Moving an open project's worktree to new code would leave its language servers running on
 /// code nobody trusted. An unreadable `HEAD` counts as a change.
-pub(crate) fn must_refuse_checkout(
-    window_open: bool,
+pub(crate) fn head_moves_under_open_tab(
+    tab_open: bool,
     worktree_head: Option<&str>,
     pr_head: &str,
 ) -> bool {
-    window_open && worktree_head != Some(pr_head)
+    tab_open && worktree_head != Some(pr_head)
 }
 
-struct NewCommitsToast;
+pub(crate) fn keep_changes_message(key: &PrKey) -> String {
+    format!(
+        "Save or discard your changes in PR #{} to load its new commits",
+        key.number
+    )
+}
 
 /// Run between `fetch_checkout` and `finish_checkout`, with the fetched head: the inbox's head
-/// may be stale. Returns true, having activated the window and told the user, when a window
-/// shows the PR's worktree and the checkout would move its head.
-pub(crate) async fn refuse_head_change_under_open_window(
+/// may be stale. When a project tab shows the PR's worktree and the checkout would move its
+/// head, closes that tab the way the user would: unsaved changes prompt, and its terminals
+/// (Run locally ones included) stop with it. The new head then opens in a fresh project. Fails
+/// with `keep_changes_message` when the user keeps the tab.
+pub(crate) async fn close_tab_before_head_moves(
     key: &PrKey,
+    root: &Path,
     fetched_head: &str,
     app_state: &AppState,
     cx: &mut AsyncWindowContext,
-) -> Result<bool> {
-    let worktree = worktree_path(&review_root(), key);
+) -> Result<()> {
+    let worktree = worktree_path(root, key);
     let open = cx.update(|_, cx| find_workspace_with_worktree(app_state, &worktree, cx))?;
     let Some((window, workspace)) = open else {
-        return Ok(false);
+        return Ok(());
     };
     let worktree_head = cx
         .background_spawn(async move { git(&worktree, &["rev-parse", "HEAD"]).await.log_err() })
         .await;
-    if !must_refuse_checkout(true, worktree_head.as_deref(), fetched_head) {
-        return Ok(false);
+    if !head_moves_under_open_tab(true, worktree_head.as_deref(), fetched_head) {
+        return Ok(());
     }
-    let message = format!(
-        "Close the window for PR #{} to load its new commits",
-        key.number
-    );
-    window.update(cx, |_, window, cx| {
-        window.activate_window();
-        workspace.update(cx, |workspace, cx| {
-            workspace.show_toast(
-                Toast::new(NotificationId::unique::<NewCommitsToast>(), message),
-                cx,
-            )
-        })
-    })?;
-    Ok(true)
+    let removing = window.update(cx, |_, window, cx| {
+        let multi_workspace = window
+            .root::<MultiWorkspace>()
+            .flatten()
+            .context("The PR's window has no project tabs")?;
+        anyhow::Ok(multi_workspace.update(cx, |multi_workspace, cx| {
+            photon_tabs::remove_tab(multi_workspace, workspace, window, cx)
+        }))
+    })??;
+    if !removing.await? {
+        bail!(keep_changes_message(key));
+    }
+    Ok(())
 }
 
 /// A workspace that already shows `worktree`, so a second click reuses its window.
@@ -260,10 +267,14 @@ async fn open_terminal(
             async move { fetch_local_checkout(&summary, url, review_root(), candidates).await }
         })
         .await?;
-    if refuse_head_change_under_open_window(&summary.key, &fetched.head_sha, &app_state, cx).await?
-    {
-        return Ok(());
-    }
+    close_tab_before_head_moves(
+        &summary.key,
+        &review_root(),
+        &fetched.head_sha,
+        &app_state,
+        cx,
+    )
+    .await?;
     let key = summary.key.clone();
     let checkout = cx
         .background_spawn({
@@ -416,23 +427,23 @@ mod tests {
     }
 
     #[test]
-    fn head_change_is_refused_only_under_an_open_window() {
-        assert!(must_refuse_checkout(true, Some("old"), "new"));
-        assert!(must_refuse_checkout(true, None, "new"));
-        assert!(!must_refuse_checkout(true, Some("new"), "new"));
-        assert!(!must_refuse_checkout(false, Some("old"), "new"));
-        assert!(!must_refuse_checkout(false, None, "new"));
+    fn head_moves_only_under_an_open_tab() {
+        assert!(head_moves_under_open_tab(true, Some("old"), "new"));
+        assert!(head_moves_under_open_tab(true, None, "new"));
+        assert!(!head_moves_under_open_tab(true, Some("new"), "new"));
+        assert!(!head_moves_under_open_tab(false, Some("old"), "new"));
+        assert!(!head_moves_under_open_tab(false, None, "new"));
     }
 
     #[test]
     fn stale_summary_head_is_caught_by_the_fetched_head() {
         let (summary_head, worktree_head, fetched_head) = ("old", "old", "new");
-        assert!(!must_refuse_checkout(
+        assert!(!head_moves_under_open_tab(
             true,
             Some(worktree_head),
             summary_head
         ));
-        assert!(must_refuse_checkout(
+        assert!(head_moves_under_open_tab(
             true,
             Some(worktree_head),
             fetched_head

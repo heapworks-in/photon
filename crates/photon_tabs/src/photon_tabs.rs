@@ -291,7 +291,7 @@ pub fn close_tab(
 
 /// Removes a tab from a window holding at least two. Resolves to whether it
 /// was removed (the user can cancel the save prompt).
-fn remove_tab(
+pub fn remove_tab(
     multi_workspace: &mut MultiWorkspace,
     workspace: Entity<Workspace>,
     window: &mut Window,

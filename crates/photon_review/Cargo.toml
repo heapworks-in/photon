@@ -40,6 +40,7 @@ sha2.workspace = true
 settings.workspace = true
 task.workspace = true
 photon_blocks.workspace = true
+photon_tabs.workspace = true
 terminal.workspace = true
 terminal_view.workspace = true
 ui.workspace = true

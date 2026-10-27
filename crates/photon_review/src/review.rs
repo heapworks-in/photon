@@ -56,12 +56,12 @@ use crate::{
     RepoId, ReviewDb, ReviewEvent, ReviewThread, SUMMARY_SLOT, Side, SinceReviewPlan, Step,
     ToggleChangesSinceReview, Tracked, analyse_loaded_file, auth_status_request, base_text,
     build_loaded_file, build_review_map, call_edges, caller_touched, candidate_repos,
-    classify_caller, classify_path, commentable_lines, context::buffer_path, context_excerpts,
-    deleted_lines, detail_request, fetch_checkout, fetch_url, find_clone, finish_checkout,
-    functions, gh_runner, git_diff, is_sendable, landing_note, merge_error_message, merge_request,
-    parse_auth_status, parse_detail, parse_mutation, parse_reply, place, plan_since_review,
-    reanchor, refuse_head_change_under_open_window, reply_request, reply_slot, resolve_request,
-    review_request, review_root, since_review_files, viewed_request,
+    classify_caller, classify_path, close_tab_before_head_moves, commentable_lines,
+    context::buffer_path, context_excerpts, deleted_lines, detail_request, fetch_checkout,
+    fetch_url, find_clone, finish_checkout, functions, gh_runner, git_diff, is_sendable,
+    landing_note, merge_error_message, merge_request, parse_auth_status, parse_detail,
+    parse_mutation, parse_reply, place, plan_since_review, reanchor, reply_request, reply_slot,
+    resolve_request, review_request, review_root, since_review_files, viewed_request,
 };
 use crate::{CheckOutcome, MergeMethod, PrState, Readiness, remove_from_inbox};
 use crate::{Move, ViewFile, is_generated, open_feedback, push_command, simplified_bases};
@@ -325,6 +325,7 @@ pub struct ReviewItem {
     submit_error: Option<SharedString>,
     merging: bool,
     merge_error: Option<SharedString>,
+    new_commits: Option<NewCommits>,
     conversation_open: bool,
     conversation: Option<Conversation>,
     thread_errors: HashMap<String, SharedString>,
@@ -383,6 +384,16 @@ pub struct ReviewItem {
     _lsp_handles: Vec<OpenLspBufferHandle>,
     _subscriptions: Vec<Subscription>,
     _context_task: Task<()>,
+}
+
+/// Loading the author's new commits into an open review, and what came of the last try.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NewCommits {
+    Loading,
+    Failed {
+        message: SharedString,
+        summary: PrSummary,
+    },
 }
 
 pub(crate) struct PreparedReview {
@@ -533,33 +544,110 @@ async fn open_review_tab(
     database: ReviewDb,
     cx: &mut AsyncWindowContext,
 ) -> Result<()> {
+    // Not read up front: the caller is usually mid-update on a workspace this would read.
+    let candidates = cx.update(|_, cx| candidate_repos(cx))?;
+    let source = CheckoutSource {
+        fetch_url: fetch_url(&repo_id(&summary)),
+        root: review_root(),
+        candidates,
+    };
+    open_review_from(summary, source, app_state, runner, database, cx).await
+}
+
+/// Where a review's checkout comes from. Tests point it at a local repository.
+pub(crate) struct CheckoutSource {
+    pub fetch_url: String,
+    pub root: PathBuf,
+    pub candidates: Task<Vec<PathBuf>>,
+}
+
+pub(crate) async fn open_review_from(
+    summary: PrSummary,
+    source: CheckoutSource,
+    app_state: Arc<AppState>,
+    runner: Arc<dyn GhRunner>,
+    database: ReviewDb,
+    cx: &mut AsyncWindowContext,
+) -> Result<()> {
     let open = cx.update(|_, cx| find_open_review(&app_state, &summary.key, cx))?;
-    if let Some((window, workspace, item)) = open
-        && item.read_with(cx, |item, _| item.checkout.head_sha == summary.head_sha)
-    {
+    let mut open_item = None;
+    if let Some((window, workspace, item)) = open {
+        // A failed load is tried again even when the inbox still has the tab's head.
+        let up_to_date = item.read_with(cx, |item, _| {
+            item.checkout.head_sha == summary.head_sha
+                && !matches!(item.new_commits, Some(NewCommits::Failed { .. }))
+        });
         window.update(cx, |_, window_context, cx| {
             show_tab(&workspace, window_context, cx);
             workspace.update(cx, |workspace, cx| {
                 workspace.activate_item(&item, true, true, window_context, cx)
-            })
+            });
+            if !up_to_date {
+                item.update(cx, |item, cx| {
+                    item.set_new_commits(Some(NewCommits::Loading), cx)
+                });
+            }
         })?;
-        return Ok(());
+        if up_to_date {
+            return Ok(());
+        }
+        open_item = Some((window, workspace.downgrade(), item.downgrade()));
     }
 
-    // Not read up front: the caller is usually mid-update on a workspace this would read.
-    let candidates = cx.update(|_, cx| candidate_repos(cx))?.await;
-    let url = fetch_url(&repo_id(&summary));
+    let result = load_review(summary.clone(), source, app_state, runner, database, cx).await;
+    // A replaced review is gone; one still open shows what went wrong, with Try again.
+    let Some((window, workspace, item)) = open_item else {
+        return result;
+    };
+    let (Some(workspace), Some(item)) = (workspace.upgrade(), item.upgrade()) else {
+        return result;
+    };
+    let Err(error) = result else {
+        item.update(cx, |item, cx| item.set_new_commits(None, cx));
+        return Ok(());
+    };
+    // A save prompt may have shown another item of the tab.
+    window.update(cx, |_, window_context, cx| {
+        show_tab(&workspace, window_context, cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace.activate_item(&item, true, true, window_context, cx)
+        });
+        item.update(cx, |item, cx| {
+            item.set_new_commits(
+                Some(NewCommits::Failed {
+                    message: format!("{error:#}").into(),
+                    summary,
+                }),
+                cx,
+            )
+        })
+    })?;
+    Ok(())
+}
+
+async fn load_review(
+    summary: PrSummary,
+    source: CheckoutSource,
+    app_state: Arc<AppState>,
+    runner: Arc<dyn GhRunner>,
+    database: ReviewDb,
+    cx: &mut AsyncWindowContext,
+) -> Result<()> {
+    let CheckoutSource {
+        fetch_url,
+        root,
+        candidates,
+    } = source;
+    let candidates = candidates.await;
     let (login, fetched) = cx
         .background_spawn({
             let summary = summary.clone();
             let runner = runner.clone();
-            async move { fetch_review(&summary, url, review_root(), candidates, runner).await }
+            let root = root.clone();
+            async move { fetch_review(&summary, fetch_url, root, candidates, runner).await }
         })
         .await?;
-    if refuse_head_change_under_open_window(&summary.key, &fetched.head_sha, &app_state, cx).await?
-    {
-        return Ok(());
-    }
+    close_tab_before_head_moves(&summary.key, &root, &fetched.head_sha, &app_state, cx).await?;
     let prepared = cx
         .background_spawn({
             let database = database.clone();
@@ -1442,6 +1530,7 @@ impl ReviewItem {
             submit_error: None,
             merging: false,
             merge_error: None,
+            new_commits: None,
             conversation_open: false,
             conversation: None,
             thread_errors: HashMap::new(),
@@ -3985,6 +4074,67 @@ impl ReviewItem {
         self.selected
     }
 
+    pub fn new_commits(&self) -> Option<&NewCommits> {
+        self.new_commits.as_ref()
+    }
+
+    fn set_new_commits(&mut self, new_commits: Option<NewCommits>, cx: &mut Context<Self>) {
+        self.new_commits = new_commits;
+        cx.notify();
+    }
+
+    fn retry_new_commits(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(NewCommits::Failed { summary, .. }) = self.new_commits.clone() else {
+            return;
+        };
+        let Some(workspace) = self.workspace.as_ref().and_then(WeakEntity::upgrade) else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            open_review(summary, workspace, window, cx).detach_and_log_err(cx)
+        });
+    }
+
+    fn render_new_commits(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let new_commits = self.new_commits.as_ref()?;
+        let row = h_flex()
+            .debug_selector(|| "photon-review-new-commits".into())
+            .gap_2()
+            .px_2()
+            .py_1()
+            .border_b_1()
+            .border_color(cx.theme().colors().border);
+        Some(
+            match new_commits {
+                NewCommits::Loading => row.child(
+                    Label::new("Loading new commits…")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                ),
+                NewCommits::Failed { message, .. } => row
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Label::new(message.clone())
+                                .size(LabelSize::Small)
+                                .color(Color::Error),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "photon-review-new-commits-retry".into())
+                            .child(
+                                Button::new("photon-review-new-commits-retry", "Try again")
+                                    .label_size(LabelSize::Small)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.retry_new_commits(window, cx)
+                                    })),
+                            ),
+                    ),
+            }
+            .into_any_element(),
+        )
+    }
+
     pub fn select_step(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
         if index >= self.steps.len() || (index == self.selected && !self.conversation_open) {
             return;
@@ -6490,6 +6640,7 @@ impl Render for ReviewItem {
                     .border_color(cx.theme().colors().border)
                     .child(Label::new(error).size(LabelSize::Small).color(Color::Error))
             }))
+            .children(self.render_new_commits(cx))
             .child(
                 h_flex()
                     .flex_1()
@@ -6742,7 +6893,9 @@ impl Item for ReviewItem {
 #[allow(clippy::disallowed_methods, reason = "synchronous fixture setup")]
 mod tests {
     use super::*;
-    use crate::{FakeGh, FileStatus, PrKey, ReviewDb, build_loaded_file, parse_detail};
+    use crate::{
+        FakeGh, FileStatus, PrKey, ReviewDb, build_loaded_file, keep_changes_message, parse_detail,
+    };
     use base64::Engine as _;
     use editor::MultiBufferOffset;
     use fs::FakeFs;
@@ -7788,6 +7941,362 @@ fn verify_password(user: &str, password: &str) -> bool {
         assert_eq!(head, fixture.pr_sha);
         assert!(text.contains("    2;"), "{text}");
         assert!(!text.contains("    1;"), "{text}");
+    }
+
+    /// A window whose one tab is the user's clone, set up so `open_review_from` runs for real
+    /// against the fixture's local upstream.
+    struct ReloadSetup {
+        fixture: GitFixture,
+        app_state: Arc<AppState>,
+        fake: Arc<FakeGh>,
+        database: ReviewDb,
+        window: gpui::WindowHandle<MultiWorkspace>,
+        user_workspace: Entity<Workspace>,
+        /// The head the inbox shows, when it lags behind GitHub.
+        inbox_head: Option<String>,
+        cx: VisualTestContext,
+    }
+
+    async fn reload_setup(name: &'static str, cx: &mut TestAppContext) -> Option<ReloadSetup> {
+        cx.executor().allow_parking();
+        let fixture = GitFixture::new()?;
+        init_test(cx);
+        let test_state = cx.update(AppState::test);
+        let app_state = Arc::new(AppState {
+            languages: test_state.languages.clone(),
+            client: test_state.client.clone(),
+            user_store: test_state.user_store.clone(),
+            workspace_store: test_state.workspace_store.clone(),
+            fs: fs::RealFs::new(None, cx.executor()),
+            build_window_options: test_state.build_window_options,
+            node_runtime: test_state.node_runtime.clone(),
+            session: test_state.session.clone(),
+        });
+        let fake = FakeGh::new();
+        cx.update(|cx| {
+            AppState::set_global(app_state.clone(), cx);
+            cx.set_global(db::AppDatabase::test_new());
+            crate::set_gh_runner(fake.clone(), cx);
+        });
+        init_trust(path!("/nowhere"), cx);
+        let database = cx
+            .foreground_executor()
+            .block_test(ReviewDb::open_test_db(name));
+        let project = Project::test(app_state.fs.clone(), [fixture.user.as_path()], cx).await;
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let user_workspace = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .expect("window");
+        let cx = VisualTestContext::from_window(window.into(), cx);
+        Some(ReloadSetup {
+            fixture,
+            app_state,
+            fake,
+            database,
+            window,
+            user_workspace,
+            inbox_head: None,
+            cx,
+        })
+    }
+
+    impl ReloadSetup {
+        fn summary(&self) -> PrSummary {
+            let mut summary = parse_detail(&key(), DETAIL).expect("detail").summary;
+            summary.head_sha = self
+                .inbox_head
+                .clone()
+                .unwrap_or_else(|| self.fixture.pr_sha.clone());
+            summary
+        }
+
+        fn worktree(&self) -> PathBuf {
+            crate::worktree_path(&self.fixture.base.join("root"), &key())
+        }
+
+        /// Opens the PR as the inbox does; the fetch waits for `go` when one is given.
+        fn open(
+            &mut self,
+            go: Option<futures::channel::oneshot::Receiver<()>>,
+        ) -> Task<Result<()>> {
+            self.fake
+                .respond(|request| request.args[0] == "auth", Ok(AUTH.into()));
+            self.fake.respond(
+                |request| {
+                    request
+                        .stdin
+                        .as_deref()
+                        .is_some_and(|stdin| stdin.contains("pullRequest"))
+                },
+                Ok(DETAIL.into()),
+            );
+            let summary = self.summary();
+            let fetch_url = self.fixture.upstream_url.clone();
+            let root = self.fixture.base.join("root");
+            let user = self.fixture.user.clone();
+            let app_state = self.app_state.clone();
+            let runner: Arc<dyn GhRunner> = self.fake.clone();
+            let database = self.database.clone();
+            self.user_workspace
+                .update_in(&mut self.cx, |_, window, cx| {
+                    let candidates = cx.background_spawn(async move {
+                        if let Some(go) = go {
+                            go.await.ok();
+                        }
+                        vec![user]
+                    });
+                    let source = CheckoutSource {
+                        fetch_url,
+                        root,
+                        candidates,
+                    };
+                    cx.spawn_in(window, async move |_, cx| {
+                        open_review_from(summary, source, app_state, runner, database, cx).await
+                    })
+                })
+        }
+
+        fn reviews(&mut self) -> Vec<Entity<ReviewItem>> {
+            self.window
+                .read_with(&self.cx, |multi_workspace, cx| {
+                    multi_workspace
+                        .workspaces()
+                        .flat_map(|workspace| {
+                            workspace
+                                .read(cx)
+                                .items_of_type::<ReviewItem>(cx)
+                                .collect::<Vec<_>>()
+                        })
+                        .collect()
+                })
+                .expect("window")
+        }
+
+        fn review(&mut self) -> Entity<ReviewItem> {
+            let reviews = self.reviews();
+            assert_eq!(reviews.len(), 1, "one review of the PR");
+            reviews[0].clone()
+        }
+
+        fn tab_roots(&mut self) -> Vec<PathBuf> {
+            self.window
+                .read_with(&self.cx, |multi_workspace, cx| {
+                    multi_workspace
+                        .workspaces()
+                        .flat_map(|workspace| workspace.read(cx).root_paths(cx))
+                        .map(|root| root.to_path_buf())
+                        .collect()
+                })
+                .expect("window")
+        }
+
+        fn pr_workspace(&mut self) -> Entity<Workspace> {
+            let worktree = self.worktree();
+            self.window
+                .read_with(&self.cx, |multi_workspace, cx| {
+                    multi_workspace
+                        .workspaces()
+                        .find(|workspace| {
+                            workspace
+                                .read(cx)
+                                .root_paths(cx)
+                                .iter()
+                                .any(|root| root.as_ref() == worktree)
+                        })
+                        .cloned()
+                })
+                .expect("window")
+                .expect("the PR's tab")
+        }
+
+        async fn open_first_head(&mut self) -> Entity<ReviewItem> {
+            self.open(None).await.expect("opened");
+            self.cx.run_until_parked();
+            let review = self.review();
+            let head = review.read_with(&self.cx, |item, _| item.checkout.head_sha.clone());
+            assert_eq!(head, self.fixture.pr_sha);
+            review
+        }
+    }
+
+    #[gpui::test]
+    async fn new_commits_reopen_the_prs_tab(cx: &mut TestAppContext) {
+        let Some(mut setup) = reload_setup("new_commits_reopen_the_prs_tab", cx).await else {
+            return;
+        };
+        let first = setup.open_first_head().await;
+        let worktree = setup.worktree();
+        assert_eq!(
+            setup.tab_roots(),
+            vec![setup.fixture.user.clone(), worktree.clone()]
+        );
+        let old_head = setup.fixture.pr_sha.clone();
+        let old_project = setup
+            .pr_workspace()
+            .read_with(&setup.cx, |workspace, _| workspace.project().clone());
+        cx.update(|cx| {
+            let worktree_store = old_project.read(cx).worktree_store();
+            TrustedWorktrees::try_get_global(cx)
+                .expect("trust store")
+                .update(cx, |trusted, cx| {
+                    trusted.trust(
+                        &worktree_store,
+                        HashSet::from_iter([PathTrust::AbsPath(worktree.clone())]),
+                        cx,
+                    )
+                })
+        });
+        assert!(worktree_trusted(&old_project, cx));
+        drop(old_project);
+
+        setup.fixture.push_pr_head("fn a() {\n    2;\n}\n");
+        let (go, wait) = futures::channel::oneshot::channel();
+        let opening = setup.open(Some(wait));
+        setup.cx.run_until_parked();
+        // The open review says what is happening before any git work.
+        assert_eq!(
+            first.read_with(&setup.cx, |item, _| item.new_commits().cloned()),
+            Some(NewCommits::Loading)
+        );
+        assert!(drawn("photon-review-new-commits", &mut setup.cx));
+        go.send(()).ok();
+        opening.await.expect("loaded");
+        setup.cx.run_until_parked();
+
+        assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+        assert_eq!(
+            setup.tab_roots(),
+            vec![setup.fixture.user.clone(), worktree.clone()]
+        );
+        let review = setup.review();
+        assert_ne!(
+            review,
+            first,
+            "{:?}",
+            first.read_with(&setup.cx, |item, _| item.new_commits().cloned())
+        );
+        let (head, text, new_commits) = review.read_with(&setup.cx, |item, cx| {
+            (
+                item.checkout.head_sha.clone(),
+                item.editor().read(cx).text(cx),
+                item.new_commits().cloned(),
+            )
+        });
+        assert_ne!(head, old_head);
+        assert_eq!(head, setup.fixture.pr_sha);
+        assert!(text.contains("    2;"), "{text}");
+        assert_eq!(new_commits, None);
+        let project = setup
+            .pr_workspace()
+            .read_with(&setup.cx, |workspace, _| workspace.project().clone());
+        assert!(
+            !worktree_trusted(&project, cx),
+            "trust given to the old head stays with it"
+        );
+    }
+
+    #[gpui::test]
+    async fn keeping_unsaved_changes_keeps_the_old_head(cx: &mut TestAppContext) {
+        let Some(mut setup) = reload_setup("keeping_unsaved_changes_keeps_the_old_head", cx).await
+        else {
+            return;
+        };
+        let first = setup.open_first_head().await;
+        let old_head = setup.fixture.pr_sha.clone();
+        let unsaved = setup
+            .cx
+            .new(|cx| workspace::item::test::TestItem::new(cx).with_dirty(true));
+        setup
+            .pr_workspace()
+            .update_in(&mut setup.cx, |workspace, window, cx| {
+                workspace.add_item_to_active_pane(
+                    Box::new(unsaved.clone()),
+                    None,
+                    false,
+                    window,
+                    cx,
+                )
+            });
+
+        setup.fixture.push_pr_head("fn a() {\n    2;\n}\n");
+        let opening = setup.open(None);
+        // The fetch is real git work, so its end is waited for rather than parked on.
+        for _ in 0..1000 {
+            setup.cx.run_until_parked();
+            if setup.cx.has_pending_prompt() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            setup.cx.has_pending_prompt(),
+            "unsaved changes are asked about"
+        );
+        setup.cx.simulate_prompt_answer("Cancel");
+        opening.await.expect("handled in the review");
+        setup.cx.run_until_parked();
+
+        assert_eq!(setup.review(), first);
+        let (head, new_commits) = first.read_with(&setup.cx, |item, _| {
+            (item.checkout.head_sha.clone(), item.new_commits().cloned())
+        });
+        assert_eq!(head, old_head);
+        let message = keep_changes_message(&key());
+        assert_eq!(
+            new_commits,
+            Some(NewCommits::Failed {
+                message: message.clone().into(),
+                summary: setup.summary(),
+            })
+        );
+        assert!(drawn("photon-review-new-commits-retry", &mut setup.cx));
+        assert_eq!(
+            run(&setup.worktree(), &["rev-parse", "HEAD"]),
+            old_head,
+            "the open project's code never moves"
+        );
+
+        // Trying again once the changes are dealt with loads the new head.
+        unsaved.update(&mut setup.cx, |item, _| item.is_dirty = false);
+        setup.open(None).await.expect("loaded");
+        setup.cx.run_until_parked();
+        let head = setup
+            .review()
+            .read_with(&setup.cx, |item, _| item.checkout.head_sha.clone());
+        assert_eq!(head, setup.fixture.pr_sha);
+    }
+
+    #[gpui::test]
+    async fn a_failed_load_shows_in_the_open_review(cx: &mut TestAppContext) {
+        let Some(mut setup) = reload_setup("a_failed_load_shows_in_the_open_review", cx).await
+        else {
+            return;
+        };
+        let first = setup.open_first_head().await;
+        let old_head = setup.fixture.pr_sha.clone();
+        setup.fixture.push_pr_head("fn a() {\n    2;\n}\n");
+        let upstream_url = std::mem::replace(
+            &mut setup.fixture.upstream_url,
+            format!("file://{}", setup.fixture.base.join("gone.git").display()),
+        );
+        setup.open(None).await.expect("handled in the review");
+        setup.cx.run_until_parked();
+        let new_commits = first.read_with(&setup.cx, |item, _| item.new_commits().cloned());
+        assert!(
+            matches!(new_commits, Some(NewCommits::Failed { .. })),
+            "{new_commits:?}"
+        );
+        assert!(drawn("photon-review-new-commits-retry", &mut setup.cx));
+
+        // The inbox may still have the tab's head; a click tries again anyway.
+        setup.fixture.upstream_url = upstream_url;
+        setup.inbox_head = Some(old_head);
+        setup.open(None).await.expect("loaded");
+        setup.cx.run_until_parked();
+        let head = setup
+            .review()
+            .read_with(&setup.cx, |item, _| item.checkout.head_sha.clone());
+        assert_eq!(head, setup.fixture.pr_sha);
     }
 
     fn worktree_trusted(project: &Entity<Project>, cx: &mut TestAppContext) -> bool {
