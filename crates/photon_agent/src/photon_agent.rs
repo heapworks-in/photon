@@ -21,6 +21,11 @@ use util::ResultExt as _;
 use workspace::Workspace;
 use workspace::notifications::NotifyTaskExt as _;
 
+mod edit_requests;
+pub use edit_requests::{
+    EditRequestSender, QueueEditRequest, queue_edit_request, set_edit_request_sender,
+};
+
 const THREAD_FILES_KEY: &str = "photon_agent_thread_files";
 
 /// Session id → files its prompts mentioned or its turns changed. Read from the database the first

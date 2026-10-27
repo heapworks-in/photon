@@ -180,6 +180,8 @@
         "action::Sequence",
         ["agent::ToggleFocus", "agent::NewThread", "agent::ToggleFocus", "agent::AddSelectionToThread"],
       ],
+      // Queue an edit for the agent; Apply All sends the queued edits together.
+      "alt-e": "photon_agent::QueueEditRequest",
     },
   },
   {

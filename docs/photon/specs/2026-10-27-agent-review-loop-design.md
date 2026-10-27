@@ -63,14 +63,18 @@ Neither key is bound anywhere else in the default macOS keymap.
 - Not covered: ACP v2 receipt submissions (Zed checkpoints none of them); an agent that commits
   during a turn (the commit's files are then not in the turn's diff).
 
-## 2. Inline edit requests (built last, if time allows)
+## 2. Inline edit requests
 
-- **⌥E** on a selection opens a one-line prompt block under the selection (Zed's editor block, as
-  the inline assistant uses). Enter queues the request; Escape cancels.
-- A queued request shows as a highlight on its lines and a one-line block with the instruction,
-  **Apply All** and a remove button.
-- **Apply All** starts one thread with every request as `path:lines` chip + instruction, sent at
-  once. The thread stays in the list like any other. The queue empties.
+- **⌥E** on a selection opens a one-line instruction box in an editor block under the selection
+  (Zed's editor block, as the inline assistant uses). Enter queues the request; Escape drops it.
+- A queued request stays as that block: pencil icon, the instruction, **Apply All** (with the count
+  when more than one is queued in the window) and a remove button. No gutter marks: the block is
+  the marker.
+- **Apply All** starts one thread titled "Edit requests" with every request as the selection (a
+  `path:lines` chip) followed by its instruction, sent at once, and clears the queue. The thread
+  stays in the list like any other.
+- The agent panel registers the sender (`photon_agent::set_edit_request_sender`); without it (AI
+  off) ⌥E does nothing. Multibuffer editors are skipped (one file per request).
 
 ## Upstream hooks (all marked `// photon:`)
 
@@ -78,7 +82,7 @@ Neither key is bound anywhere else in the default macOS keymap.
 - `acp_thread/src/mention.rs`: chip label.
 - `acp_thread/src/acp_thread.rs`: checkpoint for non-rewinding root threads; `Checkpoint` accessor.
 - `project/src/git_store.rs`: read the per-repository checkpoints.
-- `agent_ui`: record thread files and turn ends; render the turn row.
+- `agent_ui`: record thread files and turn ends; render the turn row; register ⌥E and its sender.
 - `sidebar`: the This File toggle and filter.
 - `git_ui_core/src/file_diff_view.rs`: tab title override.
 - `fs/src/fake_git_repo.rs` (test support): read a file at a fake checkpoint.

@@ -417,10 +417,41 @@ struct SerializedActiveThread {
     work_dirs: Option<SerializedPathList>,
 }
 
+// photon: Apply All on ⌥E edit requests sends them to a new thread, as one message.
+fn photon_send_edit_requests(
+    workspace: &mut Workspace,
+    blocks: Vec<acp_v2::ContentBlock>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(panel) = workspace.panel::<AgentPanel>(cx) else {
+        return;
+    };
+    panel.update(cx, |panel, cx| {
+        let thread_id = panel.create_thread_with_options(
+            CreateThreadOptions {
+                title: Some("Edit requests".into()),
+                initial_content: Some(AgentInitialContent::ContentBlock {
+                    blocks,
+                    auto_submit: true,
+                }),
+                ..CreateThreadOptions::default()
+            },
+            AgentThreadSource::AgentPanel,
+            window,
+            cx,
+        );
+        panel.activate_retained_thread(thread_id, false, window, cx);
+    });
+    workspace.focus_panel::<AgentPanel>(window, cx);
+}
+
 pub fn init(cx: &mut App) {
+    photon_agent::set_edit_request_sender(std::rc::Rc::new(photon_send_edit_requests), cx); // photon: ⌥E
     cx.observe_new(
         |workspace: &mut Workspace, _window, _cx: &mut Context<Workspace>| {
             workspace
+                .register_action(photon_agent::queue_edit_request) // photon: ⌥E edit requests
                 .register_action(|workspace, _: &NewThread, window, cx| {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                         panel.update(cx, |panel, cx| {
@@ -15368,6 +15399,75 @@ mod tests {
                     cx
                 ));
             });
+        }
+
+        #[gpui::test]
+        async fn alt_e_queues_edit_requests_that_apply_all_sends_together(cx: &mut TestAppContext) {
+            let (panel, mut cx) = setup_visible_panel(cx).await;
+            panel.update(&mut cx, |panel, _| panel.selected_agent = Agent::Stub);
+            bind_photon_keymap(&mut cx);
+            let editor =
+                open_file_in_editor(&panel, "/project/main.rs", "one\ntwo\nthree\n", &mut cx).await;
+            let select_row = |row: u32, cx: &mut VisualTestContext| {
+                editor.update_in(cx, |editor, window, cx| {
+                    editor.change_selections(Default::default(), window, cx, |selections| {
+                        selections
+                            .select_ranges([text::Point::new(row, 0)..text::Point::new(row, 3)]);
+                    });
+                });
+                cx.focus(&editor);
+            };
+
+            // Escape drops a request.
+            select_row(1, &mut cx);
+            cx.simulate_keystrokes("alt-e");
+            cx.simulate_input("never mind");
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("photon-apply-all").is_none());
+
+            select_row(0, &mut cx);
+            cx.simulate_keystrokes("alt-e");
+            cx.simulate_input("say uno");
+            cx.simulate_keystrokes("enter");
+            select_row(2, &mut cx);
+            cx.simulate_keystrokes("alt-e");
+            cx.simulate_input("say tres");
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            assert_eq!(
+                editor.read_with(&cx, |editor, cx| editor.text(cx)),
+                "one\ntwo\nthree\n",
+                "typing goes to the request, not the file"
+            );
+
+            click("photon-apply-all", &mut cx);
+            assert!(cx.debug_bounds("photon-apply-all").is_none());
+            let prompt = panel.read_with(&cx, |panel, cx| {
+                let thread = panel.active_agent_thread(cx).expect("a thread was started");
+                let thread = thread.read(cx);
+                let Some(acp_thread::AgentThreadEntry::UserMessage(message)) =
+                    thread.entries().first()
+                else {
+                    panic!("the edits were sent");
+                };
+                message
+                    .content
+                    .source_blocks()
+                    .iter()
+                    .map(|block| match block {
+                        acp_v2::ContentBlock::Text(text) => text.text.clone(),
+                        acp_v2::ContentBlock::Resource(resource) => match &resource.resource {
+                            acp_v2::EmbeddedResourceResource::TextResourceContents(text) => {
+                                format!("[{}]", text.text)
+                            }
+                            _ => String::new(),
+                        },
+                        _ => String::new(),
+                    })
+                    .collect::<String>()
+            });
+            assert_eq!(prompt, "Make these edits:\n[one]say uno\n[thr]say tres");
         }
 
         fn click(selector: &'static str, cx: &mut VisualTestContext) {
