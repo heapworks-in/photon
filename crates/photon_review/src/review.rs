@@ -6399,6 +6399,14 @@ impl ReviewItem {
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .child(
                                 Checkbox::new(("photon-review-step-viewed", index), viewed.into())
+                                    // On the selected row the box takes the muted text colour:
+                                    // the theme's border grey is almost the selection grey, so
+                                    // the normal outline disappears there.
+                                    .when(selected, |this| {
+                                        this.style(ui::ToggleStyle::Custom(
+                                            cx.theme().colors().text_muted,
+                                        ))
+                                    })
                                     .disabled(self.full_files.is_some())
                                     .tooltip(Tooltip::text(if self.full_files.is_some() {
                                         VIEWED_DISABLED_TOOLTIP
