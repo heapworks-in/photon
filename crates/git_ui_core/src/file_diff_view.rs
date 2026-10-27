@@ -36,6 +36,8 @@ pub struct FileDiffView {
     new_buffer: Entity<Buffer>,
     buffer_changes_tx: watch::Sender<()>,
     _recalculate_diff_task: Task<Result<()>>,
+    /// photon: a tab title for diffs of texts that aren't files, such as an agent turn's.
+    photon_title: Option<SharedString>,
 }
 
 const RECALCULATE_DIFF_DEBOUNCE: Duration = Duration::from_millis(250);
@@ -215,7 +217,19 @@ impl FileDiffView {
                 }
                 Ok(())
             }),
+            photon_title: None,
         }
+    }
+
+    // photon: names the tab and header of a diff of texts that aren't files.
+    pub fn set_title(&mut self, title: SharedString, cx: &mut Context<Self>) {
+        self.editor.update(cx, |editor, cx| {
+            editor.rhs_editor().update(cx, |editor, _| {
+                editor.set_breadcrumb_header(title.to_string());
+            });
+        });
+        self.photon_title = Some(title);
+        cx.notify();
     }
 }
 
@@ -268,6 +282,9 @@ impl Item for FileDiffView {
     }
 
     fn tab_content_text(&self, _detail: usize, cx: &App) -> SharedString {
+        if let Some(title) = &self.photon_title {
+            return title.clone(); // photon: diffs of texts that aren't files
+        }
         let title_text = |buffer: &Entity<Buffer>| {
             buffer
                 .read(cx)
@@ -289,6 +306,9 @@ impl Item for FileDiffView {
     }
 
     fn tab_tooltip_text(&self, cx: &App) -> Option<ui::SharedString> {
+        if let Some(title) = &self.photon_title {
+            return Some(title.clone()); // photon: diffs of texts that aren't files
+        }
         let path = |buffer: &Entity<Buffer>| {
             buffer
                 .read(cx)

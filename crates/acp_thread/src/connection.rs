@@ -986,6 +986,8 @@ mod test_support {
         close_sessions_on_release: bool,
         supports_session_additional_directories: bool,
         supports_set_title: bool,
+        /// photon: off to act like the ACP agents Photon runs, which can't rewind a session.
+        supports_rewind: bool,
         agent_id: AgentId,
         telemetry_id: SharedString,
         prompt_capabilities_rx: watch::Receiver<acp_v2::PromptCapabilities>,
@@ -1035,6 +1037,7 @@ mod test_support {
                 close_sessions_on_release: true,
                 supports_session_additional_directories: false,
                 supports_set_title: true,
+                supports_rewind: true, // photon: see `without_rewind`
                 agent_id: AgentId::new("stub"),
                 telemetry_id: "stub".into(),
                 prompt_capabilities_rx: watch::Receiver::constant(
@@ -1170,6 +1173,12 @@ mod test_support {
 
         pub fn with_retry(mut self) -> Self {
             self.supports_retry = true;
+            self
+        }
+
+        // photon: like Claude Code and Codex over ACP: no truncation, no client message ids.
+        pub fn without_rewind(mut self) -> Self {
+            self.supports_rewind = false;
             self
         }
 
@@ -1445,6 +1454,9 @@ mod test_support {
             &self,
             _cx: &App,
         ) -> Option<Rc<dyn AgentSessionClientUserMessageIds>> {
+            if !self.supports_rewind {
+                return None; // photon: see `without_rewind`
+            }
             Some(Rc::new(StubAgentSessionClientUserMessageIds {
                 connection: self.clone(),
             }))
@@ -1512,6 +1524,9 @@ mod test_support {
             _session_id: &acp_v2::SessionId,
             _cx: &App,
         ) -> Option<Rc<dyn AgentSessionTruncate>> {
+            if !self.supports_rewind {
+                return None; // photon: see `without_rewind`
+            }
             // Capability checks also call this; only run may consume the gate.
             Some(Rc::new(StubAgentSessionEditor {
                 next_truncate: self.next_truncate.clone(),

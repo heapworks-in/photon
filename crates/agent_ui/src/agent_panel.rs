@@ -15369,5 +15369,67 @@ mod tests {
                 ));
             });
         }
+
+        fn click(selector: &'static str, cx: &mut VisualTestContext) {
+            let bounds = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is shown"));
+            cx.simulate_click(bounds.center(), Modifiers::none());
+            cx.run_until_parked();
+        }
+
+        #[gpui::test]
+        async fn a_turn_shows_what_it_changed_and_can_be_reverted(cx: &mut TestAppContext) {
+            let (panel, mut cx) = setup_visible_panel(cx).await;
+            let fs = cx.update(|_, cx| <dyn fs::Fs>::global(cx));
+            fs.as_fake()
+                .insert_tree("/project", json!({ ".git": {}, "main.rs": "old\n" }))
+                .await;
+            cx.run_until_parked();
+            // Like Claude Code and Codex over ACP, the agent can't rewind the conversation.
+            let connection = StubAgentConnection::new().without_rewind();
+            crate::test_support::open_draft_with_connection(&panel, connection.clone(), &mut cx);
+
+            let end_turn = connection.defer_next_prompt_response();
+            crate::test_support::send_message(&panel, &mut cx);
+            // The agent edits a file during its turn.
+            fs.as_fake()
+                .insert_file("/project/main.rs", "new\n".into())
+                .await;
+            end_turn
+                .send(Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)))
+                .expect("turn is running");
+            cx.run_until_parked();
+
+            assert!(cx.debug_bounds("photon-turn-file-file.txt").is_none());
+            click("photon-turn-file-main.rs", &mut cx);
+            let workspace = panel.read_with(&cx, |panel, _| {
+                panel.workspace.upgrade().expect("workspace must exist")
+            });
+            let (title, text) = workspace.read_with(&cx, |workspace, cx| {
+                let item = workspace.active_item(cx).expect("the turn's diff opens");
+                let editor = item.act_as::<Editor>(cx).expect("an editor");
+                (item.tab_content_text(0, cx), editor.read(cx).text(cx))
+            });
+            assert_eq!(title, "main.rs (this turn)");
+            assert_eq!(text, "new\n");
+
+            let session_id = crate::test_support::active_session_id(&panel, &cx);
+            cx.update(|_, cx| {
+                assert!(photon_agent::thread_is_about(
+                    &session_id,
+                    Path::new("/project/main.rs"),
+                    cx
+                ));
+            });
+
+            click("photon-revert-turn", &mut cx);
+            assert_eq!(
+                fs.load(Path::new("/project/main.rs"))
+                    .await
+                    .expect("main.rs is there"),
+                "old\n"
+            );
+        }
     }
 }

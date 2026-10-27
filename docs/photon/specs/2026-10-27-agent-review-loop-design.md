@@ -53,7 +53,7 @@ Neither key is bound anywhere else in the default macOS keymap.
   (`Repository::diff_checkpoints`, one call per repository). Nothing runs while idle.
 - Under the user message of a turn that changed files: one chip per file (`ButtonLike` with the
   file icon and name, like the edits bar) and **Revert Turn**.
-  - A chip opens that file's diff for the turn in a `FileDiffView` tab titled `file.rs (turn)`: before
+  - A chip opens that file's diff for the turn in a `FileDiffView` tab titled `file.rs (this turn)`: before
     and after texts read from the two checkpoints (`load_revisions("<sha>:<path>")`).
   - **Revert Turn** restores the files to the snapshot taken before the turn
     (`GitStore::restore_checkpoint`, Zed's restore without rewinding the conversation). Like Zed's

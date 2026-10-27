@@ -15,8 +15,14 @@ doctest = false
 [dependencies]
 acp_thread.workspace = true
 agent-client-protocol.workspace = true
+anyhow.workspace = true
 db.workspace = true
+file_icons.workspace = true
+git_ui_core.workspace = true
 gpui.workspace = true
+language.workspace = true
+log.workspace = true
+project.workspace = true
 serde_json.workspace = true
 ui.workspace = true
 util.workspace = true
