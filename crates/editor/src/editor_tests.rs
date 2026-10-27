@@ -2851,6 +2851,46 @@ fn test_only_focused_editor_blinks_across_window_activation(cx: &mut TestAppCont
     });
 }
 
+// photon: an idle focused editor stops blinking, so its window stops redrawing.
+#[gpui::test]
+fn test_cursor_stops_blinking_without_input(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let window = cx.add_window(|window, cx| {
+        let editor = Editor::single_line(window, cx);
+        window.focus(&editor.focus_handle(cx), cx);
+        window.activate_window();
+        editor
+    });
+    let editor = window.root(cx).unwrap();
+    let cx = &mut VisualTestContext::from_window(*window, cx);
+    cx.run_until_parked();
+    let blink_manager = editor.read_with(cx, |editor, _| editor.blink_manager.clone());
+    let blinks = Rc::new(std::cell::Cell::new(0));
+    let _subscription = cx.update(|_, cx| {
+        let blinks = blinks.clone();
+        cx.observe(&blink_manager, move |_, _| blinks.set(blinks.get() + 1))
+    });
+    let advance = |duration: Duration, cx: &mut VisualTestContext| {
+        for _ in 0..duration.as_millis() / 100 {
+            cx.executor().advance_clock(Duration::from_millis(100));
+            cx.run_until_parked();
+        }
+    };
+
+    advance(crate::blink_manager::BLINK_TIMEOUT, cx);
+    assert!(blinks.get() > 0, "the cursor blinks after focus");
+    advance(Duration::from_secs(1), cx);
+    blinks.set(0);
+    advance(Duration::from_secs(10), cx);
+    assert_eq!(blinks.get(), 0, "no blinks once idle");
+    assert!(blink_manager.read_with(cx, |manager, _| manager.visible()));
+
+    cx.simulate_input("a");
+    advance(Duration::from_secs(2), cx);
+    assert!(blinks.get() > 0, "input restarts blinking");
+}
+
 #[gpui::test]
 fn test_beginning_end_of_line_ignore_soft_wrap(cx: &mut TestAppContext) {
     init_test(cx, |_| {});

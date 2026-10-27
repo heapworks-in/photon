@@ -1934,7 +1934,11 @@ impl Window {
                 // after this frame (the window was re-invalidated mid-draw, or
                 // animations scheduled next-frame callbacks), re-arm the frame
                 // source explicitly.
-                if invalidator.is_dirty() || !next_frame_callbacks.borrow().is_empty() {
+                // photon: also while sustaining presentation after fast input (see `needs_present`).
+                if invalidator.is_dirty()
+                    || !next_frame_callbacks.borrow().is_empty()
+                    || input_rate_tracker.borrow_mut().is_high_rate()
+                {
                     invalidator.wake_platform();
                 }
                 #[cfg(feature = "profiler")]

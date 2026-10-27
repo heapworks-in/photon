@@ -10,9 +10,10 @@
 # during the run (another app, another Photon launched from this terminal) still matches.
 # Idle CPU there must also be under 1%; it is not compared with a baseline.
 #
-# The sample project opens with one block terminal at a zsh prompt. Idle CPU covers the whole process
-# tree (app plus shells) over 10 s after 5 s of settling. Footprint is the app process only; the zsh
-# Tab-completion helper (two extra zsh processes per terminal, spawned on the first Tab) is not started.
+# The sample project opens with one block terminal at a zsh prompt, in a focused window. Idle CPU covers
+# the whole process tree (app plus shells) over 10 s after 8 s of settling, past the 5 s after which the
+# focused cursor stops blinking. Footprint is the app process only; the zsh Tab-completion helper (two
+# extra zsh processes per terminal, spawned on the first Tab) is not started.
 #
 #   script/photon-perf                       # build release, measure, compare (10% threshold)
 #   script/photon-perf --threshold 20        # looser threshold (CI)
@@ -29,7 +30,7 @@ build=1
 runs=5
 baseline=tooling/photon-perf/baseline.json
 budget_footprint_mb=200
-budget_start_ms=300
+budget_start_ms=400 # a focused app launched through LaunchServices (`open`), ~365 ms
 budget_idle_cpu_percent=1
 
 while (( $# )); do
@@ -97,7 +98,7 @@ for (( run = 1; run <= runs; run++ )); do
     echo "no first frame within 10s; see $scratch/stderr.log" >&2
     exit 2
   fi
-  sleep 5
+  sleep 8
   if ! ps -o comm= -p "$(descendants $pid | paste -sd, -)" | grep -q zsh; then
     kill $pid 2>/dev/null || true
     echo "no terminal shell under pid $pid; see $scratch/stderr.log" >&2

@@ -305,6 +305,24 @@ fn exported_svgs_never_point_fonts_at_a_remote_url() {
 }
 
 #[test]
+fn idle_diagram_runs_no_animation_frame_loop() {
+    let shipped_js: String = files_under(&bundle().join("editor"))
+        .iter()
+        .filter(|file| file.extension().is_some_and(|extension| extension == "js"))
+        .map(|file| std::fs::read_to_string(file).expect("js"))
+        .collect();
+    // Excalidraw's collaborator laser trails asked for every animation frame while the editor was
+    // open; with no collaborators the frame callback now returns true, which stops it.
+    assert!(
+        !shipped_js.contains("onFrame(){this.updateCollabTrails()}"),
+        "the collaborator laser trails redraw every frame"
+    );
+    assert!(shipped_js.contains(
+        "onFrame(){return this.updateCollabTrails(),this.app.state.collaborators.size===0}"
+    ));
+}
+
+#[test]
 fn bundled_npm_packages_and_fonts_ship_their_licences() {
     let licences = std::fs::read_to_string(bundle().join("THIRD_PARTY_LICENSES.md"))
         .expect("THIRD_PARTY_LICENSES.md exists");
