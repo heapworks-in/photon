@@ -328,6 +328,11 @@ impl WindowFrameSource {
         Ok(())
     }
 
+    // photon: lets an idle window's waker restart a stopped link.
+    pub fn is_running(&self) -> bool {
+        self.registration.is_some()
+    }
+
     pub fn take_signal(&self) -> Option<(Instant, FrameRequestSource)> {
         self.signal.take()
     }
@@ -349,6 +354,39 @@ impl Drop for WindowFrameSource {
         // its context points at the window's native view, which may be
         // deallocated after this.
         self.frame_requests.cancel();
+    }
+}
+
+// photon: a window's display link ticks at the display's refresh rate (120 Hz on ProMotion), waking
+// the main thread even when nothing changed. A window stops its link after this many ticks without
+// frame demand, and GPUI's frame waker restarts it.
+const IDLE_TICKS_BEFORE_STOP: u32 = 60;
+
+/// Whether a window still wants display link ticks.
+#[derive(Default)]
+pub struct FrameDemand {
+    requested: bool,
+    idle_ticks: u32,
+}
+
+impl FrameDemand {
+    pub fn request(&mut self) {
+        self.requested = true;
+        self.idle_ticks = 0;
+    }
+
+    /// Called before a tick's frame callback, so requests made while it runs count for the next tick.
+    pub fn begin_tick(&mut self) {
+        self.requested = false;
+    }
+
+    /// Whether the link should stop after this tick.
+    pub fn end_tick(&mut self) -> bool {
+        if self.requested {
+            return false;
+        }
+        self.idle_ticks = self.idle_ticks.saturating_add(1);
+        self.idle_ticks >= IDLE_TICKS_BEFORE_STOP
     }
 }
 
@@ -574,6 +612,28 @@ mod tests {
                 received_at,
             );
         }
+    }
+
+    // photon: an idle window stops its display link; demand keeps it running.
+    #[test]
+    fn frame_demand_stops_idle_ticks() {
+        let mut demand = FrameDemand::default();
+        for _ in 1..IDLE_TICKS_BEFORE_STOP {
+            demand.begin_tick();
+            assert!(!demand.end_tick());
+        }
+        demand.begin_tick();
+        assert!(demand.end_tick());
+
+        demand.request();
+        demand.begin_tick();
+        demand.request();
+        assert!(
+            !demand.end_tick(),
+            "a request during the tick keeps the link"
+        );
+        demand.begin_tick();
+        assert!(!demand.end_tick(), "a request restarts the idle count");
     }
 
     fn timestamp(host_time: u64) -> sys::CVTimeStamp {

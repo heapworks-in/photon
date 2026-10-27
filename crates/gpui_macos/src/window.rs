@@ -1,5 +1,5 @@
 use crate::{
-    BoolExt, MacDisplay, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
+    BoolExt, FrameDemand, MacDisplay, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
     TISGetInputSourceProperty, WindowFrameSource, events::platform_input_from_native,
     kTISPropertyInputSourceIsASCIICapable, kTISPropertyInputSourceType, kTISTypeKeyboardInputMode,
     ns_string, renderer,
@@ -648,6 +648,7 @@ struct MacWindowState {
     cursor_style: CursorStyle,
     cursor_visible: Arc<AtomicBool>,
     frame_source: Option<WindowFrameSource>,
+    frame_demand: FrameDemand, // photon: stops the display link while idle
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
@@ -838,6 +839,21 @@ impl MacWindowState {
     fn stop_display_link(&mut self) {
         if let Some(frame_source) = self.frame_source.as_mut() {
             frame_source.stop();
+        }
+    }
+
+    // photon: GPUI wants a frame; restart the display link if it stopped while idle.
+    fn wake_display_link(&mut self) {
+        self.frame_demand.request();
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        if self
+            .frame_source
+            .as_ref()
+            .is_some_and(|frame_source| !frame_source.is_running())
+        {
+            self.start_display_link();
         }
     }
 
@@ -1072,6 +1088,7 @@ impl MacWindow {
                 cursor_style: CursorStyle::Arrow,
                 cursor_visible,
                 frame_source: None,
+                frame_demand: FrameDemand::default(),
                 renderer: renderer::new_renderer(
                     renderer_context,
                     native_window as *mut _,
@@ -1995,6 +2012,21 @@ impl PlatformWindow for MacWindow {
 
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
         self.0.as_ref().lock().request_frame_callback = Some(callback);
+    }
+
+    // photon: the display link stops while idle (see `step`); these restart it.
+    fn schedule_frame(&self) {
+        self.0.as_ref().lock().wake_display_link();
+    }
+
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        // Weak: the waker lives in GPUI's invalidator, which this window's frame callback holds.
+        let window_state = Arc::downgrade(&self.0);
+        Some(Rc::new(move || {
+            if let Some(window_state) = window_state.upgrade() {
+                window_state.lock().wake_display_link();
+            }
+        }))
     }
 
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>) {
@@ -3376,13 +3408,19 @@ extern "C" fn step(view: *mut c_void) {
                 (None, FrameRequestSource::NativeCallback),
                 |(at, source)| (Some(at), source),
             );
+        lock.frame_demand.begin_tick(); // photon
         drop(lock);
         callback(RequestFrameOptions {
             signal_at,
             signal_source,
             ..Default::default()
         });
-        window_state.lock().request_frame_callback = Some(callback);
+        let mut lock = window_state.lock();
+        lock.request_frame_callback = Some(callback);
+        // photon: an idle window stops ticking until GPUI wakes it.
+        if lock.frame_demand.end_tick() {
+            lock.stop_display_link();
+        }
     }
 }
 
