@@ -920,12 +920,9 @@ impl CallHierarchyPanel {
                             .overflow_hidden()
                             .child(glyph(node.tag, cx))
                             .child(
-                                div().flex_none().child(
-                                    Label::new(name)
-                                        .size(LabelSize::Small)
-                                        .buffer_font(cx)
-                                        .single_line(),
-                                ),
+                                div()
+                                    .flex_none()
+                                    .child(Label::new(name).size(LabelSize::Small).single_line()),
                             )
                             .children(file.map(|(file_name, full_path)| {
                                 div()
@@ -1068,7 +1065,6 @@ impl CallHierarchyPanel {
                     .child(
                         div().min_w_0().overflow_hidden().child(
                             Label::new(header.title.clone())
-                                .buffer_font(cx)
                                 .weight(FontWeight::SEMIBOLD)
                                 .truncate(),
                         ),
@@ -1183,7 +1179,6 @@ impl CallHierarchyPanel {
                     .child(
                         Label::new(name)
                             .size(LabelSize::XSmall)
-                            .buffer_font(cx)
                             .color(if is_selected {
                                 Color::Default
                             } else {
@@ -1457,12 +1452,7 @@ fn glyph(tag: Option<Tag>, cx: &App) -> AnyElement {
         .bg(color.color(cx).alpha(0.14))
         .map(|this| match mark {
             Some(icon) => this.child(Icon::new(icon).size(IconSize::XSmall).color(color)),
-            None => this.child(
-                Label::new("ƒ")
-                    .size(LabelSize::XSmall)
-                    .buffer_font(cx)
-                    .color(color),
-            ),
+            None => this.child(Label::new("ƒ").size(LabelSize::XSmall).color(color)),
         })
         .into_any_element()
 }

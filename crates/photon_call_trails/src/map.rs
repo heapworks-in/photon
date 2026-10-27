@@ -67,14 +67,22 @@ impl CallHierarchyPanel {
         let trail = self.trail();
         let colors = cx.theme().colors();
 
-        // Monospace text, so a node's width follows from its character counts.
-        let font = theme::theme_settings(cx).buffer_font(cx).clone();
-        let font_id = window.text_system().resolve_font(&font);
-        let advance = window
-            .text_system()
-            .em_advance(font_id, NAME_SIZE)
-            .unwrap_or(px(7.2));
-        let detail_advance = advance * (DETAIL_SIZE / NAME_SIZE);
+        // Nodes use the UI font like the rest of the panel, so each label is measured.
+        let font = theme::theme_settings(cx).ui_font(cx).clone();
+        let measure = |text: &SharedString, size: Pixels| {
+            let run = gpui::TextRun {
+                len: text.len(),
+                font: font.clone(),
+                color: gpui::Hsla::default(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            window
+                .text_system()
+                .layout_line(text, size, &[run], None)
+                .width
+        };
 
         let labels = placed
             .iter()
@@ -89,10 +97,10 @@ impl CallHierarchyPanel {
                     .file()
                     .map(|file| SharedString::from(file.file_name(cx).to_string()));
                 let width = px(8. + 16. + 6.)
-                    + advance * name.chars().count() as f32
-                    + detail.as_ref().map_or(px(0.), |detail| {
-                        px(6.) + detail_advance * detail.chars().count() as f32
-                    })
+                    + measure(&name, NAME_SIZE)
+                    + detail
+                        .as_ref()
+                        .map_or(px(0.), |detail| px(6.) + measure(detail, DETAIL_SIZE))
                     + px(8.);
                 Some((name, detail, width, node.tag))
             })
@@ -201,14 +209,12 @@ impl CallHierarchyPanel {
                     .child(glyph(tag, cx))
                     .child(
                         div()
-                            .font_buffer(cx)
                             .text_size(NAME_SIZE)
                             .text_color(colors.text)
                             .child(name),
                     )
                     .children(detail.map(|detail| {
                         div()
-                            .font_buffer(cx)
                             .text_size(DETAIL_SIZE)
                             .text_color(colors.text_muted)
                             .child(detail)
