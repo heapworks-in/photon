@@ -63,6 +63,58 @@ impl photon_review::ReviewAgent for PanelReviewAgent {
     }
 }
 
+/// Call Trails flags a root the open PR review changes, and explains a trail through the agent
+/// panel, with the user's selected agent.
+pub fn register_call_trail_hooks(cx: &mut App) {
+    photon_call_trails::set_hooks(
+        photon_call_trails::CallTrailHooks {
+            changed_in_review: Some(std::rc::Rc::new(photon_review::pr_changing_rows)),
+            explain: Some(std::rc::Rc::new(explain_call_trail)),
+        },
+        cx,
+    );
+}
+
+fn explain_call_trail(
+    workspace: &mut Workspace,
+    prompt: String,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    use agent_client_protocol::schema::v2 as acp_v2;
+    use agent_ui::{AgentInitialContent, AgentPanel, AgentThreadSource, CreateThreadOptions};
+    use workspace::{Toast, notifications::NotificationId};
+
+    let Some(panel) = workspace.panel::<AgentPanel>(cx) else {
+        workspace.show_toast(
+            Toast::new(
+                NotificationId::unique::<AgentPanel>(),
+                "This window has no agent panel. Open it once, then try again.",
+            ),
+            cx,
+        );
+        return;
+    };
+    let blocks = vec![acp_v2::ContentBlock::Text(acp_v2::TextContent::new(prompt))];
+    panel.update(cx, |panel, cx| {
+        let thread_id = panel.create_thread_with_options(
+            CreateThreadOptions {
+                title: Some("Explain call trail".into()),
+                initial_content: Some(AgentInitialContent::ContentBlock {
+                    blocks,
+                    auto_submit: true,
+                }),
+                ..CreateThreadOptions::default()
+            },
+            AgentThreadSource::AgentPanel,
+            window,
+            cx,
+        );
+        panel.activate_retained_thread(thread_id, false, window, cx);
+    });
+    workspace.focus_panel::<AgentPanel>(window, cx);
+}
+
 enum AgentProgress {
     Connecting,
     Working,
