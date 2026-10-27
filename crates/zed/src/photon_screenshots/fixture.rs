@@ -807,3 +807,108 @@ pub const CALLS: &[(&str, &str)] = &[
     ("charge", "is_retryable"),
     ("retry_with_backoff", "delay"),
 ];
+
+/// An untracked file in the `git status` close-up.
+pub const RUNBOOK: &str = r#"# Billing runbook
+
+## The gateway is down
+
+Charges retry four times, then the invoice waits for the nightly job. Nothing to do unless the
+outage lasts past midnight UTC.
+"#;
+
+/// The terminal's home directory. zsh reads only this `.zshrc` (and the system's own files), so
+/// nothing from the user's shell setup shows up; `bin/` holds canned stand-ins for tools whose
+/// real output would depend on the machine or the network.
+pub fn terminal_home() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (".zshrc", ZSHRC),
+        ("bin/cargo", CARGO_SCRIPT),
+        ("bin/kubectl", KUBECTL_SCRIPT),
+    ]
+}
+
+const ZSHRC: &str = r#"export PATH="$HOME/bin:$PATH"
+export LANG=en_US.UTF-8
+export CLICOLOR=1
+export GIT_PAGER=cat PAGER=cat
+unset HISTFILE
+PROMPT='billing %# '
+"#;
+
+const CARGO_SCRIPT: &str = r#"#!/bin/sh
+green() { printf '\033[1;32m%12s\033[0m %s\n' "$1" "$2"; }
+case "$1" in
+build)
+  sleep 1.2
+  green Compiling "billing v0.4.0"
+  sleep 1.9
+  green Finished "\`dev\` profile [unoptimized + debuginfo] target(s) in 3.14s"
+  ;;
+clippy)
+  sleep 1.6
+  green Checking "billing v0.4.0"
+  printf '\033[1;31merror\033[0m\033[1m: this `match` can be collapsed into the outer `match`\033[0m\n'
+  printf '  \033[1;34m-->\033[0m src/api.rs:47:13\n'
+  printf '   \033[1;34m|\033[0m\n'
+  printf '\033[1;34m47\033[0m \033[1;34m|\033[0m             ChargeError::Unavailable(error) => {\n'
+  printf '   \033[1;34m|\033[0m             \033[1;31m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\033[0m\n'
+  printf '\n\033[1;31merror\033[0m\033[1m: could not compile `billing` (bin "billing") due to 1 previous error\033[0m\n'
+  exit 101
+  ;;
+test)
+  sleep 0.8
+  green Finished "\`test\` profile [unoptimized + debuginfo] target(s) in 2.41s"
+  green Running "unittests src/main.rs (target/debug/deps/billing-3f9c2a1b7e4d5c60)"
+  printf '\nrunning 9 tests\n'
+  for name in invoice::tests::total_subtracts_discount invoice::tests::total_is_never_negative \
+      ledger::tests::failed_invoices_skip_paid payments::tests::declines_are_not_retried; do
+    printf 'test %s ... \033[32mok\033[0m\n' "$name"
+  done
+  printf 'test payments::tests::retries_gateway_timeouts ... \033[31mFAILED\033[0m\n'
+  for name in payments::tests::idempotency_key_is_stable retry::tests::delays_double_up_to_the_cap \
+      retry::tests::gives_up_after_the_last_attempt; do
+    printf 'test %s ... \033[32mok\033[0m\n' "$name"
+  done
+  printf 'test retry::tests::delay_never_passes_max ... \033[31mFAILED\033[0m\n'
+  cat <<'OUT'
+
+failures:
+
+---- payments::tests::retries_gateway_timeouts stdout ----
+
+thread 'payments::tests::retries_gateway_timeouts' panicked at src/payments.rs:112:9:
+assertion `left == right` failed
+  left: 1
+ right: 3
+
+---- retry::tests::delay_never_passes_max stdout ----
+
+thread 'retry::tests::delay_never_passes_max' panicked at src/retry.rs:52:9:
+assertion failed: backoff.delay(10) <= backoff.max
+
+failures:
+    payments::tests::retries_gateway_timeouts
+    retry::tests::delay_never_passes_max
+
+OUT
+  printf 'test result: \033[31mFAILED\033[0m. 7 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s\n\n'
+  printf '\033[1;31merror\033[0m: test failed, to rerun pass `--bin billing`\n'
+  exit 101
+  ;;
+esac
+"#;
+
+const KUBECTL_SCRIPT: &str = r#"#!/bin/sh
+sleep 0.4
+cat <<'OUT'
+NAME                             READY   STATUS             RESTARTS      AGE
+billing-api-7d9f8c6b5-2xkqp      1/1     Running            0             3h12m
+billing-api-7d9f8c6b5-h8w4n      1/1     Running            0             3h12m
+billing-api-7d9f8c6b5-r6tzm      1/1     Running            0             3h11m
+billing-nightly-28814400-fq2lx   0/1     Completed          0             9h
+billing-worker-5c4b9d7f8-mz9vd   1/1     Running            2 (41m ago)   2d4h
+gateway-mock-6b8d5f9c4-p7k2s     0/1     CrashLoopBackOff   14 (2m ago)   52m
+ledger-db-0                      1/1     Running            0             12d
+OUT
+"#;

@@ -73,7 +73,8 @@ mod mac {
     use futures::channel::mpsc::UnboundedReceiver;
     use gpui::{
         App, AppContext as _, AsyncWindowContext, BorrowAppContext as _, Bounds, Entity,
-        Focusable as _, Modifiers, Task, VisualTestAppContext, WeakEntity, Window, WindowBounds,
+        Focusable as _, Modifiers, Pixels, Task, VisualTestAppContext, WeakEntity, Window,
+        WindowBounds,
         WindowHandle, WindowOptions, point, px, size,
     };
     use language::{
@@ -87,6 +88,7 @@ mod mac {
     use project::{AgentId, Project, ProjectPath};
     use serde_json::json;
     use settings::{Settings as _, SettingsStore};
+    use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
     use util::ResultExt as _;
     use workspace::{AppState, MultiWorkspace, Panel, Workspace};
 
@@ -101,18 +103,34 @@ mod mac {
     const PR_NUMBER: u64 = 214;
     const BRANCH: &str = "retry-card-charges";
     /// Below this, a WebP copy is kept; cwebp's quality setting is lowered until it fits.
-    const MAX_IMAGE_BYTES: u64 = 600 * 1024;
+    const MAX_IMAGE_BYTES: u64 = 400 * 1024;
 
     pub fn run(output: PathBuf, only: Option<String>) -> Result<()> {
         let temp = tempfile::tempdir()?.keep().canonicalize()?;
-        let repo = Repo::create(&temp.join("main"))?;
+        let home = temp.join("home");
+        write_files(&home, &owned(fixture::terminal_home()))?;
+        for entry in std::fs::read_dir(home.join("bin"))? {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(entry?.path(), std::fs::Permissions::from_mode(0o755))?;
+        }
+        // SAFETY: no other thread runs yet. Terminals start zsh in the fixture home, so neither
+        // the user's dotfiles nor their name or paths reach a screenshot; block headers show
+        // `~/code/billing`.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("SHELL", "/bin/zsh");
+            std::env::remove_var("ZDOTDIR");
+            std::env::remove_var("TERM_PROGRAM");
+        }
+        let repo = Repo::create(&home.join("code"))?;
         let mut shooter = Shooter::new(output, repo)?;
+        shooter.set_theme(false)?;
         let wanted = |scene: &str| {
             only.as_deref()
                 .is_none_or(|only| only.split(',').any(|name| name == scene))
         };
         type Scene = fn(&mut Shooter) -> Result<()>;
-        let scenes: [(&str, Scene); 11] = [
+        let scenes: [(&str, Scene); 15] = [
             ("hero", |shooter| shooter.hero("hero", false)),
             ("hero-light", |shooter| shooter.hero("hero-light", true)),
             ("pr-review", Shooter::pr_review),
@@ -124,6 +142,10 @@ mod mac {
             ("language-server-help", Shooter::language_server_help),
             ("agent", Shooter::agent),
             ("inbox", Shooter::inbox),
+            ("terminal-blocks", Shooter::terminal_blocks),
+            ("terminal-tests", Shooter::terminal_tests),
+            ("terminal-table", Shooter::terminal_table),
+            ("terminal-git", Shooter::terminal_git),
         ];
         let mut failed = Vec::new();
         for (name, scene) in scenes {
@@ -695,6 +717,54 @@ mod mac {
     struct Win {
         handle: WindowHandle<MultiWorkspace>,
         workspace: Entity<Workspace>,
+        width: f32,
+        height: f32,
+    }
+
+    /// Part of a close-up: an element drawn with a debug selector, or a rectangle in window
+    /// coordinates.
+    #[derive(Clone, Copy)]
+    enum Area {
+        Selector(&'static str),
+        Rect(f32, f32, f32, f32),
+    }
+
+    /// Space kept around a close-up's areas, so it still reads as part of the app.
+    const CROP_PADDING: f32 = 16.;
+    /// Narrower close-ups would show the UI larger than life on the site.
+    const MIN_CROP_WIDTH: f32 = 560.;
+
+    /// Pads `(x, y, width, height)` and grows it to between 3:2 and 16:10 around its centre,
+    /// kept inside the window.
+    fn fit_crop(
+        (x, y, width, height): (f32, f32, f32, f32),
+        window_width: f32,
+        window_height: f32,
+    ) -> (f32, f32, f32, f32) {
+        let (mut x, mut y) = (x - CROP_PADDING, y - CROP_PADDING);
+        let mut width = width + CROP_PADDING * 2.;
+        let mut height = height + CROP_PADDING * 2.;
+        if width < MIN_CROP_WIDTH {
+            x -= (MIN_CROP_WIDTH - width) / 2.;
+            width = MIN_CROP_WIDTH;
+        }
+        if width / height < 1.5 {
+            let grown = height * 1.5;
+            x -= (grown - width) / 2.;
+            width = grown;
+        } else if width / height > 1.6 {
+            let grown = width / 1.6;
+            y -= (grown - height) / 2.;
+            height = grown;
+        }
+        let width = width.min(window_width);
+        let height = height.min(window_height);
+        (
+            x.clamp(0., window_width - width),
+            y.clamp(0., window_height - height),
+            width,
+            height,
+        )
     }
 
     struct Shooter {
@@ -791,8 +861,14 @@ mod mac {
 
         fn set_theme(&mut self, light: bool) -> Result<()> {
             let mode = if light { "light" } else { "dark" };
+            // The system shell would start through `login`, which resets HOME to the user's own
+            // and loads their dotfiles; a named program starts zsh directly in the fixture home.
+            let home = serde_json::to_string(&std::env::var("HOME")?)?;
             let json = format!(
-                r#"{{ "theme": {{ "mode": "{mode}", "light": "One Light", "dark": "Photon Black" }} }}"#
+                r#"{{
+                    "theme": {{ "mode": "{mode}", "light": "One Light", "dark": "Photon Black" }},
+                    "terminal": {{ "shell": {{ "program": "/bin/zsh" }}, "env": {{ "HOME": {home} }} }}
+                }}"#
             );
             self.cx.update(|cx| {
                 cx.update_global::<SettingsStore, _>(|store, cx| {
@@ -829,11 +905,15 @@ mod mac {
         }
 
         fn open_window(&mut self, root: &Path) -> Result<Win> {
+            self.open_window_sized(root, WINDOW_WIDTH, WINDOW_HEIGHT)
+        }
+
+        fn open_window_sized(&mut self, root: &Path, width: f32, height: f32) -> Result<Win> {
             let project = self.project(root)?;
             let app_state = self.app_state.clone();
             let bounds = Bounds {
                 origin: point(px(0.), px(0.)),
-                size: size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)),
+                size: size(px(width), px(height)),
             };
             let handle: WindowHandle<MultiWorkspace> = self.cx.update(|cx| {
                 cx.open_window(
@@ -854,7 +934,12 @@ mod mac {
             let workspace = handle.update(&mut self.cx, |multi_workspace, _, _| {
                 multi_workspace.workspace().clone()
             })?;
-            let win = Win { handle, workspace };
+            let win = Win {
+                handle,
+                workspace,
+                width,
+                height,
+            };
             self.update(&win, |workspace, window, cx| {
                 add_status_items(workspace, window, cx)
             })?;
@@ -965,14 +1050,192 @@ mod mac {
             self.settle();
         }
 
+        /// Pumps the app in real time until `done`: shells and canned commands run outside it.
+        fn wait_for(&mut self, what: &str, mut done: impl FnMut(&mut Self) -> bool) -> Result<()> {
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while !done(self) {
+                anyhow::ensure!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for {what}"
+                );
+                self.cx.background_executor.allow_parking();
+                self.cx.run_until_parked();
+                std::thread::sleep(Duration::from_millis(50));
+                self.cx.advance_clock(Duration::from_millis(50));
+                self.cx.run_until_parked();
+                self.cx.background_executor.forbid_parking();
+            }
+            Ok(())
+        }
+
+        fn wait_for_prompt(&mut self, view: &Entity<TerminalView>) -> Result<()> {
+            let terminal = view.read_with(&self.cx, |view, _| view.terminal().clone());
+            self.wait_for("the shell's prompt", |this| {
+                terminal.read_with(&this.cx, |terminal, _| {
+                    terminal.input_target() == terminal::InputTarget::BlockInput
+                })
+            })
+        }
+
+        /// A zsh in the repository, in the active center pane.
+        fn open_center_terminal(&mut self, win: &Win) -> Result<Entity<TerminalView>> {
+            let project = win
+                .workspace
+                .read_with(&self.cx, |workspace, _| workspace.project().clone());
+            let root = self.repo.root.clone();
+            let create = project.update(&mut self.cx, |project, cx| {
+                project.create_terminal_shell(Some(root), cx)
+            });
+            let terminal = self.block(create)?;
+            let view = self.update(win, |workspace, window, cx| {
+                let view = cx.new(|cx| {
+                    TerminalView::new(
+                        terminal,
+                        workspace.weak_handle(),
+                        None,
+                        project.downgrade(),
+                        window,
+                        cx,
+                    )
+                });
+                workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
+                view
+            })?;
+            self.wait_for_prompt(&view)?;
+            Ok(view)
+        }
+
+        /// The bottom terminal panel's first terminal, which opens in the repository.
+        fn open_dock_terminal(&mut self, win: &Win) -> Result<Entity<TerminalView>> {
+            let panel = self.add_panel(&win, TerminalPanel::load)?;
+            self.update(win, |workspace, window, cx| {
+                workspace.open_panel::<TerminalPanel>(window, cx)
+            })?;
+            let mut view = None;
+            self.wait_for("the terminal panel's terminal", |this| {
+                view = panel.read_with(&this.cx, |panel, cx| {
+                    panel.panes().first().and_then(|pane| {
+                        pane.read(cx)
+                            .active_item()
+                            .and_then(|item| item.downcast::<TerminalView>())
+                    })
+                });
+                view.is_some()
+            })?;
+            let view = view.context("no terminal in the panel")?;
+            self.wait_for_prompt(&view)?;
+            Ok(view)
+        }
+
+        /// Runs `command` at the prompt and waits for its block to finish and the next prompt.
+        fn run_in_terminal(&mut self, view: &Entity<TerminalView>, command: &str) -> Result<()> {
+            let terminal = view.read_with(&self.cx, |view, _| view.terminal().clone());
+            let finished = |terminal: &terminal::Terminal| {
+                terminal.blocks().map_or(0, |blocks| {
+                    blocks
+                        .blocks()
+                        .filter(|block| block.end_line.is_some())
+                        .count()
+                })
+            };
+            let before = terminal.read_with(&self.cx, |terminal, _| finished(terminal));
+            terminal.update(&mut self.cx, |terminal, cx| terminal.run_command(command, cx));
+            self.wait_for(command, |this| {
+                terminal.read_with(&this.cx, |terminal, _| {
+                    finished(terminal) > before
+                        && terminal.input_target() == terminal::InputTarget::BlockInput
+                })
+            })?;
+            // Smart blocks read the finished output off the UI thread.
+            self.settle();
+            Ok(())
+        }
+
+        /// Focuses the terminal and dispatches one of its actions by name, as a key binding would.
+        fn terminal_action(
+            &mut self,
+            win: &Win,
+            view: &Entity<TerminalView>,
+            name: &str,
+        ) -> Result<()> {
+            win.handle.update(&mut self.cx, |_, window, cx| {
+                window.focus(&view.focus_handle(cx), cx);
+                let action = cx.build_action(name, None)?;
+                window.dispatch_action(action, cx);
+                anyhow::Ok(())
+            })??;
+            self.settle();
+            Ok(())
+        }
+
         fn shoot(&mut self, win: &Win, name: &str) -> Result<()> {
+            self.shoot_crops(win, Some(name), &[])
+        }
+
+        /// Saves the whole window as `name` (if any) and each close-up as its own image.
+        fn shoot_crops(
+            &mut self,
+            win: &Win,
+            name: Option<&str>,
+            crops: &[(&str, &[Area])],
+        ) -> Result<()> {
             self.settle();
             self.refresh(win)?;
             let image = self.cx.capture_screenshot(win.handle.into())?;
+            // PHOTON_FULL=<dir> keeps every whole-window capture, for placing close-ups.
+            if let Ok(directory) = std::env::var("PHOTON_FULL") {
+                let stem = name.or(crops.first().map(|(name, _)| *name)).unwrap_or("scene");
+                image.save(Path::new(&directory).join(format!("{stem}-full.png")))?;
+            }
+            if let Some(name) = name {
+                self.save(&image, name)?;
+            }
+            let scale = image.width() as f32 / win.width;
+            for (crop_name, areas) in crops {
+                let mut union: Option<Bounds<Pixels>> = None;
+                for area in *areas {
+                    let bounds = match area {
+                        Area::Selector(selector) => self
+                            .cx
+                            .debug_bounds(win.handle.into(), selector)
+                            .with_context(|| format!("{selector} isn't drawn"))?,
+                        Area::Rect(x, y, width, height) => Bounds {
+                            origin: point(px(*x), px(*y)),
+                            size: size(px(*width), px(*height)),
+                        },
+                    };
+                    union = Some(union.map_or(bounds, |union| union.union(&bounds)));
+                }
+                let union = union.context("a close-up needs an area")?;
+                let (x, y, width, height) = fit_crop(
+                    (
+                        f32::from(union.origin.x),
+                        f32::from(union.origin.y),
+                        f32::from(union.size.width),
+                        f32::from(union.size.height),
+                    ),
+                    win.width,
+                    win.height,
+                );
+                let to_pixels = |value: f32| (value * scale).round() as u32;
+                let cropped = image::imageops::crop_imm(
+                    &image,
+                    to_pixels(x),
+                    to_pixels(y),
+                    to_pixels(width),
+                    to_pixels(height),
+                )
+                .to_image();
+                self.save(&cropped, crop_name)?;
+            }
+            Ok(())
+        }
+
+        fn save(&self, image: &image::RgbaImage, name: &str) -> Result<()> {
             let png = self.output.join(format!("{name}.png"));
             image.save(&png)?;
-            save_webp(&png, &self.output, name)?;
-            println!("  saved {name}");
+            save_webp(&png, &self.output, name, image.width() / 2)?;
+            println!("  saved {name} ({}x{})", image.width(), image.height());
             Ok(())
         }
 
@@ -1006,10 +1269,111 @@ mod mac {
                 workspace.open_panel::<project_panel::ProjectPanel>(window, cx)
             })?;
             let editor = self.open_file(&win, "src/payments.rs")?;
+            let terminal = self.open_dock_terminal(&win)?;
+            self.run_in_terminal(&terminal, "cargo build")?;
+            self.run_in_terminal(&terminal, "kubectl get pods")?;
             self.place_cursor(&win, &editor, "retry_with_backoff(self.backoff")?;
-            let result = self.shoot(&win, name);
+            let crop = format!("{name}-crop");
+            let crops: &[(&str, &[Area])] = if light {
+                &[]
+            } else {
+                &[(crop.as_str(), &[Area::Rect(240., 40., 1200., 840.)])]
+            };
+            let result = self.shoot_crops(&win, Some(name), crops);
             self.close(win);
             self.set_theme(false)?;
+            result
+        }
+
+        fn terminal_window(&mut self, width: f32, height: f32) -> Result<(Win, Entity<TerminalView>)> {
+            let root = self.repo.root.clone();
+            let win = self.open_window_sized(&root, width, height)?;
+            let view = self.open_center_terminal(&win)?;
+            Ok((win, view))
+        }
+
+        fn terminal_blocks(&mut self) -> Result<()> {
+            let (win, view) = self.terminal_window(1000., 625.)?;
+            for command in ["git log --oneline -3", "cargo build", "cargo clippy"] {
+                self.run_in_terminal(&view, command)?;
+            }
+            let result = self.shoot_crops(
+                &win,
+                None,
+                &[("cu-terminal-blocks", &[Area::Rect(0., 0., 1000., 625.)])],
+            );
+            self.close(win);
+            result
+        }
+
+        fn terminal_tests(&mut self) -> Result<()> {
+            let (win, view) = self.terminal_window(1150., 766.)?;
+            self.run_in_terminal(&view, "cargo test")?;
+            self.terminal_action(&win, &view, "photon_terminal::SelectPreviousBlock")?;
+            let result = self.shoot_crops(
+                &win,
+                None,
+                &[("cu-terminal-tests", &[Area::Rect(0., 0., 1150., 766.)])],
+            );
+            self.close(win);
+            result
+        }
+
+        fn terminal_table(&mut self) -> Result<()> {
+            let root = self.repo.root.clone();
+            let win = self.open_window_sized(&root, 1100., 720.)?;
+            let view = self.open_dock_terminal(&win)?;
+            self.run_in_terminal(&view, "kubectl get pods")?;
+            self.terminal_action(&win, &view, "photon_terminal::SelectPreviousBlock")?;
+            self.terminal_action(&win, &view, "photon_terminal::OpenBlockAsTable")?;
+            let result = self.shoot_crops(
+                &win,
+                None,
+                &[("cu-terminal-table", &[Area::Rect(0., 0., 1100., 720.)])],
+            );
+            self.close(win);
+            result
+        }
+
+        fn terminal_git(&mut self) -> Result<()> {
+            let root = self.repo.root.clone();
+            let retry = std::fs::read_to_string(root.join("src/retry.rs"))?;
+            write_files(
+                &root,
+                &[
+                    (
+                        "src/retry.rs",
+                        retry.replace(
+                            "        capped + Duration::from_millis(jitter)",
+                            "        (capped + Duration::from_millis(jitter)).min(self.max)",
+                        ),
+                    ),
+                    (
+                        "Cargo.toml",
+                        fixture::CARGO_TOML.replace("version = \"0.4.0\"", "version = \"0.5.0\""),
+                    ),
+                    ("docs/runbook.md", fixture::RUNBOOK.to_string()),
+                    (
+                        "src/api.rs",
+                        fixture::API_RS_HEAD.replace("try again shortly", "try again in a minute"),
+                    ),
+                ],
+            )?;
+            git(&root, &["add", "Cargo.toml"], None)?;
+            let result = (|| {
+                let (win, view) = self.terminal_window(1000., 625.)?;
+                self.run_in_terminal(&view, "git status")?;
+                self.terminal_action(&win, &view, "photon_terminal::SelectPreviousBlock")?;
+                let result = self.shoot_crops(
+                    &win,
+                    None,
+                    &[("cu-terminal-git", &[Area::Rect(0., 0., 1000., 625.)])],
+                );
+                self.close(win);
+                result
+            })();
+            git(&root, &["reset", "--hard", "--quiet"], None)?;
+            git(&root, &["clean", "-fdq"], None)?;
             result
         }
 
@@ -1396,9 +1760,9 @@ mod mac {
         name.leak()
     }
 
-    /// Writes `<name>.webp` at the captured 2x size and `<name>-1x.webp`, each under
-    /// `MAX_IMAGE_BYTES`, and removes the PNG. Without cwebp the PNG stays.
-    fn save_webp(png: &Path, output: &Path, name: &str) -> Result<()> {
+    /// Writes `<name>.webp` at the captured 2x size and `<name>-1x.webp` `width_1x` wide, each
+    /// under `MAX_IMAGE_BYTES`, and removes the PNG. Without cwebp the PNG stays.
+    fn save_webp(png: &Path, output: &Path, name: &str, width_1x: u32) -> Result<()> {
         if std::process::Command::new("cwebp")
             .arg("-version")
             .output()
@@ -1407,7 +1771,8 @@ mod mac {
             eprintln!("  cwebp not found; kept {}", png.display());
             return Ok(());
         }
-        for (suffix, resize) in [("", None), ("-1x", Some(("1440", "0")))] {
+        let width_1x = width_1x.to_string();
+        for (suffix, resize) in [("", None), ("-1x", Some((width_1x.as_str(), "0")))] {
             let webp = output.join(format!("{name}{suffix}.webp"));
             for quality in [90, 85, 80, 75, 70, 60] {
                 let mut command = std::process::Command::new("cwebp");
