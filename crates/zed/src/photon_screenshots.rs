@@ -6,13 +6,17 @@
 //! Renders the screenshots on Photon's website with the app itself, offscreen, the way
 //! `zed_visual_test_runner` does: real Metal rendering, no Screen Recording permission.
 //!
-//!   cargo run -p zed --bin photon_screenshots --features photon-screenshots [-- OUTPUT_DIR]
+//!   cargo run -p zed --example photon_screenshots --features photon-screenshots [-- OUTPUT_DIR]
 //!
 //! Every scene opens a window on a fixture repository (a small billing service with one pull
 //! request), drives it like a user would, and saves `<scene>.webp` (2x) and `<scene>-1x.webp`
 //! to OUTPUT_DIR (default `docs/photon/site/img/app`). Nothing touches the network or the user's
 //! settings: GitHub answers come from a fake `gh`, language servers are fakes, and the agent is
-//! a stub.
+//! a stub. Terminals run zsh in a fixture home whose `bin/` has canned `cargo` and `kubectl`.
+//!
+//! Close-ups (`cu-*`) are crops of a window, or small windows saved whole. `PHOTON_SCENES=a,b`
+//! runs only those scenes; `PHOTON_FULL=<dir>` also keeps each whole-window capture there, for
+//! placing a crop.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -73,8 +77,8 @@ mod mac {
     use futures::channel::mpsc::UnboundedReceiver;
     use gpui::{
         App, AppContext as _, AsyncWindowContext, BorrowAppContext as _, Bounds, Entity,
-        Focusable as _, Modifiers, Task, VisualTestAppContext, WeakEntity, Window, WindowBounds,
-        WindowHandle, WindowOptions, point, px, size,
+        Focusable as _, Modifiers, Pixels, Task, VisualTestAppContext, WeakEntity, Window,
+        WindowBounds, WindowHandle, WindowOptions, point, px, size,
     };
     use language::{
         BinaryStatus, FakeLspAdapter, Language, LanguageConfig, LanguageMatcher, LanguageServerName,
@@ -87,6 +91,7 @@ mod mac {
     use project::{AgentId, Project, ProjectPath};
     use serde_json::json;
     use settings::{Settings as _, SettingsStore};
+    use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
     use util::ResultExt as _;
     use workspace::{AppState, MultiWorkspace, Panel, Workspace};
 
@@ -94,6 +99,9 @@ mod mac {
 
     const WINDOW_WIDTH: f32 = 1440.;
     const WINDOW_HEIGHT: f32 = 900.;
+    /// Close-ups that are a whole window use this smaller one, so the UI fills the image.
+    const CLOSE_UP_WIDTH: f32 = 960.;
+    const CLOSE_UP_HEIGHT: f32 = 600.;
     const REVIEWER: &str = "maya";
     const AUTHOR: &str = "priya";
     const OWNER: &str = "orbit-labs";
@@ -101,29 +109,50 @@ mod mac {
     const PR_NUMBER: u64 = 214;
     const BRANCH: &str = "retry-card-charges";
     /// Below this, a WebP copy is kept; cwebp's quality setting is lowered until it fits.
-    const MAX_IMAGE_BYTES: u64 = 600 * 1024;
+    const MAX_IMAGE_BYTES: u64 = 400 * 1024;
 
     pub fn run(output: PathBuf, only: Option<String>) -> Result<()> {
         let temp = tempfile::tempdir()?.keep().canonicalize()?;
-        let repo = Repo::create(&temp.join("main"))?;
+        let home = temp.join("home");
+        write_files(&home, &owned(fixture::terminal_home()))?;
+        for entry in std::fs::read_dir(home.join("bin"))? {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(entry?.path(), std::fs::Permissions::from_mode(0o755))?;
+        }
+        // SAFETY: no other thread runs yet. Terminals start zsh in the fixture home, so neither
+        // the user's dotfiles nor their name or paths reach a screenshot; block headers show
+        // `~/code/billing`.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("SHELL", "/bin/zsh");
+            std::env::remove_var("ZDOTDIR");
+            std::env::remove_var("TERM_PROGRAM");
+        }
+        let repo = Repo::create(&home.join("code"))?;
         let mut shooter = Shooter::new(output, repo)?;
+        shooter.set_theme(false)?;
         let wanted = |scene: &str| {
             only.as_deref()
                 .is_none_or(|only| only.split(',').any(|name| name == scene))
         };
         type Scene = fn(&mut Shooter) -> Result<()>;
-        let scenes: [(&str, Scene); 11] = [
+        let scenes: [(&str, Scene); 16] = [
             ("hero", |shooter| shooter.hero("hero", false)),
             ("hero-light", |shooter| shooter.hero("hero-light", true)),
             ("pr-review", Shooter::pr_review),
             ("pr-merge", Shooter::pr_merge),
             ("pr-conversation", Shooter::pr_conversation),
             ("pr-unreviewed", Shooter::pr_unreviewed),
+            ("pr-closeups", Shooter::pr_closeups),
             ("markdown", Shooter::markdown),
             ("call-hierarchy", Shooter::call_hierarchy),
             ("language-server-help", Shooter::language_server_help),
             ("agent", Shooter::agent),
             ("inbox", Shooter::inbox),
+            ("terminal-blocks", Shooter::terminal_blocks),
+            ("terminal-tests", Shooter::terminal_tests),
+            ("terminal-table", Shooter::terminal_table),
+            ("terminal-git", Shooter::terminal_git),
         ];
         let mut failed = Vec::new();
         for (name, scene) in scenes {
@@ -695,6 +724,55 @@ mod mac {
     struct Win {
         handle: WindowHandle<MultiWorkspace>,
         workspace: Entity<Workspace>,
+        width: f32,
+        height: f32,
+    }
+
+    /// Part of a close-up, in window coordinates.
+    #[derive(Clone, Copy)]
+    enum Area {
+        /// Padded and grown to a 3:2 to 16:10 image.
+        Rect(f32, f32, f32, f32),
+        /// The whole close-up as is, unpadded, for when padding would cut a line of text.
+        Exact(f32, f32, f32, f32),
+    }
+
+    /// Space kept around a close-up's areas, so it still reads as part of the app.
+    const CROP_PADDING: f32 = 16.;
+    /// Narrower close-ups would show the UI larger than life on the site.
+    const MIN_CROP_WIDTH: f32 = 560.;
+
+    /// Pads `(x, y, width, height)` and grows it to between 3:2 and 16:10 around its centre,
+    /// kept inside the window.
+    fn fit_crop(
+        (x, y, width, height): (f32, f32, f32, f32),
+        window_width: f32,
+        window_height: f32,
+    ) -> (f32, f32, f32, f32) {
+        let (mut x, mut y) = (x - CROP_PADDING, y - CROP_PADDING);
+        let mut width = width + CROP_PADDING * 2.;
+        let mut height = height + CROP_PADDING * 2.;
+        if width < MIN_CROP_WIDTH {
+            x -= (MIN_CROP_WIDTH - width) / 2.;
+            width = MIN_CROP_WIDTH;
+        }
+        if width / height < 1.5 {
+            let grown = height * 1.5;
+            x -= (grown - width) / 2.;
+            width = grown;
+        } else if width / height > 1.6 {
+            let grown = width / 1.6;
+            y -= (grown - height) / 2.;
+            height = grown;
+        }
+        let width = width.min(window_width);
+        let height = height.min(window_height);
+        (
+            x.clamp(0., window_width - width),
+            y.clamp(0., window_height - height),
+            width,
+            height,
+        )
     }
 
     struct Shooter {
@@ -791,8 +869,14 @@ mod mac {
 
         fn set_theme(&mut self, light: bool) -> Result<()> {
             let mode = if light { "light" } else { "dark" };
+            // The system shell would start through `login`, which resets HOME to the user's own
+            // and loads their dotfiles; a named program starts zsh directly in the fixture home.
+            let home = serde_json::to_string(&std::env::var("HOME")?)?;
             let json = format!(
-                r#"{{ "theme": {{ "mode": "{mode}", "light": "One Light", "dark": "Photon Black" }} }}"#
+                r#"{{
+                    "theme": {{ "mode": "{mode}", "light": "One Light", "dark": "Photon Black" }},
+                    "terminal": {{ "shell": {{ "program": "/bin/zsh" }}, "env": {{ "HOME": {home} }} }}
+                }}"#
             );
             self.cx.update(|cx| {
                 cx.update_global::<SettingsStore, _>(|store, cx| {
@@ -829,11 +913,15 @@ mod mac {
         }
 
         fn open_window(&mut self, root: &Path) -> Result<Win> {
+            self.open_window_sized(root, WINDOW_WIDTH, WINDOW_HEIGHT)
+        }
+
+        fn open_window_sized(&mut self, root: &Path, width: f32, height: f32) -> Result<Win> {
             let project = self.project(root)?;
             let app_state = self.app_state.clone();
             let bounds = Bounds {
                 origin: point(px(0.), px(0.)),
-                size: size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)),
+                size: size(px(width), px(height)),
             };
             let handle: WindowHandle<MultiWorkspace> = self.cx.update(|cx| {
                 cx.open_window(
@@ -854,7 +942,12 @@ mod mac {
             let workspace = handle.update(&mut self.cx, |multi_workspace, _, _| {
                 multi_workspace.workspace().clone()
             })?;
-            let win = Win { handle, workspace };
+            let win = Win {
+                handle,
+                workspace,
+                width,
+                height,
+            };
             self.update(&win, |workspace, window, cx| {
                 add_status_items(workspace, window, cx)
             })?;
@@ -965,14 +1058,216 @@ mod mac {
             self.settle();
         }
 
-        fn shoot(&mut self, win: &Win, name: &str) -> Result<()> {
+        /// Pumps the app in real time until `done`: shells and canned commands run outside it.
+        fn wait_for(&mut self, what: &str, mut done: impl FnMut(&mut Self) -> bool) -> Result<()> {
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while !done(self) {
+                anyhow::ensure!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for {what}"
+                );
+                self.cx.background_executor.allow_parking();
+                self.cx.run_until_parked();
+                std::thread::sleep(Duration::from_millis(50));
+                self.cx.advance_clock(Duration::from_millis(50));
+                self.cx.run_until_parked();
+                self.cx.background_executor.forbid_parking();
+            }
+            Ok(())
+        }
+
+        fn wait_for_prompt(&mut self, view: &Entity<TerminalView>) -> Result<()> {
+            let terminal = view.read_with(&self.cx, |view, _| view.terminal().clone());
+            self.wait_for("the shell's prompt", |this| {
+                terminal.read_with(&this.cx, |terminal, _| {
+                    terminal.input_target() == terminal::InputTarget::BlockInput
+                })
+            })?;
+            // The block header's branch is looked up after the prompt appears.
+            let mut pumps = 0;
+            self.wait_for("the branch", |_| {
+                pumps += 1;
+                pumps > 10
+            })
+        }
+
+        /// A zsh in the repository, in the active center pane.
+        fn open_center_terminal(&mut self, win: &Win) -> Result<Entity<TerminalView>> {
+            let project = win
+                .workspace
+                .read_with(&self.cx, |workspace, _| workspace.project().clone());
+            let root = self.repo.root.clone();
+            let create = project.update(&mut self.cx, |project, cx| {
+                project.create_terminal_shell(Some(root), cx)
+            });
+            let terminal = self.block(create)?;
+            let view = self.update(win, |workspace, window, cx| {
+                let view = cx.new(|cx| {
+                    TerminalView::new(
+                        terminal,
+                        workspace.weak_handle(),
+                        None,
+                        project.downgrade(),
+                        window,
+                        cx,
+                    )
+                });
+                workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
+                view
+            })?;
+            self.wait_for_prompt(&view)?;
+            Ok(view)
+        }
+
+        /// The bottom terminal panel's first terminal, which opens in the repository.
+        fn open_dock_terminal(&mut self, win: &Win) -> Result<Entity<TerminalView>> {
+            let panel = self.add_panel(&win, TerminalPanel::load)?;
+            self.update(win, |workspace, window, cx| {
+                workspace.open_panel::<TerminalPanel>(window, cx)
+            })?;
+            let mut view = None;
+            self.wait_for("the terminal panel's terminal", |this| {
+                view = panel.read_with(&this.cx, |panel, cx| {
+                    panel.panes().first().and_then(|pane| {
+                        pane.read(cx)
+                            .active_item()
+                            .and_then(|item| item.downcast::<TerminalView>())
+                    })
+                });
+                view.is_some()
+            })?;
+            let view = view.context("no terminal in the panel")?;
+            self.wait_for_prompt(&view)?;
+            Ok(view)
+        }
+
+        /// Runs `command` at the prompt and waits for its block to finish and the next prompt.
+        fn run_in_terminal(&mut self, view: &Entity<TerminalView>, command: &str) -> Result<()> {
+            let terminal = view.read_with(&self.cx, |view, _| view.terminal().clone());
+            let finished = |terminal: &terminal::Terminal| {
+                terminal.blocks().map_or(0, |blocks| {
+                    blocks
+                        .blocks()
+                        .filter(|block| block.end_line.is_some())
+                        .count()
+                })
+            };
+            let before = terminal.read_with(&self.cx, |terminal, _| finished(terminal));
+            terminal.update(&mut self.cx, |terminal, cx| {
+                terminal.run_command(command, cx)
+            });
+            self.wait_for(command, |this| {
+                terminal.read_with(&this.cx, |terminal, _| {
+                    finished(terminal) > before
+                        && terminal.input_target() == terminal::InputTarget::BlockInput
+                })
+            })?;
+            // Smart blocks read the finished output off the UI thread.
             self.settle();
+            Ok(())
+        }
+
+        /// Focuses the terminal and dispatches one of its actions by name, as a key binding would.
+        fn terminal_action(
+            &mut self,
+            win: &Win,
+            view: &Entity<TerminalView>,
+            name: &str,
+        ) -> Result<()> {
+            win.handle.update(&mut self.cx, |_, window, cx| {
+                window.focus(&view.focus_handle(cx), cx);
+                let action = cx.build_action(name, None)?;
+                window.dispatch_action(action, cx);
+                anyhow::Ok(())
+            })??;
+            self.settle();
+            Ok(())
+        }
+
+        fn shoot(&mut self, win: &Win, name: &str) -> Result<()> {
+            self.shoot_crops(win, Some(name), &[])
+        }
+
+        /// Saves the whole window as `name` (if any) and each close-up as its own image.
+        fn shoot_crops(
+            &mut self,
+            win: &Win,
+            name: Option<&str>,
+            crops: &[(&str, &[Area])],
+        ) -> Result<()> {
+            self.settle();
+            self.capture_crops(win, name, crops)
+        }
+
+        /// Like `shoot_crops`, without letting time pass first.
+        fn capture_crops(
+            &mut self,
+            win: &Win,
+            name: Option<&str>,
+            crops: &[(&str, &[Area])],
+        ) -> Result<()> {
             self.refresh(win)?;
             let image = self.cx.capture_screenshot(win.handle.into())?;
+            // PHOTON_FULL=<dir> keeps every whole-window capture, for placing close-ups.
+            if let Ok(directory) = std::env::var("PHOTON_FULL") {
+                let stem = name
+                    .or(crops.first().map(|(name, _)| *name))
+                    .unwrap_or("scene");
+                image.save(Path::new(&directory).join(format!("{stem}-full.png")))?;
+            }
+            if let Some(name) = name {
+                self.save(&image, name)?;
+            }
+            let scale = image.width() as f32 / win.width;
+            for (crop_name, areas) in crops {
+                let mut union: Option<Bounds<Pixels>> = None;
+                let mut exact = None;
+                for area in *areas {
+                    let bounds = match area {
+                        Area::Exact(x, y, width, height) => {
+                            exact = Some((*x, *y, *width, *height));
+                            continue;
+                        }
+                        Area::Rect(x, y, width, height) => Bounds {
+                            origin: point(px(*x), px(*y)),
+                            size: size(px(*width), px(*height)),
+                        },
+                    };
+                    union = Some(union.map_or(bounds, |union| union.union(&bounds)));
+                }
+                let (x, y, width, height) = match (exact, union) {
+                    (Some(exact), _) => exact,
+                    (None, Some(union)) => fit_crop(
+                        (
+                            f32::from(union.origin.x),
+                            f32::from(union.origin.y),
+                            f32::from(union.size.width),
+                            f32::from(union.size.height),
+                        ),
+                        win.width,
+                        win.height,
+                    ),
+                    (None, None) => anyhow::bail!("{crop_name} needs an area"),
+                };
+                let to_pixels = |value: f32| (value * scale).round() as u32;
+                let cropped = image::imageops::crop_imm(
+                    &image,
+                    to_pixels(x),
+                    to_pixels(y),
+                    to_pixels(width),
+                    to_pixels(height),
+                )
+                .to_image();
+                self.save(&cropped, crop_name)?;
+            }
+            Ok(())
+        }
+
+        fn save(&self, image: &image::RgbaImage, name: &str) -> Result<()> {
             let png = self.output.join(format!("{name}.png"));
             image.save(&png)?;
-            save_webp(&png, &self.output, name)?;
-            println!("  saved {name}");
+            save_webp(&png, &self.output, name, image.width() / 2)?;
+            println!("  saved {name} ({}x{})", image.width(), image.height());
             Ok(())
         }
 
@@ -1006,21 +1301,135 @@ mod mac {
                 workspace.open_panel::<project_panel::ProjectPanel>(window, cx)
             })?;
             let editor = self.open_file(&win, "src/payments.rs")?;
+            let terminal = self.open_dock_terminal(&win)?;
+            self.run_in_terminal(&terminal, "cargo build")?;
+            self.run_in_terminal(&terminal, "git log --oneline -3")?;
             self.place_cursor(&win, &editor, "retry_with_backoff(self.backoff")?;
-            let result = self.shoot(&win, name);
+            let crop = format!("{name}-crop");
+            let crops: &[(&str, &[Area])] = if light {
+                &[]
+            } else {
+                &[(crop.as_str(), &[Area::Exact(0., 0., 1200., 790.)])]
+            };
+            let result = self.shoot_crops(&win, Some(name), crops);
             self.close(win);
             self.set_theme(false)?;
+            result
+        }
+
+        fn terminal_window(
+            &mut self,
+            width: f32,
+            height: f32,
+        ) -> Result<(Win, Entity<TerminalView>)> {
+            let root = self.repo.root.clone();
+            let win = self.open_window_sized(&root, width, height)?;
+            let view = self.open_center_terminal(&win)?;
+            Ok((win, view))
+        }
+
+        fn terminal_blocks(&mut self) -> Result<()> {
+            let (win, view) = self.terminal_window(900., 600.)?;
+            for command in ["git log --oneline -3", "cargo build", "cargo clippy"] {
+                self.run_in_terminal(&view, command)?;
+            }
+            let result = self.shoot_crops(
+                &win,
+                None,
+                &[("cu-terminal-blocks", &[Area::Exact(0., 0., 900., 600.)])],
+            );
+            self.close(win);
+            result
+        }
+
+        fn terminal_tests(&mut self) -> Result<()> {
+            let (win, view) = self.terminal_window(1260., 840.)?;
+            self.run_in_terminal(&view, "cargo test")?;
+            self.terminal_action(&win, &view, "photon_terminal::SelectPreviousBlock")?;
+            let result = self.shoot_crops(
+                &win,
+                None,
+                &[("cu-terminal-tests", &[Area::Rect(0., 0., 1260., 840.)])],
+            );
+            self.close(win);
+            result
+        }
+
+        fn terminal_table(&mut self) -> Result<()> {
+            let root = self.repo.root.clone();
+            let win = self.open_window_sized(&root, 1100., 720.)?;
+            let view = self.open_dock_terminal(&win)?;
+            self.run_in_terminal(&view, "kubectl get pods")?;
+            self.terminal_action(&win, &view, "photon_terminal::SelectPreviousBlock")?;
+            self.terminal_action(&win, &view, "photon_terminal::OpenBlockAsTable")?;
+            let result = self.shoot_crops(
+                &win,
+                None,
+                &[("cu-terminal-table", &[Area::Rect(0., 0., 1100., 720.)])],
+            );
+            self.close(win);
+            result
+        }
+
+        fn terminal_git(&mut self) -> Result<()> {
+            let root = self.repo.root.clone();
+            let retry = std::fs::read_to_string(root.join("src/retry.rs"))?;
+            write_files(
+                &root,
+                &[
+                    (
+                        "src/retry.rs",
+                        retry.replace(
+                            "        capped + Duration::from_millis(jitter)",
+                            "        (capped + Duration::from_millis(jitter)).min(self.max)",
+                        ),
+                    ),
+                    (
+                        "Cargo.toml",
+                        fixture::CARGO_TOML.replace("version = \"0.4.0\"", "version = \"0.5.0\""),
+                    ),
+                    ("docs/runbook.md", fixture::RUNBOOK.to_string()),
+                    (
+                        "src/api.rs",
+                        fixture::API_RS_HEAD.replace("try again shortly", "try again in a minute"),
+                    ),
+                ],
+            )?;
+            git(&root, &["add", "Cargo.toml"], None)?;
+            let result = (|| {
+                let (win, view) = self.terminal_window(900., 562.)?;
+                self.run_in_terminal(&view, "git status")?;
+                self.terminal_action(&win, &view, "photon_terminal::SelectPreviousBlock")?;
+                let result = self.shoot_crops(
+                    &win,
+                    None,
+                    &[("cu-terminal-git", &[Area::Rect(0., 0., 900., 562.)])],
+                );
+                self.close(win);
+                result
+            })();
+            git(&root, &["reset", "--hard", "--quiet"], None)?;
+            git(&root, &["clean", "-fdq"], None)?;
             result
         }
 
         /// Opens the pull request's review tab the way `open_review` places it, from the
         /// fixture's real diff.
         fn open_review(&mut self, viewed: &[(&str, &str)]) -> Result<(Win, Entity<ReviewItem>)> {
+            self.open_review_sized(viewed, WINDOW_WIDTH, WINDOW_HEIGHT)
+        }
+
+        fn open_review_sized(
+            &mut self,
+            viewed: &[(&str, &str)],
+            width: f32,
+            height: f32,
+        ) -> Result<(Win, Entity<ReviewItem>)> {
             let fake = FakeGh::new();
             fake.respond(is_timeline, Ok(timeline_json(&self.repo)));
             self.cx.update(|cx| set_gh_runner(fake, cx));
             let root = self.repo.root.clone();
-            let win = self.open_window(&root)?;
+            let win = self.open_window_sized(&root, width, height)?;
             let detail = parse_detail(&pr_key(), &detail_json(&self.repo, viewed)?)?;
             let patch = git(
                 &root,
@@ -1117,19 +1526,60 @@ mod mac {
 
         fn pr_review(&mut self) -> Result<()> {
             let (win, item) = self.open_review(&Self::all_unviewed())?;
+            self.start_agent_review(&win, &item)?;
+            self.settle();
+            self.select_step_with(&win, &item, "src/retry.rs")?;
+            self.scroll_review(&win, &item, 22.)?;
+            let result = self.shoot(&win, "pr-review");
+            self.close(win);
+            result
+        }
+
+        fn scroll_review(&mut self, win: &Win, item: &Entity<ReviewItem>, row: f64) -> Result<()> {
+            let editor = item.read_with(&self.cx, |item, _| item.editor().clone());
+            win.handle.update(&mut self.cx, |_, window, cx| {
+                editor.update(cx, |editor, cx| {
+                    editor.set_scroll_position(gpui::point(0., row), window, cx)
+                })
+            })?;
+            self.settle();
+            Ok(())
+        }
+
+        /// Starts the agent pre-review: three findings, of which its check keeps one. Only runs
+        /// what's ready, so the result's toast is still up.
+        fn start_agent_review(&mut self, win: &Win, item: &Entity<ReviewItem>) -> Result<()> {
             let retry = std::fs::read_to_string(self.repo.root.join("src/retry.rs"))?;
             let finding_line = line_of(&retry, "pub fn delay(")?;
-            let findings = json!([{
-                "path": "src/retry.rs",
-                "line": finding_line,
-                "severity": "should fix",
-                "category": "reliability",
-                "body": "With these defaults the four attempts can wait about 8 s in total, and `charge_invoice` awaits all of them while it holds the HTTP request. The load balancer cuts requests at 5 s, so the client sees a 504 even when the last attempt succeeds. Give the API handler a shorter budget and keep this one for the nightly job.",
-            }]);
+            let payments = std::fs::read_to_string(self.repo.root.join("src/payments.rs"))?;
+            let api = std::fs::read_to_string(self.repo.root.join("src/api.rs"))?;
+            let findings = json!([
+                {
+                    "path": "src/retry.rs",
+                    "line": finding_line,
+                    "severity": "should fix",
+                    "category": "reliability",
+                    "body": "With these defaults the four attempts can wait about 8 s in total, and `charge_invoice` awaits all of them while it holds the HTTP request. The load balancer cuts requests at 5 s, so the client sees a 504 even when the last attempt succeeds. Give the API handler a shorter budget and keep this one for the nightly job.",
+                },
+                {
+                    "path": "src/payments.rs",
+                    "line": line_of(&payments, "|| error.is_connect()")?,
+                    "severity": "should fix",
+                    "category": "logic",
+                    "body": "A connect error is retried even when DNS can't resolve the gateway, which won't recover between attempts.",
+                },
+                {
+                    "path": "src/api.rs",
+                    "line": line_of(&api, "SERVICE_UNAVAILABLE")?,
+                    "severity": "should fix",
+                    "category": "logic",
+                    "body": "A 503 without a `Retry-After` header makes clients retry immediately.",
+                },
+            ]);
             let agent = Rc::new(ScriptedReviewAgent {
                 replies: RefCell::new(VecDeque::from([
                     format!("```json\n{findings}\n```"),
-                    "```json\n[{\"finding\": 1, \"verdict\": \"keep\", \"reason\": \"The handler awaits the whole retry loop.\"}]\n```".to_string(),
+                    "```json\n[{\"finding\": 1, \"verdict\": \"keep\", \"reason\": \"The handler awaits the whole retry loop.\"}, {\"finding\": 2, \"verdict\": \"drop\", \"reason\": \"During a gateway deploy its DNS name resolves again within seconds; retrying is the point.\"}, {\"finding\": 3, \"verdict\": \"drop\", \"reason\": \"The checkout client already waits before retrying a 503.\"}]\n```".to_string(),
                 ])),
             });
             self.cx.update(|cx| set_review_agent(agent, cx));
@@ -1139,17 +1589,76 @@ mod mac {
                     item.update(cx, |item, cx| item.start_agent_review(window, cx))
                 })?;
             }
+            self.cx.run_until_parked();
+            Ok(())
+        }
+
+        /// Close-ups of the review tab, from a window sized so each part fills its image.
+        fn pr_closeups(&mut self) -> Result<()> {
+            const WIDTH: f32 = 1120.;
+            const HEIGHT: f32 = 700.;
+            let changed_since_viewed = [
+                ("src/api.rs", "UNVIEWED"),
+                ("src/main.rs", "VIEWED"),
+                ("src/payments.rs", "VIEWED"),
+                ("src/retry.rs", "DISMISSED"),
+            ];
+            let whole = Area::Exact(0., 0., WIDTH, HEIGHT);
+
+            let (win, item) = self.open_review_sized(&changed_since_viewed, WIDTH, HEIGHT)?;
+            self.start_agent_review(&win, &item)?;
+            // The toast with the check's result hides after a few seconds, so nothing settles
+            // until it's captured.
+            self.refresh(&win)?;
+            let dropped = self
+                .cx
+                .debug_bounds(win.handle.into(), "photon-review-dropped")
+                .context("the dropped findings aren't drawn")?;
+            self.cx
+                .simulate_click(win.handle.into(), dropped.center(), Modifiers::none());
+            self.cx.run_until_parked();
+            self.capture_crops(&win, None, &[("cu-review-verifier", &[whole])])?;
             self.settle();
             self.select_step_with(&win, &item, "src/retry.rs")?;
-            // Brings the draft and the thread below it into view.
-            let editor = item.read_with(&self.cx, |item, _| item.editor().clone());
-            win.handle.update(&mut self.cx, |_, window, cx| {
-                editor.update(cx, |editor, cx| {
-                    editor.set_scroll_position(gpui::point(0., 22.), window, cx)
-                })
-            })?;
-            self.settle();
-            let result = self.shoot(&win, "pr-review");
+            // The diff pane alone: the draft, then the thread under the lines it's on.
+            self.scroll_review(&win, &item, 22.)?;
+            self.shoot_crops(
+                &win,
+                None,
+                &[("cu-review-comment", &[Area::Exact(322., 120., 798., 532.)])],
+            )?;
+            self.scroll_review(&win, &item, 32.5)?;
+            self.shoot_crops(
+                &win,
+                None,
+                &[(
+                    "cu-review-suggestion",
+                    &[Area::Exact(322., 162., 798., 496.)],
+                )],
+            )?;
+            self.close(win);
+
+            // A narrow window, where the header takes up a good part of the image.
+            let (win, item) = self.open_review_sized(&changed_since_viewed, 640., 400.)?;
+            self.select_step_with(&win, &item, "src/retry.rs")?;
+            let small = Area::Exact(0., 0., 640., 400.);
+            self.shoot_crops(&win, None, &[("cu-review-header", &[small])])?;
+            self.click(&win, "photon-review-readiness")?;
+            self.shoot_crops(&win, None, &[("cu-review-readiness", &[small])])?;
+            self.close(win);
+
+            let medium = Area::Exact(0., 0., 800., 500.);
+            let (win, item) = self.open_review_sized(&changed_since_viewed, 800., 500.)?;
+            self.select_step_with(&win, &item, "src/retry.rs")?;
+            self.shoot_crops(&win, None, &[("cu-review-steps", &[medium])])?;
+            self.click(&win, "photon-review-view")?;
+            self.dispatch(&win, menu::SelectLast);
+            self.shoot_crops(&win, None, &[("cu-review-unreviewed", &[medium])])?;
+            self.close(win);
+
+            let (win, _item) = self.open_review_sized(&Self::all_unviewed(), WIDTH, HEIGHT)?;
+            self.click(&win, "photon-review-conversation")?;
+            let result = self.shoot_crops(&win, None, &[("cu-conversation", &[whole])]);
             self.close(win);
             result
         }
@@ -1187,23 +1696,69 @@ mod mac {
             result
         }
 
-        fn markdown(&mut self) -> Result<()> {
+        /// A whole-window scene, or with `close_up` the same scene in a small window that is
+        /// saved whole as its close-up.
+        fn scene_window(&mut self, close_up: bool) -> Result<Win> {
             let root = self.repo.root.clone();
-            let win = self.open_window(&root)?;
-            self.add_panel(&win, project_panel::ProjectPanel::load)?;
-            self.update(&win, |workspace, window, cx| {
+            if close_up {
+                self.open_window_sized(&root, CLOSE_UP_WIDTH, CLOSE_UP_HEIGHT)
+            } else {
+                self.open_window(&root)
+            }
+        }
+
+        fn shoot_scene(&mut self, win: &Win, close_up: bool, full: &str, crop: &str) -> Result<()> {
+            if close_up {
+                self.shoot_crops(
+                    win,
+                    None,
+                    &[(crop, &[Area::Exact(0., 0., win.width, win.height)])],
+                )
+            } else {
+                self.shoot(win, full)
+            }
+        }
+
+        fn open_project_panel(&mut self, win: &Win) -> Result<()> {
+            self.add_panel(win, project_panel::ProjectPanel::load)?;
+            self.update(win, |workspace, window, cx| {
                 workspace.open_panel::<project_panel::ProjectPanel>(window, cx)
-            })?;
+            })
+        }
+
+        fn markdown(&mut self) -> Result<()> {
+            self.markdown_at(false)?;
+            self.markdown_at(true)
+        }
+
+        fn markdown_at(&mut self, close_up: bool) -> Result<()> {
+            let win = self.scene_window(close_up)?;
+            if !close_up {
+                self.open_project_panel(&win)?;
+            }
             // Markdown files open in their preview.
             self.open_file(&win, "docs/architecture.md")?;
-            let result = self.shoot(&win, "markdown");
+            let result = if close_up {
+                // Ends above the next heading, which the status bar would cut through.
+                self.shoot_crops(
+                    &win,
+                    None,
+                    &[("cu-markdown-mermaid", &[Area::Exact(0., 0., 960., 560.)])],
+                )
+            } else {
+                self.shoot(&win, "markdown")
+            };
             self.close(win);
             result
         }
 
         fn call_hierarchy(&mut self) -> Result<()> {
-            let root = self.repo.root.clone();
-            let win = self.open_window(&root)?;
+            self.call_hierarchy_at(false)?;
+            self.call_hierarchy_at(true)
+        }
+
+        fn call_hierarchy_at(&mut self, close_up: bool) -> Result<()> {
+            let win = self.scene_window(close_up)?;
             self.add_panel(&win, photon_call_trails::CallHierarchyPanel::load)?;
             let editor = self.open_file(&win, "src/payments.rs")?;
             self.place_cursor(&win, &editor, "charge(&self")?;
@@ -1215,18 +1770,21 @@ mod mac {
                     _ => self.dispatch(&win, menu::SelectChild),
                 }
             }
-            let result = self.shoot(&win, "call-hierarchy");
+            let result = self.shoot_scene(&win, close_up, "call-hierarchy", "cu-call-tree");
             self.close(win);
             result
         }
 
         fn language_server_help(&mut self) -> Result<()> {
-            let root = self.repo.root.clone();
-            let win = self.open_window(&root)?;
-            self.add_panel(&win, project_panel::ProjectPanel::load)?;
-            self.update(&win, |workspace, window, cx| {
-                workspace.open_panel::<project_panel::ProjectPanel>(window, cx)
-            })?;
+            self.language_server_help_at(false)?;
+            self.language_server_help_at(true)
+        }
+
+        fn language_server_help_at(&mut self, close_up: bool) -> Result<()> {
+            let win = self.scene_window(close_up)?;
+            if !close_up {
+                self.open_project_panel(&win)?;
+            }
             let editor = self.open_file(
                 &win,
                 "clients/java/src/main/java/dev/billing/client/BillingClient.java",
@@ -1242,7 +1800,7 @@ mod mac {
             });
             self.settle();
             self.click(&win, "photon-set-up-language-server")?;
-            let result = self.shoot(&win, "language-server-help");
+            let result = self.shoot_scene(&win, close_up, "language-server-help", "cu-ls-help");
             self.close(win);
             result
         }
@@ -1352,12 +1910,23 @@ mod mac {
                 .map_err(|_| anyhow!("the turn already ended"))?;
             self.block(send)?;
             self.settle();
-            let result = self.shoot(&win, "agent");
+            // The thread panel's first turn: the prompt, its changed files, Revert Turn and the
+            // first edit, ending above the second edit's diff.
+            let result = self.shoot_crops(
+                &win,
+                Some("agent"),
+                &[("cu-agent-turn", &[Area::Exact(0., 35., 720., 435.)])],
+            );
             self.close(win);
             result
         }
 
         fn inbox(&mut self) -> Result<()> {
+            self.inbox_at(false)?;
+            self.inbox_at(true)
+        }
+
+        fn inbox_at(&mut self, close_up: bool) -> Result<()> {
             let fake = FakeGh::new();
             fake.respond(
                 |request| request.args.first().is_some_and(|arg| arg == "auth"),
@@ -1371,8 +1940,7 @@ mod mac {
                 Ok(inbox_json()),
             );
             self.cx.update(|cx| set_gh_runner(fake, cx));
-            let root = self.repo.root.clone();
-            let win = self.open_window(&root)?;
+            let win = self.scene_window(close_up)?;
             let panel = self.add_panel(&win, photon_review::InboxPanel::load)?;
             self.update(&win, |workspace, window, cx| {
                 workspace.open_panel::<photon_review::InboxPanel>(window, cx)
@@ -1380,7 +1948,7 @@ mod mac {
             panel.update(&mut self.cx, |panel, cx| panel.refresh(cx));
             self.settle();
             self.open_file(&win, "src/payments.rs")?;
-            let result = self.shoot(&win, "inbox");
+            let result = self.shoot_scene(&win, close_up, "inbox", "cu-inbox");
             self.close(win);
             result
         }
@@ -1396,9 +1964,9 @@ mod mac {
         name.leak()
     }
 
-    /// Writes `<name>.webp` at the captured 2x size and `<name>-1x.webp`, each under
-    /// `MAX_IMAGE_BYTES`, and removes the PNG. Without cwebp the PNG stays.
-    fn save_webp(png: &Path, output: &Path, name: &str) -> Result<()> {
+    /// Writes `<name>.webp` at the captured 2x size and `<name>-1x.webp` `width_1x` wide, each
+    /// under `MAX_IMAGE_BYTES`, and removes the PNG. Without cwebp the PNG stays.
+    fn save_webp(png: &Path, output: &Path, name: &str, width_1x: u32) -> Result<()> {
         if std::process::Command::new("cwebp")
             .arg("-version")
             .output()
@@ -1407,7 +1975,8 @@ mod mac {
             eprintln!("  cwebp not found; kept {}", png.display());
             return Ok(());
         }
-        for (suffix, resize) in [("", None), ("-1x", Some(("1440", "0")))] {
+        let width_1x = width_1x.to_string();
+        for (suffix, resize) in [("", None), ("-1x", Some((width_1x.as_str(), "0")))] {
             let webp = output.join(format!("{name}{suffix}.webp"));
             for quality in [90, 85, 80, 75, 70, 60] {
                 let mut command = std::process::Command::new("cwebp");
@@ -1555,5 +2124,24 @@ mod mac {
             status_bar.add_right_item(language, window, cx);
             status_bar.add_right_item(cursor_position, window, cx);
         });
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::fit_crop;
+
+        #[test]
+        fn crops_are_padded_widened_and_kept_in_the_window() {
+            // A tall area grows to 3:2 around its centre.
+            assert_eq!(
+                fit_crop((400., 100., 568., 568.), 1440., 900.),
+                (234., 84., 900., 600.)
+            );
+            // A strip grows to 16:10 and stops at the window's edge.
+            assert_eq!(
+                fit_crop((0., 0., 1408., 100.), 1440., 900.),
+                (0., 0., 1440., 900.)
+            );
+        }
     }
 }

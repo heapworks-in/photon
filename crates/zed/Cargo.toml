@@ -57,6 +57,7 @@ visual-tests = [
 photon-screenshots = [
     "visual-tests",
     "dep:lsp",
+    "dep:terminal",
     "language/test-support",
     "lsp/test-support",
     "photon_review/test-support",
@@ -72,7 +73,7 @@ path = "src/visual_test_runner.rs"
 required-features = ["visual-tests"]
 
 # photon: website screenshot runner
-[[bin]]
+[[example]]
 name = "photon_screenshots"
 path = "src/photon_screenshots.rs"
 required-features = ["photon-screenshots"]
@@ -229,6 +230,7 @@ tab_switcher.workspace = true
 tasks_ui.workspace = true
 telemetry.workspace = true
 telemetry_events.workspace = true
+terminal = { workspace = true, optional = true } # photon: the screenshot runner waits on terminal blocks
 terminal_view.workspace = true
 theme.workspace = true
 theme_extension.workspace = true
