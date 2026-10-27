@@ -1474,6 +1474,16 @@
     },
   },
   {
+    // photon: plan review: next and previous task, ask the agent about the selected one.
+    "context": "PlanReview",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-enter": "plan::NextTask",
+      "cmd-shift-enter": "plan::PreviousTask",
+      "alt-t": "plan::AskAgent",
+    },
+  },
+  {
     // photon: start a draft comment on the selected lines of a pull request review.
     "context": "PhotonReview > Editor",
     "use_key_equivalents": true,

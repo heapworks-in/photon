@@ -136,7 +136,7 @@ mod mac {
                 .is_none_or(|only| only.split(',').any(|name| name == scene))
         };
         type Scene = fn(&mut Shooter) -> Result<()>;
-        let scenes: [(&str, Scene); 16] = [
+        let scenes: [(&str, Scene); 17] = [
             ("hero", |shooter| shooter.hero("hero", false)),
             ("hero-light", |shooter| shooter.hero("hero-light", true)),
             ("pr-review", Shooter::pr_review),
@@ -144,6 +144,7 @@ mod mac {
             ("pr-conversation", Shooter::pr_conversation),
             ("pr-unreviewed", Shooter::pr_unreviewed),
             ("pr-closeups", Shooter::pr_closeups),
+            ("plan-review", Shooter::plan_review),
             ("markdown", Shooter::markdown),
             ("call-hierarchy", Shooter::call_hierarchy),
             ("language-server-help", Shooter::language_server_help),
@@ -1752,6 +1753,130 @@ mod mac {
             result
         }
 
+        /// The retry plan, reviewed in the billing service as it was before the pull request:
+        /// task 3 selected, one comment, Request changes open. Close-ups of the map's gaps and of
+        /// the task's facts with a finding.
+        fn plan_review(&mut self) -> Result<()> {
+            const PLAN_PATH: &str = "docs/plans/2026-10-27-retry-charges.md";
+            let root = self
+                .repo
+                .root
+                .parent()
+                .and_then(Path::parent)
+                .context("fixture home")?
+                .join("plans")
+                .join(REPO);
+            let mut files = owned(fixture::base_files());
+            files.push((PLAN_PATH, fixture::RETRY_PLAN.to_string()));
+            files.push((
+                "docs/specs/2026-10-20-retry-charges-design.md",
+                fixture::retry_spec(),
+            ));
+            write_files(&root, &files)?;
+            self.cx.update(|cx| {
+                photon_plan_review::set_hooks(
+                    photon_plan_review::PlanReviewHooks {
+                        send_to_agent: Some(Rc::new(|_, _, _, _| {})),
+                    },
+                    cx,
+                )
+            });
+            let win = self.open_window(&root)?;
+            self.open_center_terminal(&win)?;
+            self.open_file(&win, "src/payments.rs")?;
+            let open = self.update(&win, |workspace, window, cx| {
+                let worktree_id = workspace
+                    .project()
+                    .read(cx)
+                    .worktrees(cx)
+                    .next()
+                    .map(|worktree| worktree.read(cx).id())
+                    .context("no worktree")?;
+                let path: Arc<util::rel_path::RelPath> = util::rel_path::rel_path(PLAN_PATH).into();
+                anyhow::Ok(photon_plan_review::open_plan_review(
+                    workspace,
+                    ProjectPath::from((worktree_id, path)),
+                    window,
+                    cx,
+                ))
+            })??;
+            let item = self.block(open)?;
+            self.settle();
+            let result = (|| {
+                for tick in ["plan-tick-0", "plan-tick-1", "plan-tick-2"] {
+                    self.click(&win, tick)?;
+                }
+                self.click(&win, "plan-step-3")?;
+                let paragraph = item
+                    .read_with(&self.cx, |item, _| {
+                        item.paragraph_containing("Replace the direct")
+                    })
+                    .context("the paragraph")?;
+                // Room below the paragraph for the comment box, then back to the top.
+                self.scroll_plan(&win, -400.)?;
+                self.click(&win, &format!("plan-paragraph-{paragraph}"))?;
+                self.cx.simulate_keystrokes(win.handle.into(), "c");
+                self.cx.simulate_input(
+                    win.handle.into(),
+                    "Where does is_retryable come from? If it's new, it needs its own test: a 402 \
+                     must not be retried.",
+                );
+                self.click(&win, "plan-composer-save")?;
+                self.scroll_plan(&win, 400.)?;
+                self.click(&win, &format!("plan-paragraph-{}", paragraph + 1))?;
+                let bounds = |shooter: &mut Self, selector: &str| -> Result<Area> {
+                    let bounds = shooter
+                        .cx
+                        .debug_bounds(win.handle.into(), selector)
+                        .with_context(|| format!("{selector} isn't drawn"))?;
+                    Ok(Area::Rect(
+                        f32::from(bounds.origin.x),
+                        f32::from(bounds.origin.y),
+                        f32::from(bounds.size.width),
+                        f32::from(bounds.size.height),
+                    ))
+                };
+                self.refresh(&win)?;
+                let gaps = [
+                    bounds(self, "plan-progress")?,
+                    bounds(self, "plan-decision-1")?,
+                ];
+                let task = [bounds(self, "plan-facts")?, bounds(self, "plan-finding-0")?];
+                self.shoot_crops(
+                    &win,
+                    None,
+                    &[("cu-plan-gaps", &gaps), ("cu-plan-task", &task)],
+                )?;
+                self.click(&win, "plan-request-changes")?;
+                self.click(&win, "plan-verdict-summary")?;
+                self.cx.simulate_input(
+                    win.handle.into(),
+                    "Task 3 points at a file that doesn't exist and uses is_retryable without \
+                     defining it. Please fix both and add the 402 test.",
+                );
+                self.shoot(&win, "plan-review")
+            })();
+            self.close(win);
+            result
+        }
+
+        fn scroll_plan(&mut self, win: &Win, by: f32) -> Result<()> {
+            let bounds = self
+                .cx
+                .debug_bounds(win.handle.into(), "plan-facts")
+                .context("plan-facts isn't drawn")?;
+            self.cx.simulate_event(
+                win.handle.into(),
+                gpui::ScrollEvent {
+                    position: bounds.center(),
+                    delta: gpui::ScrollDelta::Pixels(point(px(0.), px(by))),
+                    ..Default::default()
+                },
+            );
+            self.settle();
+            Ok(())
+        }
+
         fn call_hierarchy(&mut self) -> Result<()> {
             self.call_hierarchy_at(false)?;
             self.call_hierarchy_at(true)?;
@@ -2149,6 +2274,7 @@ mod mac {
         photon_terminal::init(cx);
         photon_call_trails::init(cx);
         photon_review::init(cx);
+        photon_plan_review::init(cx);
         photon_navigation::init(cx);
         agent_settings::AgentSettings::override_global(
             agent_settings::AgentSettings {

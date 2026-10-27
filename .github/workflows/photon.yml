@@ -37,19 +37,19 @@ jobs:
           -p agent_ui -p extension_host -p extensions_ui -p settings -p settings_content
           -p project -p workspace -p zed_credentials_provider -p zed
           -p ui -p editor
-          -p photon_blocks -p photon_terminal -p photon_review -p photon_web_editor -p photon_call_trails -p call_hierarchy -p photon_navigation -p terminal -p terminal_view
+          -p photon_blocks -p photon_terminal -p photon_review -p photon_plan_review -p photon_web_editor -p photon_call_trails -p call_hierarchy -p photon_navigation -p terminal -p terminal_view
           -p tabular_data_preview -p onboarding -p markdown_preview -p markdown -p photon_markdown
           -p photon_agent -p sidebar -p acp_thread -p git_ui_core
       - name: Tests (Photon-touched crates)
         run: >
           cargo nextest run -p photon_brand -p paths -p release_channel -p cli -p install_cli
           -p agent_ui -p project -p settings -p settings_content -p ui -p theme_settings -p zed_credentials_provider -p zed
-          -p photon_blocks -p photon_terminal -p photon_review -p photon_web_editor -p photon_call_trails -p call_hierarchy -p photon_navigation -p terminal -p terminal_view
+          -p photon_blocks -p photon_terminal -p photon_review -p photon_plan_review -p photon_web_editor -p photon_call_trails -p call_hierarchy -p photon_navigation -p terminal -p terminal_view
           -p tabular_data_preview -p onboarding -p markdown_preview -p markdown -p photon_markdown
           -p photon_agent -p sidebar -p acp_thread -p git_ui_core
           -E 'package(photon_brand) | package(paths) | package(release_channel) | package(cli)
           | package(settings) | package(settings_content) | package(ui) | package(theme_settings) | package(zed_credentials_provider)
-          | package(photon_blocks) | package(photon_terminal) | package(photon_review) | package(photon_web_editor) | package(photon_call_trails) | package(call_hierarchy) | package(photon_navigation) | package(terminal) | package(terminal_view)
+          | package(photon_blocks) | package(photon_terminal) | package(photon_review) | package(photon_plan_review) | package(photon_web_editor) | package(photon_call_trails) | package(call_hierarchy) | package(photon_navigation) | package(terminal) | package(terminal_view)
           | package(tabular_data_preview) | package(onboarding) | package(markdown_preview) | package(markdown) | package(photon_markdown)
           | package(photon_agent)
           | test(photon) | test(new_window)

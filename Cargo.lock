@@ -10766,6 +10766,7 @@ dependencies = [
  "log",
  "markdown",
  "photon_markdown",
+ "photon_plan_review",
  "project",
  "serde_json",
  "settings",
@@ -13816,6 +13817,30 @@ dependencies = [
  "util",
  "workspace",
  "zed_actions",
+]
+
+[[package]]
+name = "photon_plan_review"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "db",
+ "editor",
+ "fs",
+ "gpui",
+ "language",
+ "log",
+ "markdown",
+ "photon_navigation",
+ "project",
+ "regex",
+ "serde",
+ "serde_json",
+ "settings",
+ "sha2",
+ "ui",
+ "util",
+ "workspace",
 ]
 
 [[package]]
@@ -23358,6 +23383,7 @@ dependencies = [
  "photon_brand",
  "photon_call_trails",
  "photon_navigation",
+ "photon_plan_review",
  "photon_review",
  "photon_tabs",
  "photon_terminal",

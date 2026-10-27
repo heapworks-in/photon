@@ -773,6 +773,21 @@ pub const JAVA_ERROR: &str = "failed to initialize jdtls: Server reset the conne
     java.lang.UnsupportedClassVersionError: This version of the Java Runtime only recognizes class file versions up to 61.0";
 
 /// Files on `main`, before the pull request.
+/// The plan the plan review scenes open: written against the service before the pull request.
+pub const RETRY_PLAN: &str =
+    include_str!("../../../photon_plan_review/test_fixtures/superpowers.md");
+
+/// The plan's spec, every requirement covered.
+pub fn retry_spec() -> String {
+    let spec = include_str!("../../../photon_plan_review/test_fixtures/spec.md");
+    spec.split("## Refund partial captures")
+        .next()
+        .unwrap_or(spec)
+        .trim_end()
+        .to_string()
+        + "\n"
+}
+
 pub fn base_files() -> Vec<(&'static str, &'static str)> {
     vec![
         ("Cargo.toml", CARGO_TOML),
