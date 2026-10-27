@@ -308,3 +308,6 @@ b { font-weight: 600; color: var(--text); }
 .chip-file { font: 12.5px "Lilex"; color: var(--text); background: var(--raised); border: 1px solid #2a2a2a; border-radius: 6px; padding: 2px 8px; }
 .chip-file i { font-style: normal; } .chip-file .g { color: var(--green); } .chip-file .r { color: var(--red); }
 .turn-btn { margin-left: auto; font: 600 12.5px "Plex"; color: var(--text); background: var(--raised); border: 1px solid #2a2a2a; border-radius: 6px; padding: 3px 10px; }
+
+.showcase-narrow picture { max-width: 880px; margin: 0 auto; }
+.showcase-narrow figcaption { margin-left: auto; margin-right: auto; max-width: 880px; }
