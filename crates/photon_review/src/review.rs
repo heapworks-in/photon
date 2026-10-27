@@ -6821,7 +6821,7 @@ impl ReviewItem {
     ) -> AnyElement {
         let style = MarkdownStyle::themed(MarkdownFont::Editor, window, cx);
         let colors = cx.theme().colors();
-        let date = |time: &str| time.get(..10).unwrap_or(time).to_string();
+        let date = |time: &str| relative_time(time).unwrap_or_else(|| time.to_string());
         let byline = |author: String, time: String| {
             h_flex()
                 .gap_2()
