@@ -4,16 +4,15 @@ pub const DEDICATION: &str = "Dedicated to Maha & Bhumi.";
 pub const BHUMI: u32 = 0x050505;
 /// Accent (Warp Dark). Maha: the color that stands out.
 pub const MAHA: u32 = 0x19AAD8;
-pub const FOREGROUND: u32 = 0xFFFFFF;
-/// Brighter than Warp's ANSI black, which fails WCAG AA as text on `BHUMI`.
-pub const COMMENT: u32 = 0x8E8E8E;
+/// Photon Black's palette is Tokyo Night's, on `BHUMI`.
+pub const FOREGROUND: u32 = 0xC0CAF5;
 
 /// Black, red, green, yellow, blue, magenta, cyan, white.
 pub const ANSI_NORMAL: [u32; 8] = [
-    0x616161, 0xFF8272, 0xB4FA72, 0xFEFDC2, 0xA5D5FE, 0xFF8FFD, 0xD0D1FE, 0xF1F1F1,
+    0x15161E, 0xF7768E, 0x9ECE6A, 0xE0AF68, 0x7AA2F7, 0xBB9AF7, 0x7DCFFF, 0xA9B1D6,
 ];
 pub const ANSI_BRIGHT: [u32; 8] = [
-    0x8E8E8E, 0xFFC4BD, 0xD6FCB9, 0xFEFDD5, 0xC1E3FE, 0xFFB1FE, 0xE5E6FE, 0xFEFFFF,
+    0x414868, 0xFF899D, 0x9FE044, 0xFABA4A, 0x8DB0FF, 0xC7A9FF, 0xA4DAFF, 0xC0CAF5,
 ];
 
 /// WCAG 2.x contrast ratio between two opaque `0xRRGGBB` colors.
@@ -51,11 +50,12 @@ mod tests {
 
     #[test]
     fn text_colors_pass_aa_on_bhumi() {
-        // ANSI_NORMAL[0] is ANSI black: a background color, never text.
-        for color in [FOREGROUND, MAHA, COMMENT]
+        // ANSI black is a background color; bright black is the dim-text slot (shell
+        // autosuggestions), deliberately low contrast.
+        for color in [FOREGROUND, MAHA]
             .iter()
             .chain(&ANSI_NORMAL[1..])
-            .chain(&ANSI_BRIGHT)
+            .chain(&ANSI_BRIGHT[1..])
         {
             assert!(contrast_ratio(*color, BHUMI) >= 4.5, "{color:06X}");
         }

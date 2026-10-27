@@ -27,22 +27,29 @@ use crate::{
 };
 // photon: user-facing text names Photon, not Zed.
 
-// photon: the first family is Photon's defaults (Photon Black, with One Light for light mode).
-const LIGHT_THEMES: [&str; 3] = ["One Light", "Ayu Light", "Gruvbox Light"];
-const DARK_THEMES: [&str; 3] = ["Photon Black", "Ayu Dark", "Gruvbox Dark"];
-const FAMILY_NAMES: [SharedString; 3] = [
-    SharedString::new_static("Photon"),
-    SharedString::new_static("Ayu"),
-    SharedString::new_static("Gruvbox"),
+/// (light theme, dark theme, label).
+type ThemePair = (&'static str, &'static str, &'static str);
+
+// photon: dark mode offers Photon's four black themes, each paired with One Light; light mode keeps
+// the families it had, Photon's (One Light) first.
+const LIGHT_THEMES: [ThemePair; 3] = [
+    ("One Light", "Photon Black", "Photon"),
+    ("Ayu Light", "Ayu Dark", "Ayu"),
+    ("Gruvbox Light", "Gruvbox Dark", "Gruvbox"),
+];
+const DARK_THEMES: [ThemePair; 4] = [
+    ("One Light", "Photon Black", "Photon Black"),
+    ("One Light", "Photon Mocha", "Photon Mocha"),
+    ("One Light", "Photon Rosé", "Photon Rosé"),
+    ("One Light", "Photon Vesper", "Photon Vesper"),
 ];
 
 fn get_theme_family_themes(theme_name: &str) -> Option<(&'static str, &'static str)> {
-    for i in 0..LIGHT_THEMES.len() {
-        if LIGHT_THEMES[i] == theme_name || DARK_THEMES[i] == theme_name {
-            return Some((LIGHT_THEMES[i], DARK_THEMES[i]));
-        }
-    }
-    None
+    DARK_THEMES
+        .iter()
+        .chain(&LIGHT_THEMES)
+        .find(|(light, dark, _)| *light == theme_name || *dark == theme_name)
+        .map(|(light, dark, _)| (*light, *dark))
 }
 
 fn render_theme_section(tab_index: &mut isize, cx: &mut App) -> impl IntoElement {
@@ -123,19 +130,29 @@ fn render_theme_section(tab_index: &mut isize, cx: &mut App) -> impl IntoElement
         };
         let current_theme_name: SharedString = theme_selection.name(appearance).0.into();
 
-        let theme_names = match appearance {
-            Appearance::Light => LIGHT_THEMES,
-            Appearance::Dark => DARK_THEMES,
+        let theme_pairs: &[ThemePair] = match appearance {
+            Appearance::Light => &LIGHT_THEMES,
+            Appearance::Dark => &DARK_THEMES,
         };
 
-        // photon: a missing theme leaves its preview out instead of panicking.
-        let themes = theme_names.map(|theme| theme_registry.get(theme).ok());
-
-        themes
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, theme)| {
-                let theme = &theme?;
+        theme_pairs
+            .iter()
+            .filter_map(|(light_name, dark_name, label)| {
+                // photon: a missing theme leaves its preview out instead of panicking.
+                let theme = &theme_registry
+                    .get(match appearance {
+                        Appearance::Light => light_name,
+                        Appearance::Dark => dark_name,
+                    })
+                    .ok()?;
+                let side_by_side = if theme_mode == ThemeAppearanceMode::System {
+                    theme_registry
+                        .get(light_name)
+                        .ok()
+                        .zip(theme_registry.get(dark_name).ok())
+                } else {
+                    None
+                };
                 let is_selected = theme.name == current_theme_name;
                 let name = theme.name.clone();
                 let colors = cx.theme().colors();
@@ -146,7 +163,9 @@ fn render_theme_section(tab_index: &mut isize, cx: &mut App) -> impl IntoElement
                     .gap_1()
                     .child(
                         h_flex()
-                            .id(name)
+                            .id(name.clone())
+                            // photon: lets tests find each preview.
+                            .debug_selector(|| format!("theme-preview-{name}"))
                             .relative()
                             .w_full()
                             .border_2()
@@ -181,11 +200,7 @@ fn render_theme_section(tab_index: &mut isize, cx: &mut App) -> impl IntoElement
                                 }
                             })
                             .map(|this| {
-                                if theme_mode == ThemeAppearanceMode::System {
-                                    let (light, dark) = (
-                                        theme_registry.get(LIGHT_THEMES[index]).unwrap(),
-                                        theme_registry.get(DARK_THEMES[index]).unwrap(),
-                                    );
+                                if let Some((light, dark)) = side_by_side {
                                     this.child(
                                         ThemePreviewTile::new(light, theme_seed)
                                             .style(ThemePreviewStyle::SideBySide(dark)),
@@ -199,7 +214,7 @@ fn render_theme_section(tab_index: &mut isize, cx: &mut App) -> impl IntoElement
                             }),
                     )
                     .child(
-                        Label::new(FAMILY_NAMES[index].clone())
+                        Label::new(*label)
                             .color(Color::Muted)
                             .size(LabelSize::Small),
                     )
@@ -750,11 +765,72 @@ pub(crate) fn render_basics_page(user_store: &Entity<UserStore>, cx: &mut App) -
 mod tests {
     use super::*;
 
+    use gpui::{Render, TestAppContext, UpdateGlobal as _};
+
     #[test]
     fn the_photon_family_is_photons_default_themes() {
-        assert_eq!(FAMILY_NAMES[0].as_ref(), "Photon");
+        assert_eq!(LIGHT_THEMES[0].2, "Photon");
         let defaults = (settings::DEFAULT_LIGHT_THEME, settings::DEFAULT_DARK_THEME);
         assert_eq!(get_theme_family_themes("Photon Black"), Some(defaults));
         assert_eq!(get_theme_family_themes("One Light"), Some(defaults));
+        assert_eq!(
+            get_theme_family_themes("Photon Vesper"),
+            Some(("One Light", "Photon Vesper"))
+        );
+        assert_eq!(
+            get_theme_family_themes("Ayu Light"),
+            Some(("Ayu Light", "Ayu Dark"))
+        );
+    }
+
+    struct ThemeSection;
+
+    impl Render for ThemeSection {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let mut tab_index = 0;
+            render_theme_section(&mut tab_index, cx).into_any_element()
+        }
+    }
+
+    #[gpui::test]
+    fn dark_mode_offers_photons_four_themes_in_order(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            theme_settings::load_user_theme(
+                &ThemeRegistry::global(cx),
+                include_bytes!("../../../assets/themes/photon/photon.json"),
+            )
+            .expect("bundled Photon themes load");
+            SettingsStore::update_global(cx, |store, cx| {
+                store
+                    .set_user_settings(
+                        r#"{"theme": {"mode": "dark", "light": "One Light", "dark": "Photon Black"}}"#,
+                        cx,
+                    )
+                    .expect("theme settings");
+            });
+        });
+        let (_, cx) = cx.add_window_view(|_, _| ThemeSection);
+        cx.run_until_parked();
+
+        let offered = [
+            "theme-preview-Photon Black",
+            "theme-preview-Photon Mocha",
+            "theme-preview-Photon Rosé",
+            "theme-preview-Photon Vesper",
+        ]
+        .map(|selector| {
+            cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is drawn"))
+        });
+        assert!(
+            offered
+                .windows(2)
+                .all(|pair| pair[0].origin.x < pair[1].origin.x),
+            "previews are in order"
+        );
+        assert!(cx.debug_bounds("theme-preview-Ayu Dark").is_none());
     }
 }
