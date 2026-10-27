@@ -782,6 +782,8 @@ pub struct Sidebar {
     width_set_by_user: bool,
     focus_handle: FocusHandle,
     filter_editor: Entity<Editor>,
+    /// photon: only list threads about the active editor's file.
+    photon_this_file_only: bool,
     rename_editor: Entity<Editor>,
     list_state: ListState,
     contents: SidebarContents,
@@ -950,6 +952,7 @@ impl Sidebar {
             width_set_by_user: false,
             focus_handle,
             filter_editor,
+            photon_this_file_only: false, // photon: the This File filter
             rename_editor,
             list_state: ListState::new(0, gpui::ListAlignment::Top, px(1000.)),
             contents: SidebarContents::default(),
@@ -1067,6 +1070,12 @@ impl Sidebar {
             workspace,
             window,
             move |this, workspace, event: &workspace::Event, window, cx| {
+                // photon: the This File filter follows the active editor.
+                if this.photon_this_file_only
+                    && matches!(event, workspace::Event::ActiveItemChanged)
+                {
+                    this.schedule_update_entries(false, cx);
+                }
                 if let workspace::Event::PanelAdded(view) = event {
                     if let Ok(agent_panel) = view.clone().downcast::<AgentPanel>() {
                         this.subscribe_to_agent_panel(workspace, &agent_panel, window, cx);
@@ -1411,6 +1420,12 @@ impl Sidebar {
             .map(|ws| ws.read(cx).project().read(cx).agent_server_store().clone());
 
         let query = self.filter_editor.read(cx).text(cx);
+        // photon: the This File filter.
+        let photon_this_file = self.photon_this_file_only.then(|| {
+            active_workspace
+                .as_ref()
+                .and_then(|workspace| photon_agent::active_file(workspace, cx))
+        });
 
         let previous = mem::take(&mut self.contents);
 
@@ -1600,7 +1615,9 @@ impl Sidebar {
             let label = group_key.display_name(&path_detail_map);
 
             let is_collapsed = self.is_group_collapsed(group_key, cx);
-            let should_load_threads = !is_collapsed || !query.is_empty();
+            // photon: the This File filter shows collapsed projects' threads too.
+            let should_load_threads =
+                !is_collapsed || !query.is_empty() || photon_this_file.is_some();
 
             let is_active = active_workspace
                 .as_ref()
@@ -1853,6 +1870,18 @@ impl Sidebar {
                 }
             }
 
+            // photon: the This File filter.
+            if let Some(this_file) = &photon_this_file {
+                threads.retain(|thread| {
+                    this_file.as_ref().is_some_and(|path| {
+                        thread
+                            .metadata
+                            .session_id
+                            .as_ref()
+                            .is_some_and(|id| photon_agent::thread_is_about(id, path, cx))
+                    })
+                });
+            }
             let has_visible_rows = !threads.is_empty() || !terminals.is_empty();
             let has_stored_thread_rows = !should_load_threads && !has_visible_rows && {
                 let store = ThreadMetadataStore::global(cx).read(cx);
@@ -7466,6 +7495,15 @@ impl Sidebar {
                     .child(
                         h_flex()
                             .gap_1()
+                            // photon: the This File filter.
+                            .child(photon_agent::this_file_filter_button(
+                                self.photon_this_file_only,
+                                cx.listener(|this, _, _, cx| {
+                                    this.photon_this_file_only = !this.photon_this_file_only;
+                                    photon_agent::load_thread_files(cx);
+                                    this.update_entries(cx);
+                                }),
+                            ))
                             .when(
                                 self.selection.is_some()
                                     && !self.filter_editor.focus_handle(cx).is_focused(window),

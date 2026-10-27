@@ -163,6 +163,7 @@ members = [
     "crates/outline_panel",
     "crates/path",
     "crates/paths",
+    "crates/photon_agent", # photon: reviewing agent work
     "crates/photon_blocks",
     "crates/photon_brand",
     "crates/photon_call_trails", # photon: call hierarchy panel
@@ -448,6 +449,7 @@ outline_panel = { path = "crates/outline_panel" }
 path = { path = "crates/path" }
 paths = { path = "crates/paths" }
 perf = { path = "tooling/perf", default-features = false }
+photon_agent = { path = "crates/photon_agent" } # photon: reviewing agent work
 photon_blocks = { path = "crates/photon_blocks" }
 photon_brand = { path = "crates/photon_brand" }
 photon_call_trails = { path = "crates/photon_call_trails" } # photon: call hierarchy panel

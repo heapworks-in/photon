@@ -367,6 +367,13 @@ pub struct Checkpoint {
     pub show: bool,
 }
 
+// photon: per-turn review compares this snapshot with the files after the turn.
+impl Checkpoint {
+    pub fn git_checkpoint(&self) -> &GitStoreCheckpoint {
+        &self.git_checkpoint
+    }
+}
+
 impl UserMessage {
     fn to_markdown(&self, cx: &App) -> String {
         let mut markdown = String::new();
@@ -6856,7 +6863,10 @@ impl AcpThread {
         let client_id = client_user_message_ids
             .as_ref()
             .map(|client_user_message_ids| client_user_message_ids.new_id());
-        let should_checkpoint = self.can_rewind_to(client_id.as_ref(), cx);
+        // photon: also snapshot before turns of agents that can't rewind (Claude Code, Codex over
+        // ACP), for per-turn review and Revert Turn.
+        let should_checkpoint = self.can_rewind_to(client_id.as_ref(), cx)
+            || (self.parent_session_id.is_none() && !git_store.read(cx).repositories().is_empty());
 
         self.run_turn(id, cx, async move |this, cx| {
             if push_user_message {
@@ -19065,10 +19075,12 @@ mod tests {
         // The parent shows that sending, repository updates during the turn, and
         // turn completion each take checkpoints, so zero counts elsewhere mean
         // those paths ran without taking any.
-        for (thread, can_rewind) in [
-            (thread_without_truncate, false),
-            (subagent, false),
-            (parent, true),
+        // photon: root threads that can't rewind still snapshot before each turn, for per-turn
+        // review; subagents don't.
+        for (thread, can_rewind, takes_snapshot) in [
+            (thread_without_truncate, false, true),
+            (subagent, false, false),
+            (parent, true, true),
         ] {
             assert_eq!(
                 thread.read_with(cx, |thread, cx| {
@@ -19093,6 +19105,9 @@ mod tests {
             if can_rewind {
                 assert_eq!(jobs_while_running, jobs_before_send + 2);
                 assert_eq!(jobs_after_turn, jobs_while_running + 1);
+            } else if takes_snapshot {
+                assert_eq!(jobs_while_running, jobs_before_send + 1);
+                assert_eq!(jobs_after_turn, jobs_while_running);
             } else {
                 assert_eq!(jobs_while_running, jobs_before_send);
                 assert_eq!(jobs_after_turn, jobs_before_send);
@@ -19101,7 +19116,7 @@ mod tests {
                 let AgentThreadEntry::UserMessage(message) = &thread.entries[0] else {
                     panic!("unexpected entries {:?}", thread.entries)
                 };
-                assert_eq!(message.checkpoint.is_some(), can_rewind);
+                assert_eq!(message.checkpoint.is_some(), takes_snapshot);
             });
         }
         assert_eq!(

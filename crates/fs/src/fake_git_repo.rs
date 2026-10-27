@@ -379,11 +379,27 @@ impl GitRepository for FakeGitRepository {
         &self,
         revisions: Vec<String>,
     ) -> BoxFuture<'_, Result<Vec<Option<Vec<u8>>>>> {
+        let checkpoints = self.checkpoints.clone();
         let fut = self.with_state_async(false, move |state| {
             Ok(revisions
                 .into_iter()
                 .map(|rev| {
                     let (prefix, path) = rev.split_once(':')?;
+                    // photon: read a file as it was at a checkpoint, as real git can.
+                    if let Ok(oid) = prefix.parse::<Oid>()
+                        && let Some(mut entry) = checkpoints.lock().get(&oid).cloned()
+                    {
+                        for name in path.split('/') {
+                            let FakeFsEntry::Dir { entries, .. } = entry else {
+                                return None;
+                            };
+                            entry = entries.get(name)?.clone();
+                        }
+                        return match entry {
+                            FakeFsEntry::File { content, .. } => Some(content),
+                            _ => None,
+                        };
+                    }
                     let repo_path = RepoPath::new(path).ok()?;
                     match prefix {
                         "" => state.index_contents.get(&repo_path).cloned(),

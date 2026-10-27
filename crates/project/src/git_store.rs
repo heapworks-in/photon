@@ -499,6 +499,13 @@ pub struct GitStoreCheckpoint {
     checkpoints_by_work_dir_abs_path: HashMap<Arc<Path>, GitRepositoryCheckpoint>,
 }
 
+// photon: per-turn review diffs and reads files in each repository's checkpoint.
+impl GitStoreCheckpoint {
+    pub fn checkpoints_by_work_dir_abs_path(&self) -> &HashMap<Arc<Path>, GitRepositoryCheckpoint> {
+        &self.checkpoints_by_work_dir_abs_path
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StatusEntry {
     pub repo_path: RepoPath,

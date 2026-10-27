@@ -7400,6 +7400,13 @@ impl ThreadView {
                                 }
                             }),
                     )
+                    // photon: what this turn changed, and Revert Turn.
+                    .children(photon_agent::render_turn_review(
+                        &self.thread,
+                        message,
+                        self.workspace.clone(),
+                        cx,
+                    ))
                     .into_any()
             }
             AgentThreadEntry::AssistantMessage(AssistantMessage {

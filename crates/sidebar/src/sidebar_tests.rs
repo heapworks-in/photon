@@ -16027,3 +16027,82 @@ fn sidebar_painted_background_at(position: Point<Pixels>, cx: &mut VisualTestCon
         u32::from(Rgba::from(color))
     })
 }
+
+// photon: the This File filter keeps the threads about the active editor's file.
+#[gpui::test]
+async fn photon_this_file_filter_follows_the_active_editor(cx: &mut TestAppContext) {
+    let project = init_test_project("/my-project", cx).await;
+    let fs = cx.update(|cx| <dyn Fs>::global(cx));
+    fs.as_fake()
+        .insert_file("/my-project/src/a.rs", "a".into())
+        .await;
+    fs.as_fake()
+        .insert_file("/my-project/src/b.rs", "b".into())
+        .await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+    save_named_thread_metadata("thread-a", "About A", &project, cx).await;
+    save_named_thread_metadata("thread-b", "About B", &project, cx).await;
+    save_named_thread_metadata("thread-src", "About src", &project, cx).await;
+    cx.update(|_, cx| {
+        for (session, path) in [
+            ("thread-a", "/my-project/src/a.rs"),
+            ("thread-b", "/my-project/src/b.rs"),
+            ("thread-src", "/my-project/src"),
+        ] {
+            photon_agent::record_thread_files(
+                &acp::SessionId::new(Arc::from(session)),
+                [PathBuf::from(path)],
+                cx,
+            );
+        }
+    });
+    let workspace =
+        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+    let open = |path: &'static str, cx: &mut VisualTestContext| {
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_abs_path(
+                PathBuf::from(path),
+                workspace::OpenOptions::default(),
+                window,
+                cx,
+            )
+        })
+    };
+    let click_filter = |cx: &mut VisualTestContext| {
+        cx.draw(
+            gpui::point(px(0.), px(0.)),
+            gpui::size(px(400.), px(400.)),
+            |_, _| sidebar.clone().into_any_element(),
+        );
+        let bounds = cx
+            .debug_bounds("photon-this-file-filter")
+            .expect("This File filter is shown");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+    };
+    let threads = |cx: &mut VisualTestContext| {
+        let mut threads = visible_entries_as_strings(&sidebar, cx)
+            .into_iter()
+            .filter(|entry| entry.starts_with("  About"))
+            .map(|entry| entry.trim().to_string())
+            .collect::<Vec<_>>();
+        threads.sort();
+        threads
+    };
+
+    open("/my-project/src/a.rs", cx).await.expect("a.rs opens");
+    cx.run_until_parked();
+    assert_eq!(threads(cx), ["About A", "About B", "About src"]);
+
+    click_filter(cx);
+    assert_eq!(threads(cx), ["About A", "About src"]);
+
+    open("/my-project/src/b.rs", cx).await.expect("b.rs opens");
+    cx.run_until_parked();
+    assert_eq!(threads(cx), ["About B", "About src"]);
+
+    click_filter(cx);
+    assert_eq!(threads(cx), ["About A", "About B", "About src"]);
+}

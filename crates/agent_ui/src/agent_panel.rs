@@ -417,10 +417,41 @@ struct SerializedActiveThread {
     work_dirs: Option<SerializedPathList>,
 }
 
+// photon: Apply All on ⌥E edit requests sends them to a new thread, as one message.
+fn photon_send_edit_requests(
+    workspace: &mut Workspace,
+    blocks: Vec<acp_v2::ContentBlock>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(panel) = workspace.panel::<AgentPanel>(cx) else {
+        return;
+    };
+    panel.update(cx, |panel, cx| {
+        let thread_id = panel.create_thread_with_options(
+            CreateThreadOptions {
+                title: Some("Edit requests".into()),
+                initial_content: Some(AgentInitialContent::ContentBlock {
+                    blocks,
+                    auto_submit: true,
+                }),
+                ..CreateThreadOptions::default()
+            },
+            AgentThreadSource::AgentPanel,
+            window,
+            cx,
+        );
+        panel.activate_retained_thread(thread_id, false, window, cx);
+    });
+    workspace.focus_panel::<AgentPanel>(window, cx);
+}
+
 pub fn init(cx: &mut App) {
+    photon_agent::set_edit_request_sender(std::rc::Rc::new(photon_send_edit_requests), cx); // photon: ⌥E
     cx.observe_new(
         |workspace: &mut Workspace, _window, _cx: &mut Context<Workspace>| {
             workspace
+                .register_action(photon_agent::queue_edit_request) // photon: ⌥E edit requests
                 .register_action(|workspace, _: &NewThread, window, cx| {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                         panel.update(cx, |panel, cx| {
@@ -15236,5 +15267,269 @@ mod tests {
                 "selected_agent should be restored to the original after an agent override"
             );
         });
+    }
+
+    // photon: the review-agent-work loop (docs/photon/specs/2026-10-27-agent-review-loop-design.md).
+    mod photon_review_loop {
+        use super::*;
+
+        fn bind_photon_keymap(cx: &mut VisualTestContext) {
+            cx.update(|_, cx| {
+                let keymap = include_str!("../../../assets/keymaps/default-macos.json");
+                let key_bindings = match settings::KeymapFile::load(keymap, cx) {
+                    settings::KeymapFileLoadResult::Success { key_bindings }
+                    | settings::KeymapFileLoadResult::SomeFailedToLoad { key_bindings, .. } => {
+                        key_bindings
+                    }
+                    settings::KeymapFileLoadResult::JsonParseFailure { error } => {
+                        panic!("default keymap doesn't parse: {error}")
+                    }
+                };
+                cx.bind_keys(key_bindings);
+            });
+        }
+
+        async fn open_file_in_editor(
+            panel: &Entity<AgentPanel>,
+            path: &str,
+            text: &str,
+            cx: &mut VisualTestContext,
+        ) -> Entity<Editor> {
+            let fs = cx.update(|_, cx| <dyn fs::Fs>::global(cx));
+            fs.as_fake().insert_file(path, text.into()).await;
+            let workspace = panel.read_with(cx, |panel, _| {
+                panel.workspace.upgrade().expect("workspace must exist")
+            });
+            let item = workspace
+                .update_in(cx, |workspace, window, cx| {
+                    workspace.open_abs_path(
+                        PathBuf::from(path),
+                        workspace::OpenOptions::default(),
+                        window,
+                        cx,
+                    )
+                })
+                .await
+                .expect("file opens");
+            cx.run_until_parked();
+            item.downcast::<Editor>().expect("an editor")
+        }
+
+        #[gpui::test]
+        async fn alt_t_starts_a_thread_about_the_selection(cx: &mut TestAppContext) {
+            let (panel, mut cx) = setup_visible_panel(cx).await;
+            crate::test_support::set_stub_agent_connection(StubAgentConnection::new());
+            panel.update_in(&mut cx, |panel, window, cx| {
+                panel.selected_agent = Agent::Stub;
+                panel.activate_draft(true, AgentThreadSource::AgentPanel, window, cx);
+            });
+            cx.run_until_parked();
+            bind_photon_keymap(&mut cx);
+            let previous = panel.read_with(&cx, |panel, _| {
+                panel.active_conversation_view().cloned().expect("a draft")
+            });
+            // A draft with text, so the new thread can't reuse it.
+            let previous_editor = previous.read_with(&cx, |view, cx| {
+                view.active_thread()
+                    .expect("draft is ready")
+                    .read(cx)
+                    .message_editor
+                    .clone()
+            });
+            previous_editor.update_in(&mut cx, |editor, window, cx| {
+                editor.set_text("Keep this draft", window, cx);
+            });
+            let editor =
+                open_file_in_editor(&panel, "/project/main.rs", "one\ntwo\nthree\n", &mut cx).await;
+
+            // Without a selection, ⌥T is left to typing.
+            cx.focus(&editor);
+            cx.simulate_keystrokes("alt-t");
+            cx.run_until_parked();
+            panel.read_with(&cx, |panel, _| {
+                let active = panel.active_conversation_view().expect("a thread");
+                assert_eq!(active.entity_id(), previous.entity_id());
+            });
+
+            editor.update_in(&mut cx, |editor, window, cx| {
+                editor.change_selections(Default::default(), window, cx, |selections| {
+                    selections.select_ranges([text::Point::new(1, 0)..text::Point::new(2, 5)]);
+                });
+            });
+            cx.focus(&editor);
+            cx.simulate_keystrokes("alt-t");
+            cx.run_until_parked();
+
+            let conversation = panel.read_with(&cx, |panel, _| {
+                panel.active_conversation_view().cloned().expect("a thread")
+            });
+            assert_ne!(conversation.entity_id(), previous.entity_id());
+            let chips = conversation.read_with(&cx, |view, cx| {
+                view.active_thread()
+                    .expect("thread is ready")
+                    .read(cx)
+                    .message_editor
+                    .read(cx)
+                    .mention_set()
+                    .read(cx)
+                    .mentions()
+                    .into_iter()
+                    .map(|mention| mention.name())
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(chips, ["main.rs:2-3"]);
+            assert_eq!(
+                previous_editor.read_with(&cx, |editor, cx| editor.text(cx)),
+                "Keep this draft"
+            );
+
+            // Once the turn ends, the thread counts as being about the file.
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            let session_id = crate::test_support::active_session_id(&panel, &cx);
+            cx.update(|_, cx| {
+                assert!(photon_agent::thread_is_about(
+                    &session_id,
+                    Path::new("/project/main.rs"),
+                    cx
+                ));
+                assert!(!photon_agent::thread_is_about(
+                    &session_id,
+                    Path::new("/project/file.txt"),
+                    cx
+                ));
+            });
+        }
+
+        #[gpui::test]
+        async fn alt_e_queues_edit_requests_that_apply_all_sends_together(cx: &mut TestAppContext) {
+            let (panel, mut cx) = setup_visible_panel(cx).await;
+            panel.update(&mut cx, |panel, _| panel.selected_agent = Agent::Stub);
+            bind_photon_keymap(&mut cx);
+            let editor =
+                open_file_in_editor(&panel, "/project/main.rs", "one\ntwo\nthree\n", &mut cx).await;
+            let select_row = |row: u32, cx: &mut VisualTestContext| {
+                editor.update_in(cx, |editor, window, cx| {
+                    editor.change_selections(Default::default(), window, cx, |selections| {
+                        selections
+                            .select_ranges([text::Point::new(row, 0)..text::Point::new(row, 3)]);
+                    });
+                });
+                cx.focus(&editor);
+            };
+
+            // Escape drops a request.
+            select_row(1, &mut cx);
+            cx.simulate_keystrokes("alt-e");
+            cx.simulate_input("never mind");
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("photon-apply-all").is_none());
+
+            select_row(0, &mut cx);
+            cx.simulate_keystrokes("alt-e");
+            cx.simulate_input("say uno");
+            cx.simulate_keystrokes("enter");
+            select_row(2, &mut cx);
+            cx.simulate_keystrokes("alt-e");
+            cx.simulate_input("say tres");
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            assert_eq!(
+                editor.read_with(&cx, |editor, cx| editor.text(cx)),
+                "one\ntwo\nthree\n",
+                "typing goes to the request, not the file"
+            );
+
+            click("photon-apply-all", &mut cx);
+            assert!(cx.debug_bounds("photon-apply-all").is_none());
+            let prompt = panel.read_with(&cx, |panel, cx| {
+                let thread = panel.active_agent_thread(cx).expect("a thread was started");
+                let thread = thread.read(cx);
+                let Some(acp_thread::AgentThreadEntry::UserMessage(message)) =
+                    thread.entries().first()
+                else {
+                    panic!("the edits were sent");
+                };
+                message
+                    .content
+                    .source_blocks()
+                    .iter()
+                    .map(|block| match block {
+                        acp_v2::ContentBlock::Text(text) => text.text.clone(),
+                        acp_v2::ContentBlock::Resource(resource) => match &resource.resource {
+                            acp_v2::EmbeddedResourceResource::TextResourceContents(text) => {
+                                format!("[{}]", text.text)
+                            }
+                            _ => String::new(),
+                        },
+                        _ => String::new(),
+                    })
+                    .collect::<String>()
+            });
+            assert_eq!(prompt, "Make these edits:\n[one]say uno\n[thr]say tres");
+        }
+
+        fn click(selector: &'static str, cx: &mut VisualTestContext) {
+            let bounds = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is shown"));
+            cx.simulate_click(bounds.center(), Modifiers::none());
+            cx.run_until_parked();
+        }
+
+        #[gpui::test]
+        async fn a_turn_shows_what_it_changed_and_can_be_reverted(cx: &mut TestAppContext) {
+            let (panel, mut cx) = setup_visible_panel(cx).await;
+            let fs = cx.update(|_, cx| <dyn fs::Fs>::global(cx));
+            fs.as_fake()
+                .insert_tree("/project", json!({ ".git": {}, "main.rs": "old\n" }))
+                .await;
+            cx.run_until_parked();
+            // Like Claude Code and Codex over ACP, the agent can't rewind the conversation.
+            let connection = StubAgentConnection::new().without_rewind();
+            crate::test_support::open_draft_with_connection(&panel, connection.clone(), &mut cx);
+
+            let end_turn = connection.defer_next_prompt_response();
+            crate::test_support::send_message(&panel, &mut cx);
+            // The agent edits a file during its turn.
+            fs.as_fake()
+                .insert_file("/project/main.rs", "new\n".into())
+                .await;
+            end_turn
+                .send(Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)))
+                .expect("turn is running");
+            cx.run_until_parked();
+
+            assert!(cx.debug_bounds("photon-turn-file-file.txt").is_none());
+            click("photon-turn-file-main.rs", &mut cx);
+            let workspace = panel.read_with(&cx, |panel, _| {
+                panel.workspace.upgrade().expect("workspace must exist")
+            });
+            let (title, text) = workspace.read_with(&cx, |workspace, cx| {
+                let item = workspace.active_item(cx).expect("the turn's diff opens");
+                let editor = item.act_as::<Editor>(cx).expect("an editor");
+                (item.tab_content_text(0, cx), editor.read(cx).text(cx))
+            });
+            assert_eq!(title, "main.rs (this turn)");
+            assert_eq!(text, "new\n");
+
+            let session_id = crate::test_support::active_session_id(&panel, &cx);
+            cx.update(|_, cx| {
+                assert!(photon_agent::thread_is_about(
+                    &session_id,
+                    Path::new("/project/main.rs"),
+                    cx
+                ));
+            });
+
+            click("photon-revert-turn", &mut cx);
+            assert_eq!(
+                fs.load(Path::new("/project/main.rs"))
+                    .await
+                    .expect("main.rs is there"),
+                "old\n"
+            );
+        }
     }
 }

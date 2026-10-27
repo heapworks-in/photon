@@ -81,6 +81,7 @@ notifications.workspace = true
 ordered-float.workspace = true
 parking_lot.workspace = true
 paths.workspace = true
+photon_agent.workspace = true # photon: reviewing agent work
 picker.workspace = true
 platform_title_bar.workspace = true
 postage.workspace = true

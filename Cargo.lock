@@ -513,6 +513,7 @@ dependencies = [
  "ordered-float 5.5.0",
  "parking_lot",
  "paths",
+ "photon_agent",
  "picker",
  "platform_title_bar",
  "postage",
@@ -13718,6 +13719,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "photon_agent"
+version = "0.1.0"
+dependencies = [
+ "acp_thread",
+ "agent-client-protocol",
+ "anyhow",
+ "db",
+ "editor",
+ "file_icons",
+ "git_ui_core",
+ "gpui",
+ "language",
+ "log",
+ "menu",
+ "project",
+ "serde_json",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "photon_blocks"
 version = "0.1.0"
 dependencies = [
@@ -17273,6 +17296,7 @@ dependencies = [
  "menu",
  "node_runtime",
  "notifications",
+ "photon_agent",
  "platform_title_bar",
  "pretty_assertions",
  "project",

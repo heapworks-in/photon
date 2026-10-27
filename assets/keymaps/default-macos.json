@@ -171,6 +171,20 @@
     },
   },
   {
+    // photon: ⌥-letters type characters on macOS, so these only apply to a selection.
+    "context": "Editor && mode == full && has_selection",
+    "bindings": {
+      // A new agent thread about the selection. The second ToggleFocus returns to the editor so the
+      // selection is read from it.
+      "alt-t": [
+        "action::Sequence",
+        ["agent::ToggleFocus", "agent::NewThread", "agent::ToggleFocus", "agent::AddSelectionToThread"],
+      ],
+      // Queue an edit for the agent; Apply All sends the queued edits together.
+      "alt-e": "photon_agent::QueueEditRequest",
+    },
+  },
+  {
     "context": "Editor && multibuffer",
     "use_key_equivalents": true,
     "bindings": {
