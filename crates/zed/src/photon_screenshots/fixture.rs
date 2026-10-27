@@ -224,7 +224,7 @@ use tracing::{info, warn};
 use crate::{
     invoice::Invoice,
     ledger::Ledger,
-    payments::{ChargeError, Gateway, Receipt},
+    payments::Gateway,
 };
 
 pub async fn run_nightly(ledger: Ledger, gateway: Arc<Gateway>) {
@@ -250,21 +250,6 @@ async fn retry_failed_invoices(ledger: &Ledger, gateway: &Gateway) {
             }
             Err(error) => warn!(invoice = invoice.id, %error, "charge failed again"),
         }
-    }
-}
-
-/// Tries the backup gateway, then the primary again, while the gateways are down.
-pub async fn charge_with_fallback(
-    primary: &Gateway,
-    backup: &Gateway,
-    invoice: &Invoice,
-    attempts: u32,
-) -> Result<Receipt, ChargeError> {
-    match primary.charge(invoice).await {
-        Err(ChargeError::Unavailable(_)) if attempts > 1 => {
-            Box::pin(charge_with_fallback(backup, primary, invoice, attempts - 1)).await
-        }
-        result => result,
     }
 }
 
@@ -417,6 +402,7 @@ pub struct ChargeResponse {
     amount_cents: i64,
 }
 
+#[tracing::instrument(skip(state))]
 pub async fn charge_invoice(
     State(state): State<AppState>,
     Path(id): Path<InvoiceId>,
@@ -472,7 +458,6 @@ pub struct Gateway {
 struct ChargeRequest<'a> {
     amount_cents: i64,
     currency: &'a str,
-    customer: &'a str,
     idempotency_key: String,
 }
 
@@ -502,7 +487,6 @@ impl Gateway {
         let request = ChargeRequest {
             amount_cents: invoice.total_cents(),
             currency: &invoice.currency,
-            customer: &invoice.customer_id,
             idempotency_key: format!("invoice-{}", invoice.id),
         };
         let response = self
@@ -540,7 +524,6 @@ pub struct Gateway {
 struct ChargeRequest<'a> {
     amount_cents: i64,
     currency: &'a str,
-    customer: &'a str,
     idempotency_key: String,
 }
 
@@ -567,13 +550,11 @@ impl Gateway {
         }
     }
 
-    /// Charges the invoice's card. The idempotency key stays the same on every attempt, so a
-    /// retry after a timeout can't charge the customer twice.
+    /// Retries timeouts and 5xx responses; the same idempotency key makes that safe.
     pub async fn charge(&self, invoice: &Invoice) -> Result<Receipt, ChargeError> {
         let request = ChargeRequest {
             amount_cents: invoice.total_cents(),
             currency: &invoice.currency,
-            customer: &invoice.customer_id,
             idempotency_key: format!("invoice-{}", invoice.id),
         };
         retry_with_backoff(self.backoff, is_retryable, |attempt| {
@@ -772,22 +753,148 @@ pub const JAVA_ERROR: &str = "failed to initialize jdtls: Server reset the conne
     Error: LinkageError occurred while loading main class org.eclipse.jdt.ls.core.internal.JavaLanguageServerPlugin\n\
     java.lang.UnsupportedClassVersionError: This version of the Java Runtime only recognizes class file versions up to 61.0";
 
-/// Files on `main`, before the pull request.
 /// The plan the plan review scenes open: written against the service before the pull request.
-pub const RETRY_PLAN: &str =
-    include_str!("../../../photon_plan_review/test_fixtures/superpowers.md");
+pub const RETRY_PLAN: &str = r#"# Retry card charges with backoff
 
-/// The plan's spec, every requirement covered.
-pub fn retry_spec() -> String {
-    let spec = include_str!("../../../photon_plan_review/test_fixtures/spec.md");
-    spec.split("## Refund partial captures")
-        .next()
-        .unwrap_or(spec)
-        .trim_end()
-        .to_string()
-        + "\n"
+**Goal:** Charges that fail for a passing reason (a timeout, a 5xx) are retried with backoff
+instead of waiting for the nightly job.
+
+**Spec:** `docs/specs/2026-10-20-retry-charges-design.md`
+
+**Decision:** Declines are never retried.
+
+---
+
+### Task 1: Backoff type
+
+**Files:**
+- Create: `src/retry.rs`
+- Modify: `src/main.rs`
+
+- [ ] **Step 1: Write the failing test**
+
+```rust
+#[test]
+fn delays_double_up_to_the_cap() {
+    let backoff = Backoff::default();
+    assert_eq!(backoff.delay(3), Duration::from_millis(1600));
+}
+```
+
+- [ ] **Step 2: Add the type**
+
+```rust
+pub struct Backoff {
+    pub initial: Duration,
+    pub max: Duration,
 }
 
+impl Backoff {
+    pub fn delay(&self, attempt: u32) -> Duration {
+        self.initial.saturating_mul(1 << attempt).min(self.max)
+    }
+}
+```
+
+Add `mod retry;` to `src/main.rs`.
+
+### Task 2: retry_with_backoff()
+
+**Files:**
+- Modify: `src/retry.rs`
+
+- [ ] **Step 1: Write the failing test**
+
+```rust
+#[tokio::test]
+async fn gives_up_after_the_last_attempt() {
+    let result = retry_with_backoff(Backoff::default(), |_| true, |_| async {
+        Err::<(), _>("down")
+    });
+    assert!(result.await.is_err());
+}
+```
+
+- [ ] **Step 2: Implement it**
+
+```rust
+pub async fn retry_with_backoff<T, E, F, Fut>(
+    backoff: Backoff,
+    retryable: impl Fn(&E) -> bool,
+    mut call: F,
+) -> Result<T, E>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
+    todo!()
+}
+```
+
+Sleep for `Backoff::delay` between attempts, plus up to 25% jitter.
+
+**Decision:** Jitter is added after the cap, on purpose.
+
+### Task 3: Retry in charge()
+
+**Files:** Modify `src/payments.rs` · Modify `src/gateway.rs` · Test `src/payments.rs`
+
+**Produces:** `Gateway::charge(&self, invoice: &Invoice) -> Result<Receipt, ChargeError>`
+
+- [ ] **Step 1: Write the failing test**
+
+```rust
+#[tokio::test]
+async fn retries_timeouts() {
+    let gateway = Gateway::fake([Timeout, Timeout, Ok(receipt())]);
+    gateway.charge(&invoice()).await.unwrap();
+    assert_eq!(gateway.attempts(), 3);
+}
+```
+
+- [ ] **Step 2: Run it to see it fail**
+
+Run: `cargo test retries_timeouts`. Expected: FAIL, `attempts() == 1`.
+
+- [ ] **Step 3: Wrap the call**
+
+Replace the direct HTTP call with `retry_with_backoff(self.backoff, is_retryable, ..)`, from `src/retry.rs`. Timeouts and 5xx are retryable; declines are not.
+
+### Task 4: Skip declines nightly
+
+**Files:**
+- Modify: `src/jobs.rs`
+- Test: `tests/nightly.rs`
+
+- [ ] **Step 1: Write the test**
+
+```rust
+#[tokio::test]
+async fn skips_declined_invoices() {}
+```
+
+- [ ] **Step 2: Skip declines**
+
+`retry_failed_invoices` skips invoices whose last charge was declined.
+"#;
+
+/// The plan's spec, every requirement covered.
+pub const RETRY_SPEC: &str = r#"# Retry card charges
+
+## Retry timeouts and server errors
+
+A charge that times out or gets a 5xx is retried with exponential backoff.
+
+## Never retry declines
+
+A 402 is final.
+
+## Nightly job
+
+The nightly job skips invoices that were declined.
+"#;
+
+/// Files on `main`, before the pull request.
 pub fn base_files() -> Vec<(&'static str, &'static str)> {
     vec![
         ("Cargo.toml", CARGO_TOML),
@@ -835,7 +942,6 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("run_nightly", "src/jobs.rs"),
     ("retry_failed_invoices", "src/jobs.rs"),
     ("main", "src/main.rs"),
-    ("charge_with_fallback", "src/jobs.rs"),
     ("retries_gateway_timeouts", "src/jobs.rs"),
 ];
 
@@ -854,8 +960,6 @@ pub const CALLS: &[(&str, &str)] = &[
     ("charge", "send_charge"),
     ("charge", "is_retryable"),
     ("retry_with_backoff", "delay"),
-    ("charge_with_fallback", "charge"),
-    ("charge_with_fallback", "charge_with_fallback"),
     ("retries_gateway_timeouts", "charge"),
 ];
 
