@@ -319,6 +319,10 @@ pub struct ReviewItem {
     reply_editors: HashMap<String, Entity<Editor>>,
     text_syncs: HashMap<String, Arc<Mutex<TextSync>>>,
     comment_blocks: HashSet<CustomBlockId>,
+    /// Each shown comment's prose as Markdown, by its text, so a redraw reuses it.
+    comment_markdown: HashMap<String, Entity<Markdown>>,
+    /// Resolved threads opened from their one-line fold.
+    expanded_resolved: HashSet<String>,
     login: String,
     summary_editor: Entity<Editor>,
     submitting: bool,
@@ -927,15 +931,163 @@ fn comment_card(id: ElementId, block: &BlockContext) -> Stateful<Div> {
     let colors = block.app.theme().colors();
     v_flex()
         .id(id)
+        .relative()
+        .overflow_hidden()
         .ml(block.margins.gutter.full_width())
         .mr_4()
         .my_1()
-        .p_2()
-        .gap_1()
+        .px_3()
+        .py_2()
+        .gap_1p5()
+        .max_w(px(900.))
         .rounded_md()
         .border_1()
         .border_color(colors.border)
-        .bg(colors.panel_background)
+        .bg(colors.elevated_surface_background)
+}
+
+/// What a comment says, ready to draw: its prose as Markdown and its one suggestion, if any,
+/// as the lines it replaces and the lines it suggests.
+#[derive(Clone)]
+struct CommentBody {
+    markdown: Option<Entity<Markdown>>,
+    suggestion: Option<(Vec<String>, Vec<String>)>,
+}
+
+const SEVERITIES: [&str; 3] = ["must fix", "should fix", "nice to have"];
+
+/// An agent draft's lead, "Category (severity): " or "severity: ", split from the rest of its
+/// text (see `AgentComment::draft_text`).
+fn agent_lead(body: &str) -> (Option<&str>, Option<&str>, &str) {
+    let is_severity = |text: &str| SEVERITIES.contains(&text.to_ascii_lowercase().as_str());
+    let Some((lead, rest)) = body.split_once(": ") else {
+        return (None, None, body);
+    };
+    if let Some((category, severity)) = lead
+        .strip_suffix(')')
+        .and_then(|lead| lead.rsplit_once(" ("))
+        && is_severity(severity)
+    {
+        return (Some(category), Some(severity), rest);
+    }
+    if is_severity(lead) {
+        return (None, Some(lead), rest);
+    }
+    (None, None, body)
+}
+
+fn severity_color(severity: &str) -> Color {
+    match severity.to_ascii_lowercase().as_str() {
+        "must fix" => Color::Error,
+        "should fix" => Color::Warning,
+        _ => Color::Muted,
+    }
+}
+
+/// The body without its suggestion block, when it has exactly one (see `parse_suggestion`).
+fn without_suggestion(body: &str) -> String {
+    let mut prose = Vec::new();
+    let mut inside = false;
+    for line in body.lines() {
+        if inside {
+            inside = line.trim() != "```";
+        } else if line.trim() == "```suggestion" {
+            inside = true;
+        } else {
+            prose.push(line);
+        }
+    }
+    prose.join("\n")
+}
+
+fn relative_time(created_at: &str) -> Option<String> {
+    let time = chrono::DateTime::parse_from_rfc3339(created_at).ok()?;
+    Some(ui::utils::format_distance_from_now(
+        ui::utils::DateTimeType::Local(time.with_timezone(&chrono::Local)),
+        false,
+        true,
+        false,
+    ))
+}
+
+fn state_chip(label: impl Into<SharedString>, color: Color, cx: &App) -> AnyElement {
+    let label = label.into();
+    let tint = color.color(cx);
+    div()
+        .debug_selector({
+            let label = label.clone();
+            move || format!("photon-review-chip-{label}")
+        })
+        .child(
+            ui::Chip::new(label)
+                .label_color(color)
+                .label_size(LabelSize::XSmall)
+                .bg_color(tint.opacity(0.12))
+                .border_color(tint.opacity(0.3)),
+        )
+        .into_any_element()
+}
+
+fn comment_header(
+    author: impl Into<SharedString>,
+    time: Option<String>,
+    chips: Vec<AnyElement>,
+) -> Div {
+    h_flex()
+        .gap_2()
+        .min_w_0()
+        .child(Label::new(author).weight(gpui::FontWeight::SEMIBOLD))
+        .children(time.map(|time| Label::new(time).size(LabelSize::Small).color(Color::Muted)))
+        .children(chips)
+}
+
+fn render_comment_body(body: &CommentBody, block: &mut BlockContext) -> Div {
+    let colors = block.app.theme().colors();
+    let (added, deleted) = (colors.version_control_added, colors.version_control_deleted);
+    let border = colors.border_variant;
+    let style = MarkdownStyle::themed(MarkdownFont::Editor, block.window, block.app);
+    let diff_line = |sign: &str, line: &String, color: gpui::Hsla| {
+        div()
+            .px_2()
+            .bg(color.opacity(0.12))
+            .child(
+                Label::new(format!("{sign} {line}"))
+                    .size(LabelSize::Small)
+                    .buffer_font(block.app),
+            )
+            .into_any_element()
+    };
+    let suggestion = body.suggestion.as_ref().map(|(before, after)| {
+        v_flex()
+            .debug_selector(|| "photon-review-suggestion".into())
+            .rounded_sm()
+            .border_1()
+            .border_color(border)
+            .overflow_hidden()
+            .child(
+                div()
+                    .px_2()
+                    .py_0p5()
+                    .border_b_1()
+                    .border_color(border)
+                    .child(
+                        Label::new("Suggested change")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    ),
+            )
+            .children(before.iter().map(|line| diff_line("-", line, deleted)))
+            .children(after.iter().map(|line| diff_line("+", line, added)))
+    });
+    v_flex()
+        .gap_1()
+        .max_w(px(720.))
+        .children(
+            body.markdown
+                .clone()
+                .map(|markdown| MarkdownElement::new(markdown, style)),
+        )
+        .children(suggestion)
 }
 
 /// Deleting an agent draft asks why in one small menu, so later pre-reviews learn from it.
@@ -975,7 +1127,8 @@ fn draft_renderer(
     item: WeakEntity<ReviewItem>,
     local_id: usize,
     line: u32,
-    body: SharedString,
+    body: CommentBody,
+    labels: (Option<SharedString>, Option<SharedString>),
     note: Option<SharedString>,
     posted_note: Option<&'static str>,
     composer: Option<Entity<Editor>>,
@@ -984,6 +1137,17 @@ fn draft_renderer(
     from_agent: bool,
 ) -> RenderBlock {
     Arc::new(move |block: &mut BlockContext| {
+        let (category, severity) = labels.clone();
+        let mut chips = vec![state_chip("Draft", Color::Accent, block.app)];
+        if from_agent {
+            chips.push(state_chip("AI", Color::Muted, block.app));
+        }
+        chips
+            .extend(severity.map(|severity| {
+                state_chip(severity.clone(), severity_color(&severity), block.app)
+            }));
+        chips.extend(category.map(|category| state_chip(category, Color::Muted, block.app)));
+        let accent = block.app.theme().colors().text_accent;
         let error = sync.lock().error.clone();
         let suggest_item = item.clone();
         let include_item = item.clone();
@@ -998,14 +1162,18 @@ fn draft_renderer(
             .group(group.clone())
             .when(composer.is_some(), |this| this.border_color(focused_border))
             .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(3.))
+                    .bg(accent),
+            )
+            .child(
                 h_flex()
                     .gap_1()
-                    .child(Label::new("you").size(LabelSize::Small))
-                    .child(
-                        Label::new(format!("· on line {line} · draft"))
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    )
+                    .child(comment_header("you", Some(format!("line {line}")), chips))
                     .when(composer.is_none(), |this| {
                         this.child(
                             h_flex()
@@ -1065,7 +1233,7 @@ fn draft_renderer(
             )
             .map(|this| match &composer {
                 Some(editor) => this.child(editor.clone()),
-                None => this.child(Label::new(body.clone()).size(LabelSize::Small)),
+                None => this.child(render_comment_body(&body, block)),
             })
             .children(
                 note.clone()
@@ -1165,6 +1333,8 @@ struct SuggestionState {
 fn thread_renderer(
     item: WeakEntity<ReviewItem>,
     thread: ReviewThread,
+    bodies: Vec<CommentBody>,
+    expanded: bool,
     reply: Option<Entity<Editor>>,
     error: Option<SharedString>,
     resolve_pending: bool,
@@ -1174,18 +1344,107 @@ fn thread_renderer(
         let id = SharedString::from(format!("photon-review-thread-{}", thread.id));
         let reply_item = item.clone();
         let resolve_item = item.clone();
+        let toggle_item = item.clone();
         let reply_thread = thread.id.clone();
         let resolve_thread = thread.id.clone();
+        let toggle_thread = thread.id.clone();
         let resolved = thread.is_resolved;
+        let colors = block.app.theme().colors();
+        let (separator, input_border) = (colors.border, colors.border);
+        let toggle = move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+            toggle_item
+                .update(cx, |item, cx| {
+                    item.toggle_resolved_thread(&toggle_thread, cx)
+                })
+                .log_err();
+        };
+        // Resolved threads fold to one line, as on GitHub.
+        if resolved && !expanded {
+            let summary = thread
+                .comments
+                .first()
+                .map(|comment| {
+                    let line = comment.body.lines().next().unwrap_or_default();
+                    format!("Resolved · {}: {line}", comment.author)
+                })
+                .unwrap_or_else(|| "Resolved".to_string());
+            let selector = format!("photon-review-resolved-{}", thread.id);
+            return comment_card(id.into(), block)
+                .debug_selector(move || selector)
+                .py_1()
+                .cursor_pointer()
+                .tooltip(Tooltip::text("Show the conversation"))
+                .on_click(toggle)
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Icon::new(IconName::Check)
+                                .size(IconSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .child(
+                            div().flex_1().min_w_0().child(
+                                Label::new(summary)
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted)
+                                    .truncate(),
+                            ),
+                        )
+                        .child(
+                            Icon::new(IconName::ChevronDown)
+                                .size(IconSize::Small)
+                                .color(Color::Muted),
+                        ),
+                )
+                .into_any_element();
+        }
+        let mut chips = Vec::new();
+        if thread.is_outdated {
+            chips.push(state_chip("Outdated", Color::Warning, block.app));
+        }
+        if resolved {
+            chips.push(state_chip("Resolved", Color::Success, block.app));
+        }
+        let (card_selector, fold_selector) =
+            (id.to_string(), format!("photon-review-fold-{}", thread.id));
         comment_card(id.into(), block)
+            .debug_selector(move || card_selector)
+            .when(resolved, |this| {
+                this.child(
+                    div().absolute().top_1().right_1().debug_selector(move || fold_selector).child(
+                        IconButton::new("collapse", IconName::ChevronUp)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Fold the resolved conversation"))
+                            .on_click(toggle),
+                    ),
+                )
+            })
             .children(thread.comments.iter().enumerate().map(|(index, comment)| {
                 let commit_item = item.clone();
                 let commit_thread = thread.id.clone();
                 let has_suggestion =
                     suggestion.committable && parse_suggestion(&comment.body).is_some();
+                let chips = if index == 0 {
+                    std::mem::take(&mut chips)
+                } else {
+                    Vec::new()
+                };
                 v_flex()
-                    .child(Label::new(comment.author.clone()).size(LabelSize::Small))
-                    .child(Label::new(comment.body.clone()).size(LabelSize::Small))
+                    .gap_1()
+                    .when(index > 0, |this| {
+                        this.mt_1().pt_2().border_t_1().border_color(separator)
+                    })
+                    .child(comment_header(
+                        comment.author.clone(),
+                        relative_time(&comment.created_at),
+                        chips,
+                    ))
+                    .children(
+                        bodies
+                            .get(index)
+                            .map(|body| render_comment_body(body, block)),
+                    )
                     .when(has_suggestion, |this| {
                         this.child(
                             h_flex().pt_1().child(
@@ -1219,8 +1478,21 @@ fn thread_renderer(
             }))
             .child(
                 h_flex()
+                    .pt_1p5()
                     .gap_1()
-                    .children(reply.clone().map(|editor| div().flex_1().child(editor)))
+                    .border_t_1()
+                    .border_color(separator)
+                    .children(reply.clone().map(|editor| {
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(input_border)
+                            .child(editor)
+                    }))
                     .child(
                         crate::button("reply", "Reply")
                             .style(if reply.is_some() {
@@ -1527,6 +1799,8 @@ impl ReviewItem {
             reply_editors: HashMap::new(),
             text_syncs,
             comment_blocks: HashSet::new(),
+            comment_markdown: HashMap::new(),
+            expanded_resolved: HashSet::new(),
             login,
             summary_editor,
             submitting: false,
@@ -3975,11 +4249,129 @@ impl ReviewItem {
         }
     }
 
+    /// The head's lines `start..=end` of `path`, which a suggestion on them replaces.
+    fn original_lines(
+        &self,
+        path: &str,
+        side: Side,
+        start: u32,
+        end: u32,
+        cx: &App,
+    ) -> Vec<String> {
+        let Some(buffer) = buffer_for(&self.files, path).filter(|_| side == Side::Right) else {
+            return Vec::new();
+        };
+        let first = start.max(1) as usize - 1;
+        buffer
+            .read(cx)
+            .text()
+            .lines()
+            .skip(first)
+            .take(end.saturating_sub(start) as usize + 1)
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn comment_body(
+        &mut self,
+        text: &str,
+        original: impl FnOnce(&Self, &App) -> Vec<String>,
+        used: &mut HashSet<String>,
+        cx: &mut Context<Self>,
+    ) -> CommentBody {
+        let suggestion = parse_suggestion(text);
+        let prose = if suggestion.is_some() {
+            without_suggestion(text)
+        } else {
+            text.to_string()
+        };
+        let markdown = (!prose.trim().is_empty()).then(|| {
+            used.insert(prose.clone());
+            self.comment_markdown
+                .entry(prose.clone())
+                .or_insert_with(|| cx.new(|cx| Markdown::new(prose.into(), None, None, cx)))
+                .clone()
+        });
+        let suggestion = suggestion.map(|after| (original(self, cx), after));
+        CommentBody {
+            markdown,
+            suggestion,
+        }
+    }
+
+    fn toggle_resolved_thread(&mut self, thread_id: &str, cx: &mut Context<Self>) {
+        if !self.expanded_resolved.remove(thread_id) {
+            self.expanded_resolved.insert(thread_id.to_string());
+        }
+        self.show_comments(cx);
+        cx.notify();
+    }
+
     fn show_comments(&mut self, cx: &mut Context<Self>) {
         let snapshot = self.multibuffer.read(cx).snapshot(cx);
         let item = cx.weak_entity();
         let mut blocks = Vec::new();
-        for (draft, view) in self.drafts.iter().zip(&self.draft_views) {
+        let mut used = HashSet::new();
+        let mut draft_bodies = Vec::with_capacity(self.drafts.len());
+        for index in 0..self.drafts.len() {
+            let Some(draft) = self.drafts.get(index) else {
+                continue;
+            };
+            let (category, severity, text) = if draft.from_agent {
+                agent_lead(&draft.body)
+            } else {
+                (None, None, draft.body.as_str())
+            };
+            let labels = (
+                category.map(|text| SharedString::from(text.to_string())),
+                severity.map(|text| SharedString::from(text.to_string())),
+            );
+            let text = text.to_string();
+            let (path, side, start, end) = (
+                draft.path.clone(),
+                draft.side,
+                draft.start_line,
+                draft.end_line,
+            );
+            let body = self.comment_body(
+                &text,
+                |this, cx| this.original_lines(&path, side, start, end, cx),
+                &mut used,
+                cx,
+            );
+            draft_bodies.push((body, labels));
+        }
+        let mut thread_bodies = HashMap::new();
+        for index in 0..self.detail.threads.len() {
+            let Some(thread) = self.detail.threads.get(index) else {
+                continue;
+            };
+            let (id, path, side) = (thread.id.clone(), thread.path.clone(), thread.side);
+            let end = thread.line.unwrap_or_default();
+            let start = thread.start_line.unwrap_or(end);
+            let texts: Vec<String> = thread
+                .comments
+                .iter()
+                .map(|comment| comment.body.clone())
+                .collect();
+            let bodies = texts
+                .iter()
+                .map(|text| {
+                    let path = path.clone();
+                    self.comment_body(
+                        text,
+                        |this, cx| this.original_lines(&path, side, start, end, cx),
+                        &mut used,
+                        cx,
+                    )
+                })
+                .collect::<Vec<_>>();
+            thread_bodies.insert(id, bodies);
+        }
+        self.comment_markdown.retain(|text, _| used.contains(text));
+        for ((draft, view), (body, labels)) in
+            self.drafts.iter().zip(&self.draft_views).zip(draft_bodies)
+        {
             if draft.outdated || draft.general {
                 continue;
             }
@@ -4004,7 +4396,8 @@ impl ReviewItem {
                     item.clone(),
                     view.local_id,
                     draft.end_line,
-                    draft.body.clone().into(),
+                    body,
+                    labels,
                     note.map(SharedString::from),
                     posted_note,
                     view.composer.clone(),
@@ -4048,11 +4441,19 @@ impl ReviewItem {
             let extra_rows = suggestion_rows as u32 + u32::from(suggestion.note.is_some());
             blocks.push(BlockProperties {
                 placement: BlockPlacement::Below(anchor),
-                height: Some(body_rows as u32 + 3 + u32::from(error.is_some()) + extra_rows),
+                height: Some(
+                    if thread.is_resolved && !self.expanded_resolved.contains(&thread.id) {
+                        2
+                    } else {
+                        body_rows as u32 + 3 + u32::from(error.is_some()) + extra_rows
+                    },
+                ),
                 style: BlockStyle::Sticky,
                 render: thread_renderer(
                     item.clone(),
                     thread.clone(),
+                    thread_bodies.remove(&thread.id).unwrap_or_default(),
+                    self.expanded_resolved.contains(&thread.id),
                     self.reply_editors.get(&thread.id).cloned(),
                     error,
                     pending,
@@ -6181,33 +6582,41 @@ impl ReviewItem {
                     let pending = self.resolving.contains(&thread.id);
                     v_flex()
                         .id(("photon-review-unplaced", index))
-                        .gap_0p5()
-                        .p_1()
-                        .rounded_sm()
+                        .gap_1()
+                        .p_2()
+                        .rounded_md()
                         .border_1()
-                        .border_color(colors.border_variant)
+                        .border_color(colors.border)
+                        .bg(colors.elevated_surface_background)
                         .child(
-                            Label::new(format!(
-                                "{} · {}",
-                                thread.path,
-                                if thread.is_outdated {
-                                    "outdated"
-                                } else {
-                                    "whole file"
-                                }
-                            ))
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted)
-                            .truncate(),
-                        )
-                        .children(thread.comments.iter().map(|comment| {
-                            v_flex()
+                            h_flex()
+                                .gap_1()
                                 .child(
-                                    Label::new(comment.author.clone())
-                                        .size(LabelSize::XSmall)
-                                        .color(Color::Muted),
+                                    div().flex_1().min_w_0().child(
+                                        Label::new(thread.path.clone())
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted)
+                                            .truncate(),
+                                    ),
                                 )
-                                .child(Label::new(comment.body.clone()).size(LabelSize::Small))
+                                .child(if thread.is_outdated {
+                                    state_chip("Outdated", Color::Warning, cx)
+                                } else {
+                                    state_chip("Whole file", Color::Muted, cx)
+                                }),
+                        )
+                        .children(thread.comments.iter().enumerate().map(|(index, comment)| {
+                            v_flex()
+                                .gap_0p5()
+                                .when(index > 0, |this| {
+                                    this.pt_1().border_t_1().border_color(colors.border_variant)
+                                })
+                                .child(comment_header(
+                                    comment.author.clone(),
+                                    relative_time(&comment.created_at),
+                                    Vec::new(),
+                                ))
+                                .child(Label::new(comment.body.clone()))
                         }))
                         .child(
                             h_flex().child(
@@ -9563,6 +9972,97 @@ fn verify_password(user: &str, password: &str) -> bool {
                 created_at: "2026-10-24T00:00:00Z".into(),
             }],
         }
+    }
+
+    #[gpui::test]
+    async fn resolved_threads_fold_to_one_line_until_clicked(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        item.update(&mut cx, |item, cx| {
+            let mut thread = suggestion_thread(false);
+            thread.id = "T_done".into();
+            thread.is_resolved = true;
+            item.detail.threads.push(thread);
+            item.show_comments(cx);
+        });
+        assert!(drawn("photon-review-resolved-T_done", &mut cx));
+        assert!(!drawn("photon-review-thread-T_done", &mut cx));
+
+        click("photon-review-resolved-T_done", &mut cx);
+        assert!(drawn("photon-review-thread-T_done", &mut cx));
+        assert!(drawn("photon-review-chip-Resolved", &mut cx));
+        assert!(!drawn("photon-review-resolved-T_done", &mut cx));
+
+        click("photon-review-fold-T_done", &mut cx);
+        assert!(drawn("photon-review-resolved-T_done", &mut cx));
+        assert!(!drawn("photon-review-thread-T_done", &mut cx));
+    }
+
+    #[gpui::test]
+    async fn a_thread_shows_its_state_and_suggestion(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(cx, Vec::new()).await;
+        item.update(&mut cx, |item, cx| {
+            item.detail.threads.push(suggestion_thread(true));
+            item.show_comments(cx);
+        });
+        assert!(drawn("photon-review-thread-T_suggest", &mut cx));
+        assert!(drawn("photon-review-chip-Outdated", &mut cx));
+        assert!(!drawn("photon-review-chip-Resolved", &mut cx));
+        assert!(drawn("photon-review-suggestion", &mut cx));
+        item.read_with(&cx, |item, _| {
+            assert!(
+                item.comment_markdown.contains_key("Tighter:"),
+                "the suggestion is drawn as a diff, not as Markdown: {:?}",
+                item.comment_markdown.keys().collect::<Vec<_>>()
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn an_agent_draft_shows_its_severity_and_category_as_chips(cx: &mut TestAppContext) {
+        let (item, mut cx, _) = open_with_drafts(
+            cx,
+            vec![Draft {
+                body: "Security (must fix): Audit before the check?".into(),
+                from_agent: true,
+                ..current_draft("src/login.rs", 3, "    audit(user);")
+            }],
+        )
+        .await;
+        for chip in ["Draft", "AI", "must fix", "Security"] {
+            assert!(
+                drawn(format!("photon-review-chip-{chip}").leak(), &mut cx),
+                "{chip}"
+            );
+        }
+        item.read_with(&cx, |item, _| {
+            assert!(
+                item.comment_markdown
+                    .contains_key("Audit before the check?")
+            );
+        });
+    }
+
+    #[test]
+    fn agent_leads_split_from_the_text() {
+        assert_eq!(
+            agent_lead("Security (must fix): Audit first."),
+            (Some("Security"), Some("must fix"), "Audit first.")
+        );
+        assert_eq!(
+            agent_lead("nice to have: Rename it."),
+            (None, Some("nice to have"), "Rename it.")
+        );
+        assert_eq!(
+            agent_lead("Note: plain text"),
+            (None, None, "Note: plain text")
+        );
+        assert_eq!(severity_color("must fix"), Color::Error);
+        assert_eq!(severity_color("Should fix"), Color::Warning);
+        assert_eq!(severity_color("nice to have"), Color::Muted);
+        assert_eq!(
+            without_suggestion("Tighter:\n```suggestion\n    audit(&user);\n```\nThanks"),
+            "Tighter:\nThanks"
+        );
     }
 
     #[gpui::test]

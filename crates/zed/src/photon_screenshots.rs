@@ -72,18 +72,17 @@ mod mac {
     use editor::Editor;
     use futures::channel::mpsc::UnboundedReceiver;
     use gpui::{
-        App, AppContext as _, AsyncWindowContext, BorrowAppContext as _, Bounds, Entity, Focusable as _, Modifiers, Task,
-        VisualTestAppContext, WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions, point,
-        px, size,
+        App, AppContext as _, AsyncWindowContext, BorrowAppContext as _, Bounds, Entity,
+        Focusable as _, Modifiers, Task, VisualTestAppContext, WeakEntity, Window, WindowBounds,
+        WindowHandle, WindowOptions, point, px, size,
     };
     use language::{
-        BinaryStatus, FakeLspAdapter, Language, LanguageConfig, LanguageMatcher,
-        LanguageServerName,
+        BinaryStatus, FakeLspAdapter, Language, LanguageConfig, LanguageMatcher, LanguageServerName,
     };
     use lsp::FakeLanguageServer;
     use photon_review::{
-        Checkout, FakeGh, GhRequest, PrKey, ReviewDb, ReviewItem, build_loaded_file,
-        parse_detail, parse_unified_diff, set_gh_runner, set_review_agent,
+        Checkout, FakeGh, GhRequest, PrKey, ReviewDb, ReviewItem, build_loaded_file, parse_detail,
+        parse_unified_diff, set_gh_runner, set_review_agent,
     };
     use project::{AgentId, Project, ProjectPath};
     use serde_json::json;
@@ -169,7 +168,12 @@ mod mac {
                 ],
                 None,
             )?;
-            let base_sha = commit(&root, "devon", "Charge invoices through the card gateway", 1)?;
+            let base_sha = commit(
+                &root,
+                "devon",
+                "Charge invoices through the card gateway",
+                1,
+            )?;
             git(&root, &["checkout", "--quiet", "-b", BRANCH], None)?;
             write_files(&root, &owned(fixture::first_push()))?;
             let first_sha = commit(&root, AUTHOR, "Retry card charges with backoff", 2)?;
@@ -209,7 +213,11 @@ mod mac {
 
     fn commit(root: &Path, author: &str, message: &str, day: u32) -> Result<String> {
         git(root, &["add", "-A"], None)?;
-        git(root, &["commit", "--quiet", "-m", message], Some((author, day)))?;
+        git(
+            root,
+            &["commit", "--quiet", "-m", message],
+            Some((author, day)),
+        )?;
         Ok(git(root, &["rev-parse", "HEAD"], None)?.trim().to_string())
     }
 
@@ -321,7 +329,8 @@ mod mac {
                 let before = line[..column].chars().last();
                 let after = line[column + callee.len()..].chars().next();
                 let is_word = |character: Option<char>| {
-                    character.is_some_and(|character| character.is_alphanumeric() || character == '_')
+                    character
+                        .is_some_and(|character| character.is_alphanumeric() || character == '_')
                 };
                 if !is_word(before) && !is_word(after) {
                     let row = caller.start + offset as u32;
@@ -385,7 +394,8 @@ mod mac {
                             .iter()
                             .filter(|(from, _)| *from == caller.name)
                             .filter_map(|(_, callee)| {
-                                let to = functions.iter().find(|function| function.name == *callee)?;
+                                let to =
+                                    functions.iter().find(|function| function.name == *callee)?;
                                 Some(lsp::CallHierarchyOutgoingCall {
                                     to: lsp_item(to),
                                     from_ranges: vec![call_site(caller, callee)],
@@ -437,6 +447,8 @@ mod mac {
         let retry_head = std::fs::read_to_string(repo.root.join("src/retry.rs"))?;
         let payments_head = std::fs::read_to_string(repo.root.join("src/payments.rs"))?;
         let jitter_line = line_of(&retry_head, "let jitter")?;
+        let exponential_line = line_of(&retry_head, "let exponential")?;
+        let sum_line = line_of(&retry_head, "capped + Duration::from_millis(jitter)")?;
         let retryable_line = line_of(&payments_head, "|| error.is_connect()")?;
         Ok(json!({ "data": { "repository": {
             "squashMergeAllowed": true,
@@ -483,6 +495,31 @@ mod mac {
                         "comments": { "nodes": [
                             comment(9101, "devon", "Jitter is added after the cap, so `max` isn't really the maximum: the last wait can reach 6.25 s. Cap after adding it?", 4),
                             comment(9102, AUTHOR, "That's on purpose: the spread above the cap keeps the nightly job from retrying in lockstep. I'll say so in the doc comment.", 4),
+                        ] },
+                    },
+                    {
+                        "id": "PRRT_overflow",
+                        "isResolved": true,
+                        "isOutdated": false,
+                        "path": "src/retry.rs",
+                        "line": exponential_line,
+                        "startLine": null,
+                        "diffSide": "RIGHT",
+                        "comments": { "nodes": [
+                            comment(9105, "maya", "Can `saturating_pow` overflow before the multiply?", 4),
+                            comment(9106, AUTHOR, "No: both saturate, so a huge attempt count just waits `max`.", 4),
+                        ] },
+                    },
+                    {
+                        "id": "PRRT_ceiling",
+                        "isResolved": false,
+                        "isOutdated": false,
+                        "path": "src/retry.rs",
+                        "line": sum_line,
+                        "startLine": null,
+                        "diffSide": "RIGHT",
+                        "comments": { "nodes": [
+                            comment(9107, "maya", "If `max` should be a real ceiling, cap after adding the jitter:\n\n```suggestion\n        (capped + Duration::from_millis(jitter)).min(self.max)\n```", 5),
                         ] },
                     },
                     {
@@ -940,9 +977,9 @@ mod mac {
         }
 
         fn close(&mut self, win: Win) {
-            let project = win.workspace.read_with(&self.cx, |workspace, _| {
-                workspace.project().clone()
-            });
+            let project = win
+                .workspace
+                .read_with(&self.cx, |workspace, _| workspace.project().clone());
             project.update(&mut self.cx, |project, cx| {
                 let ids: Vec<_> = project
                     .worktrees(cx)
@@ -987,12 +1024,15 @@ mod mac {
             let detail = parse_detail(&pr_key(), &detail_json(&self.repo, viewed)?)?;
             let patch = git(
                 &root,
-                &["diff", &format!("{}..{}", self.repo.base_sha, self.repo.head_sha)],
+                &[
+                    "diff",
+                    &format!("{}..{}", self.repo.base_sha, self.repo.head_sha),
+                ],
                 None,
             )?;
-            let project = win.workspace.read_with(&self.cx, |workspace, _| {
-                workspace.project().clone()
-            });
+            let project = win
+                .workspace
+                .read_with(&self.cx, |workspace, _| workspace.project().clone());
             let mut files = Vec::new();
             for diff in parse_unified_diff(&patch)? {
                 let base = match diff.status {
@@ -1045,7 +1085,12 @@ mod mac {
             Ok((win, item))
         }
 
-        fn select_step_with(&mut self, win: &Win, item: &Entity<ReviewItem>, path: &str) -> Result<()> {
+        fn select_step_with(
+            &mut self,
+            win: &Win,
+            item: &Entity<ReviewItem>,
+            path: &str,
+        ) -> Result<()> {
             let index = item
                 .read_with(&self.cx, |item, _| {
                     item.steps()
@@ -1203,7 +1248,12 @@ mod mac {
         }
 
         fn agent(&mut self) -> Result<()> {
-            let parent = self.repo.root.parent().context("no parent")?.with_file_name("agent");
+            let parent = self
+                .repo
+                .root
+                .parent()
+                .context("no parent")?
+                .with_file_name("agent");
             let repo = Repo::create(&parent)?;
             let win = self.open_window(&repo.root)?;
             self.open_file(&win, "src/retry.rs")?;
@@ -1455,7 +1505,9 @@ mod mac {
             false,
             cx,
         );
-        app_state.languages.set_theme(theme::GlobalTheme::theme(cx).clone());
+        app_state
+            .languages
+            .set_theme(theme::GlobalTheme::theme(cx).clone());
         cx.observe_global::<theme::GlobalTheme>({
             let languages = app_state.languages.clone();
             move |cx| languages.set_theme(theme::GlobalTheme::theme(cx).clone())
