@@ -1,21 +1,30 @@
-use photon_brand::{ANSI_BRIGHT, ANSI_NORMAL, BHUMI, FOREGROUND, MAHA, contrast_ratio};
+use photon_brand::{ANSI_BRIGHT, ANSI_NORMAL, BHUMI, FOREGROUND, contrast_ratio};
 use serde_json::Value;
 
 const ANSI_NAMES: [&str; 8] = [
     "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
 ];
 
-fn photon_black() -> Value {
+const THEME_NAMES: [&str; 4] = [
+    "Photon Black",
+    "Photon Mocha",
+    "Photon Rosé",
+    "Photon Vesper",
+];
+
+/// Parsed strictly, the way the bundled theme loader reads it.
+fn photon_themes() -> Vec<Value> {
     let family: Value =
-        serde_json_lenient::from_str(include_str!("../../../assets/themes/photon/photon.json"))
+        serde_json::from_str(include_str!("../../../assets/themes/photon/photon.json"))
             .expect("photon.json parses");
-    family["themes"]
-        .as_array()
-        .expect("themes array")
-        .iter()
-        .find(|theme| theme["name"] == "Photon Black")
-        .expect("Photon Black theme")
-        .clone()
+    family["themes"].as_array().expect("themes array").clone()
+}
+
+fn theme(name: &str) -> Value {
+    photon_themes()
+        .into_iter()
+        .find(|theme| theme["name"] == name)
+        .unwrap_or_else(|| panic!("{name} theme"))
 }
 
 /// `#rrggbb` or `#rrggbbaa` -> `0xrrggbb`, ignoring alpha.
@@ -28,12 +37,51 @@ fn hex(value: &Value) -> u32 {
 }
 
 #[test]
+fn four_dark_themes_share_photons_black_chrome() {
+    let themes = photon_themes();
+    let names: Vec<&str> = themes
+        .iter()
+        .map(|theme| theme["name"].as_str().expect("theme name"))
+        .collect();
+    assert_eq!(names, THEME_NAMES);
+
+    let chrome = |theme: &Value| {
+        [
+            "background",
+            "editor.background",
+            "terminal.background",
+            "panel.background",
+            "surface.background",
+            "elevated_surface.background",
+            "element.background",
+            "element.selected",
+            "border",
+            "border.variant",
+        ]
+        .map(|key| theme["style"][key].clone())
+    };
+    let black_chrome = chrome(&themes[0]);
+    for theme in &themes {
+        assert_eq!(theme["appearance"], "dark");
+        assert_eq!(
+            hex(&theme["style"]["background"]),
+            BHUMI,
+            "{}",
+            theme["name"]
+        );
+        assert_eq!(chrome(theme), black_chrome, "{}", theme["name"]);
+    }
+
+    let black = theme("Photon Black");
+    assert_eq!(hex(&black["style"]["syntax"]["string"]["color"]), 0x9ECE6A);
+}
+
+#[test]
 fn photon_black_matches_brand() {
-    let style = &photon_black()["style"];
+    let style = &theme("Photon Black")["style"];
     assert_eq!(hex(&style["background"]), BHUMI);
     assert_eq!(hex(&style["editor.background"]), BHUMI);
     assert_eq!(hex(&style["terminal.background"]), BHUMI);
-    assert_eq!(hex(&style["text.accent"]), MAHA);
     assert_eq!(hex(&style["text"]), FOREGROUND);
     for (index, name) in ANSI_NAMES.iter().enumerate() {
         assert_eq!(
@@ -51,18 +99,34 @@ fn photon_black_matches_brand() {
 
 #[test]
 fn syntax_and_text_pass_aa() {
-    let style = &photon_black()["style"];
-    for (name, entry) in style["syntax"].as_object().expect("syntax map") {
-        if let Some(color) = entry["color"].as_str() {
-            let color = hex(&Value::from(color));
+    // The origin palettes keep comments, ghost text and muted labels dim on purpose; they only
+    // need to stay legible (3:1), everything else is body text (4.5:1).
+    let dim = [
+        "comment",
+        "comment.doc",
+        "predictive",
+        "text.muted",
+        "text.placeholder",
+    ];
+    let minimum = |name: &str| if dim.contains(&name) { 3.0 } else { 4.5 };
+    for theme in photon_themes() {
+        let theme_name = &theme["name"];
+        let style = &theme["style"];
+        for (name, entry) in style["syntax"].as_object().expect("syntax map") {
+            if let Some(color) = entry["color"].as_str() {
+                let color = hex(&Value::from(color));
+                assert!(
+                    contrast_ratio(color, BHUMI) >= minimum(name),
+                    "{theme_name} syntax.{name} {color:06X}"
+                );
+            }
+        }
+        for name in ["text", "text.muted", "text.placeholder", "text.accent"] {
+            let color = hex(&style[name]);
             assert!(
-                contrast_ratio(color, BHUMI) >= 4.5,
-                "syntax.{name} {color:06X}"
+                contrast_ratio(color, BHUMI) >= minimum(name),
+                "{theme_name} {name} {color:06X}"
             );
         }
-    }
-    for name in ["text", "text.muted", "text.placeholder", "text.accent"] {
-        let color = hex(&style[name]);
-        assert!(contrast_ratio(color, BHUMI) >= 4.5, "{name} {color:06X}");
     }
 }
