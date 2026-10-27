@@ -9,7 +9,7 @@ license = "GPL-3.0-or-later"
 workspace = true
 
 [features]
-test-support = []
+test-support = ["db/test-support"]
 
 [lib]
 path = "src/photon_review.rs"

@@ -988,6 +988,8 @@ mod test_support {
         supports_set_title: bool,
         /// photon: off to act like the ACP agents Photon runs, which can't rewind a session.
         supports_rewind: bool,
+        /// photon: off for the screenshot runner, whose stub has no real models to pick.
+        supports_model_selector: bool,
         agent_id: AgentId,
         telemetry_id: SharedString,
         prompt_capabilities_rx: watch::Receiver<acp_v2::PromptCapabilities>,
@@ -1038,6 +1040,7 @@ mod test_support {
                 supports_session_additional_directories: false,
                 supports_set_title: true,
                 supports_rewind: true, // photon: see `without_rewind`
+                supports_model_selector: true, // photon: see `without_model_selector`
                 agent_id: AgentId::new("stub"),
                 telemetry_id: "stub".into(),
                 prompt_capabilities_rx: watch::Receiver::constant(
@@ -1182,6 +1185,12 @@ mod test_support {
             self
         }
 
+        // photon: the screenshot runner shows no stub model.
+        pub fn without_model_selector(mut self) -> Self {
+            self.supports_model_selector = false;
+            self
+        }
+
         pub fn with_prompt_capabilities(
             mut self,
             prompt_capabilities_rx: watch::Receiver<acp_v2::PromptCapabilities>,
@@ -1301,6 +1310,9 @@ mod test_support {
             &self,
             _session_id: &acp_v2::SessionId,
         ) -> Option<Rc<dyn AgentModelSelector>> {
+            if !self.supports_model_selector {
+                return None; // photon: see `without_model_selector`
+            }
             Some(self.model_selector_impl())
         }
 

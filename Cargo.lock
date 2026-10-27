@@ -23334,6 +23334,7 @@ dependencies = [
  "languages",
  "line_ending_selector",
  "log",
+ "lsp",
  "lsp_command_selector",
  "lsp_locations",
  "markdown",

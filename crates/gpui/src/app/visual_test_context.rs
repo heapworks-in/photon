@@ -322,6 +322,20 @@ impl VisualTestAppContext {
         self.simulate_mouse_up(window, position, MouseButton::Left, modifiers);
     }
 
+    // photon: the screenshot runner clicks elements by debug selector, like GPUI tests do.
+    /// Returns the bounds of the element with the given debug selector in the window's last frame.
+    pub fn debug_bounds(
+        &mut self,
+        window: AnyWindowHandle,
+        selector: &str,
+    ) -> Option<Bounds<Pixels>> {
+        self.update_window(window, |_, window, _| {
+            window.rendered_frame.debug_bounds.get(selector).copied()
+        })
+        .ok()
+        .flatten()
+    }
+
     /// Simulates an input event on the given window.
     pub fn simulate_event<E: InputEvent>(&mut self, window: AnyWindowHandle, event: E) {
         self.update_window(window, |_, window, cx| {

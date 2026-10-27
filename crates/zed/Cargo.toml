@@ -53,6 +53,14 @@ visual-tests = [
     "recent_projects/test-support",
     "title_bar/test-support",
 ]
+# photon: renders the website's screenshots offscreen (see src/photon_screenshots.rs)
+photon-screenshots = [
+    "visual-tests",
+    "dep:lsp",
+    "language/test-support",
+    "lsp/test-support",
+    "photon_review/test-support",
+]
 
 [[bin]]
 name = "zed"
@@ -62,6 +70,12 @@ path = "src/main.rs"
 name = "zed_visual_test_runner"
 path = "src/visual_test_runner.rs"
 required-features = ["visual-tests"]
+
+# photon: website screenshot runner
+[[bin]]
+name = "photon_screenshots"
+path = "src/photon_screenshots.rs"
+required-features = ["photon-screenshots"]
 
 [dependencies]
 acp_thread.workspace = true
@@ -161,6 +175,7 @@ line_ending_selector.workspace = true
 lsp_command_selector.workspace = true
 log.workspace = true
 lsp_locations.workspace = true
+lsp = { workspace = true, optional = true } # photon: fake language servers for the screenshot runner
 markdown.workspace = true
 markdown_preview.workspace = true
 menu.workspace = true
