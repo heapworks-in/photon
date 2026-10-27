@@ -1039,7 +1039,7 @@ mod test_support {
                 close_sessions_on_release: true,
                 supports_session_additional_directories: false,
                 supports_set_title: true,
-                supports_rewind: true, // photon: see `without_rewind`
+                supports_rewind: true,         // photon: see `without_rewind`
                 supports_model_selector: true, // photon: see `without_model_selector`
                 agent_id: AgentId::new("stub"),
                 telemetry_id: "stub".into(),
