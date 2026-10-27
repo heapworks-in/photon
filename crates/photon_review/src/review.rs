@@ -425,6 +425,19 @@ impl Drop for OpeningGuard {
     }
 }
 
+/// The number of a pull request open for review in `workspace` whose diff changes any of `rows`
+/// in the file at the worktree-relative `path`.
+pub fn pr_changing_rows(
+    workspace: &Workspace,
+    path: &str,
+    rows: Range<u32>,
+    cx: &App,
+) -> Option<u64> {
+    workspace
+        .items_of_type::<ReviewItem>(cx)
+        .find_map(|review| review.read(cx).pr_changing_rows(path, rows.clone()))
+}
+
 /// Errors are shown as a toast in the window the user clicked from. A second call for a pull
 /// request that is still opening does nothing.
 pub fn open_review(
@@ -4473,6 +4486,15 @@ impl ReviewItem {
         &self.steps
     }
 
+    /// This pull request's number when its diff changes any of `rows` in the file at `path`.
+    pub fn pr_changing_rows(&self, path: &str, rows: Range<u32>) -> Option<u64> {
+        self.changed_rows
+            .get(path)?
+            .iter()
+            .any(|changed| changed.start < rows.end && rows.start < changed.end)
+            .then_some(self.detail.summary.key.number)
+    }
+
     /// Notes on the selected step's files, such as one read from git instead of the checkout.
     fn step_notes(&self) -> Vec<SharedString> {
         let Some(step) = self.steps.get(self.selected) else {
@@ -7783,6 +7805,24 @@ fn verify_password(user: &str, password: &str) -> bool {
             assert_eq!(item.label_blocks.len(), 1);
             let titles: Vec<_> = item.steps().iter().map(|step| step.title.clone()).collect();
             assert_eq!(titles, vec!["login.rs · login()"]);
+        });
+    }
+
+    #[gpui::test]
+    async fn tells_which_rows_the_pull_request_changes(cx: &mut TestAppContext) {
+        let (item, cx) = open_item(
+            cx,
+            login_tree(),
+            vec![modified("src/login.rs", LOGIN_BASE)],
+            login_graph(),
+            false,
+            None,
+        )
+        .await;
+        item.read_with(&cx, |item, _| {
+            assert_eq!(item.pr_changing_rows("src/login.rs", 0..5), Some(482));
+            assert_eq!(item.pr_changing_rows("src/login.rs", 3..5), None);
+            assert_eq!(item.pr_changing_rows("src/password.rs", 0..3), None);
         });
     }
 
