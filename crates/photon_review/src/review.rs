@@ -7327,8 +7327,15 @@ fn mark_explanation(mark: CallerMark) -> &'static str {
 
 impl Render for ReviewItem {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The comment keys are plain letters, so they only apply while the diff itself has focus,
+        // not a reply or draft inside it.
+        let diff_focused = self.editor.focus_handle(cx).is_focused(window);
         v_flex()
-            .key_context("PhotonReview")
+            .key_context(if diff_focused {
+                "PhotonReview diff_focused"
+            } else {
+                "PhotonReview"
+            })
             .size_full()
             .bg(cx.theme().colors().editor_background)
             .on_action(cx.listener(|this, _: &NextStep, window, cx| {
@@ -7384,7 +7391,7 @@ impl Render for ReviewItem {
                     }),
             )
             .when(self.comments_view, |this| {
-                this.child(self.render_comment_keys(cx))
+                this.child(self.render_comment_keys(window, cx))
             })
     }
 }
@@ -13019,17 +13026,26 @@ fn verify_password(user: &str, password: &str) -> bool {
         (item, cx)
     }
 
-    const COMMENT_KEYS_CONTEXT: &str = "PhotonReview > Editor && mode == full";
-
-    /// The comment keys as the default keymaps bind them, with the diff focused.
+    /// The review's keys from the default macOS keymap, with the diff focused.
     fn press_in_diff(item: &Entity<ReviewItem>, keys: &str, cx: &mut VisualTestContext) {
         cx.update(|_, cx| {
-            cx.bind_keys([
-                gpui::KeyBinding::new("n", NextComment, Some(COMMENT_KEYS_CONTEXT)),
-                gpui::KeyBinding::new("p", PreviousComment, Some(COMMENT_KEYS_CONTEXT)),
-                gpui::KeyBinding::new("r", ReplyToComment, Some(COMMENT_KEYS_CONTEXT)),
-                gpui::KeyBinding::new("shift-r", ResolveComment, Some(COMMENT_KEYS_CONTEXT)),
-            ])
+            let bindings = match settings::KeymapFile::load(
+                include_str!("../../../assets/keymaps/default-macos.json"),
+                cx,
+            ) {
+                settings::KeymapFileLoadResult::Success { key_bindings }
+                | settings::KeymapFileLoadResult::SomeFailedToLoad { key_bindings, .. } => {
+                    key_bindings
+                }
+                settings::KeymapFileLoadResult::JsonParseFailure { error } => {
+                    panic!("keymap: {error}")
+                }
+            };
+            cx.bind_keys(
+                bindings
+                    .into_iter()
+                    .filter(|binding| binding.action().name().starts_with("photon_review::")),
+            )
         });
         item.update_in(cx, |item, window, cx| {
             window.focus(&item.editor().focus_handle(cx), cx)
@@ -13180,6 +13196,13 @@ fn verify_password(user: &str, password: &str) -> bool {
             walked.push(selected_comment(&item, &mut cx).expect("a comment is selected"));
         }
         assert_eq!(walked, ["T_a2", "T_a3", "T_b2", "T_b2", "T_a3"]);
+        let shown_key = cx.update(|window, cx| {
+            let focus = item.read(cx).editor().focus_handle(cx);
+            window
+                .highest_precedence_binding_for_action_in(&NextComment, &focus)
+                .map(|binding| binding.keystrokes().len())
+        });
+        assert_eq!(shown_key, Some(1), "the hint under the view finds the key");
         assert_eq!(cursor_row(&item, &mut cx), ("src/a.rs".to_string(), 3));
         item.read_with(&cx, |item, _| assert_eq!(item.selected_step(), 0));
 
@@ -13218,6 +13241,13 @@ fn verify_password(user: &str, password: &str) -> bool {
         select_text(&item, "audit(user)", &mut cx);
         press_in_diff(&item, "r", &mut cx);
         assert!(cx.update(|window, cx| reply.focus_handle(cx).is_focused(window)));
+        cx.simulate_keystrokes("n o p e");
+        assert_eq!(
+            reply.read_with(&cx, |editor, cx| editor.text(cx)),
+            "nope",
+            "the keys type in a reply"
+        );
+        assert_eq!(selected_comment(&item, &mut cx).as_deref(), Some("T1"));
 
         press_in_diff(&item, "shift-r", &mut cx);
         let requests = fake.requests();

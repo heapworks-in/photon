@@ -774,12 +774,23 @@ impl ReviewItem {
     }
 
     /// The comment keys, under the review while the Comments view is open.
-    pub(super) fn render_comment_keys(&self, cx: &Context<Self>) -> impl IntoElement {
-        let focus = self.editor.focus_handle(cx);
+    pub(super) fn render_comment_keys(
+        &self,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        // The keys as they work from the diff, also while a reply has focus.
+        let context = gpui::KeyContext::try_from("PhotonReview diff_focused").log_err();
+        let vim_mode = ui::KeyBinding::is_vim_mode(cx);
         let hint = |action: &dyn gpui::Action, label: &'static str| {
+            let binding = context.clone().and_then(|context| {
+                window.highest_precedence_binding_for_action_in_context(action, context)
+            });
             h_flex()
                 .gap_1()
-                .child(ui::KeyBinding::for_action_in(action, &focus, cx))
+                .children(binding.map(|binding| {
+                    ui::KeyBinding::from_keystrokes(binding.keystrokes().into(), vim_mode)
+                }))
                 .child(
                     Label::new(label)
                         .size(LabelSize::XSmall)
