@@ -17,12 +17,12 @@
   <div class="wrap">
     <a class="brand" href="#"><img src="icon.png" alt="">Photon</a>
     <nav aria-label="Sections">
-      <a href="#terminal" style="--group: var(--terminal)">Terminal</a>
-      <a href="#review" style="--group: var(--review)">Review</a>
-      <a href="#agents" style="--group: var(--agents)">Agents</a>
-      <a href="#docs" style="--group: var(--docs)">Docs</a>
-      <a href="#code" style="--group: var(--code)">Code</a>
-      <a href="#lean" style="--group: var(--lean)">Lean</a>
+      <a href="#terminal">Terminal</a>
+      <a href="#review">Review</a>
+      <a href="#agents">Agents</a>
+      <a href="#docs">Docs</a>
+      <a href="#code">Code</a>
+      <a href="#lean">Lean</a>
       <a class="gh" href="https://github.com/heapworks-in/photon">GitHub</a>
     </nav>
   </div>
@@ -30,295 +30,262 @@
 
 <main>
 
+<!-- Hero: a live terminal block, drawn in HTML -->
 <section class="hero">
-  <div class="wrap">
-    <h1>Terminal, editor and code&nbsp;review. One fast app.</h1>
-    <p class="lede">Photon is where you run commands, write code and check changes: your own, your teammates' and your AI agents'. It's native, starts in a third of a second, and stays quiet when you aren't using it.</p>
-    <div class="install">
-      <code><span>$</span> brew tap heapworks-in/photon &amp;&amp; brew install photon</code>
-      <button type="button" data-copy="brew tap heapworks-in/photon && brew install photon">Copy</button>
+  <div class="wrap hero-grid">
+    <div class="hero-copy">
+      <h1>Terminal, editor and code&nbsp;review. One fast app.</h1>
+      <p class="lede">Photon is where you run commands, write code and check changes: your own, your teammates' and your AI agents'. Native, open source, and quiet when you aren't using it.</p>
+      <div class="install">
+        <code><span>$</span> brew tap heapworks-in/photon &amp;&amp; brew install photon</code>
+        <button type="button" data-copy="brew tap heapworks-in/photon && brew install photon">Copy</button>
+      </div>
+      <p class="meta">Free and open source. macOS on Apple silicon. Alpha: used every day, with some rough edges. <a href="https://github.com/heapworks-in/photon/releases">Release notes</a></p>
     </div>
-    <p class="meta">Free and open source · macOS on Apple silicon · Alpha: used every day, with some rough edges · <a href="https://github.com/heapworks-in/photon/releases">Release notes</a></p>
+
+    <div class="term" aria-label="A terminal in Photon: a test run becomes a block you can act on">
+      <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="term-title">billing — zsh</span></div>
+      <div class="block done" style="--i:0">
+        <div class="bh"><span class="path">~/code/billing</span><span class="branch">retry-card-charges</span><span class="dur">(3.2s)</span></div>
+        <div class="cmd">cargo build</div>
+        <div class="out"><span class="g">   Compiling</span> billing v0.4.0<br><span class="g">    Finished</span> `dev` profile in 3.14s</div>
+      </div>
+      <div class="block fail" style="--i:1">
+        <div class="bh"><span class="path">~/code/billing</span><span class="branch">retry-card-charges</span><span class="chip-fail">2 failed · 7 passed</span><span class="acts"><button type="button">Re-run failed</button><button type="button">Open errors</button></span></div>
+        <div class="cmd">cargo test</div>
+        <div class="out">
+          <span class="l" style="--l:0">running 9 tests</span>
+          <span class="l" style="--l:1">test invoice::tests::total_subtracts_discount ... <span class="g">ok</span></span>
+          <span class="l" style="--l:2">test payments::tests::declines_are_not_retried ... <span class="g">ok</span></span>
+          <span class="l" style="--l:3">test payments::tests::retries_gateway_timeouts ... <span class="r">FAILED</span></span>
+          <span class="l" style="--l:4">test retry::tests::delays_double_up_to_the_cap ... <span class="g">ok</span></span>
+          <span class="l" style="--l:5">test retry::tests::delay_never_passes_max ... <span class="r">FAILED</span></span>
+          <span class="l" style="--l:6"></span>
+          <span class="l" style="--l:7">thread 'retry::tests::delay_never_passes_max' panicked at <span class="link">src/retry.rs:52:9</span></span>
+          <span class="l" style="--l:8">test result: <span class="r">FAILED</span>. 7 passed; 2 failed</span>
+        </div>
+      </div>
+      <div class="prompt" style="--i:2"><span class="path">~/code/billing</span><span class="branch">retry-card-charges</span><span class="caret"></span></div>
+    </div>
   </div>
-  <figure class="shot shot-hero">
-    <picture>
-      <source type="image/webp" srcset="img/app/hero-crop-1x.webp 1200w, img/app/hero-crop.webp 2400w" sizes="(min-width: 1320px) 1240px, 94vw">
-      <img src="img/app/hero-crop-1x.webp" width="1200" height="790" alt="Photon with a Rust file open in the editor and the terminal below it, showing command blocks.">
-    </picture>
-  </figure>
+  <div class="wrap"><p class="hero-note">Every command becomes a block: where it ran, how long it took, whether it worked. Test runs are summarised, failures are one click to rerun, and <code>src/retry.rs:52</code> opens in the editor beside it.</p></div>
 </section>
 
-<section class="groups wrap" aria-label="What Photon does">
-  <a class="group-card" href="#terminal" style="--group: var(--terminal)">
-    <h2>Terminal</h2>
-    <p>Every command is a block you can copy, rerun and act on.</p>
-  </a>
-  <a class="group-card" href="#review" style="--group: var(--review)">
-    <h2>Code review</h2>
-    <p>Pull requests in reading order, with comments, AI review and merge.</p>
-  </a>
-  <a class="group-card" href="#agents" style="--group: var(--agents)">
-    <h2>Agents</h2>
-    <p>Claude Code and Codex on your own plans, checked turn by turn.</p>
-  </a>
-  <a class="group-card" href="#docs" style="--group: var(--docs)">
-    <h2>Docs and diagrams</h2>
-    <p>Markdown for reading, with Mermaid and Excalidraw built in.</p>
-  </a>
-  <a class="group-card" href="#code" style="--group: var(--code)">
-    <h2>Understand code</h2>
-    <p>Call trees, navigation without a server, and help when one breaks.</p>
-  </a>
-  <a class="group-card" href="#lean" style="--group: var(--lean)">
-    <h2>Lean and private</h2>
-    <p>No account, no telemetry, nothing running when you aren't.</p>
-  </a>
+<!-- Index -->
+<section class="index wrap" aria-label="What Photon does">
+  <a href="#terminal"><b>Terminal</b><span>Every command is a block you can copy, rerun and act on.</span></a>
+  <a href="#review"><b>Code review</b><span>Pull requests in reading order, with comments, AI review and merge.</span></a>
+  <a href="#agents"><b>Agents</b><span>Claude Code and Codex on your own plans, checked turn by turn.</span></a>
+  <a href="#docs"><b>Docs and diagrams</b><span>Markdown for reading, with Mermaid and Excalidraw built in.</span></a>
+  <a href="#code"><b>Understand code</b><span>Call trails, a call map, and help when a language server breaks.</span></a>
+  <a href="#lean"><b>Lean and private</b><span>No account, no telemetry, nothing running when you aren't.</span></a>
 </section>
 
 <!-- Terminal -->
-<section id="terminal" class="group" style="--group: var(--terminal)">
+<section id="terminal" class="band">
   <div class="wrap">
-    <header class="group-head">
-      <p class="group-name">Terminal</p>
-      <h2>A terminal that remembers what happened.</h2>
-      <p>Every command and its output become one block, so you never scroll through noise to find what you need.</p>
-    </header>
-    <div class="features">
-      <article class="feature">
-        <figure><picture>
-          <source type="image/webp" srcset="img/app/cu-terminal-blocks-1x.webp 1x, img/app/cu-terminal-blocks.webp 2x">
-          <img src="img/app/cu-terminal-blocks-1x.webp" loading="lazy" alt="Two terminal blocks, each with its directory, branch, duration and exit status above the output.">
-        </picture></figure>
-        <h3>Every command is a block</h3>
-        <p>Where it ran, on which branch, how long it took and whether it worked. Copy the command or the output, or run it again.</p>
-      </article>
-      <article class="feature">
-        <figure><picture>
-          <source type="image/webp" srcset="img/app/cu-terminal-tests-1x.webp 1x, img/app/cu-terminal-tests.webp 2x">
-          <img src="img/app/cu-terminal-tests-1x.webp" loading="lazy" alt="A cargo test run summarised as passed and failed, with an action to rerun the failures.">
-        </picture></figure>
-        <h3>Test runs you can act on</h3>
-        <p><code>cargo test</code>, <code>pytest</code> and <code>jest</code> are summarised as passed and failed. Rerun only the failures, and press <kbd>F8</kbd> to jump to each error.</p>
-      </article>
-      <article class="feature">
-        <figure><picture>
-          <source type="image/webp" srcset="img/app/cu-terminal-table-1x.webp 1x, img/app/cu-terminal-table.webp 2x">
-          <img src="img/app/cu-terminal-table-1x.webp" loading="lazy" alt="Command output opened as a table with sortable columns.">
-        </picture></figure>
-        <h3>Output as a table</h3>
-        <p>JSON, <code>kubectl get</code> and <code>docker ps</code> output open as a table, or copy as CSV.</p>
-      </article>
-      <article class="feature">
-        <figure><picture>
-          <source type="image/webp" srcset="img/app/cu-terminal-git-1x.webp 1x, img/app/cu-terminal-git.webp 2x">
-          <img src="img/app/cu-terminal-git-1x.webp" loading="lazy" alt="git status output with stage, diff and discard actions beside each file.">
-        </picture></figure>
-        <h3>git status, in place</h3>
-        <p>Stage, diff or discard each file right where <code>git status</code> listed it.</p>
-      </article>
+    <p class="section-tag"><span>~</span> terminal</p>
+    <h2>A terminal that remembers what happened.</h2>
+    <p class="band-lede">Every command and its output become one block, so you never scroll through noise to find what you need. The input works like an editor, and output that looks like data can become a table.</p>
+    <div class="duo">
+      <figure class="win"><picture>
+        <source type="image/webp" srcset="img/app/hero-crop-1x.webp 1x, img/app/hero-crop.webp 2x">
+        <img src="img/app/hero-crop-1x.webp" loading="lazy" alt="The editor open on payments.rs with the terminal below it, showing a cargo build block and a git log block.">
+      </picture><figcaption>The editor and the terminal, in one window.</figcaption></figure>
+      <ul class="points">
+        <li><b>Blocks, not scrollback.</b> Each block shows its directory, branch, duration and exit status. Right-click to copy the command or its output, or run it again.</li>
+        <li><b>Input like an editor.</b> Select with the mouse, undo, write over several lines. <kbd>↑</kbd> walks history; <kbd>ctrl</kbd> <kbd>R</kbd> searches it across projects. Completion comes from your own zsh setup.</li>
+        <li><b>Paths that open.</b> <kbd>⌘</kbd>-click <code>src/main.rs:42</code> in any output to open that line beside the terminal.</li>
+        <li><b>Told when it's done.</b> A long build that finishes in the background sends a notification; click it to land on the block.</li>
+      </ul>
     </div>
-    <ul class="more">
-      <li><strong>Input like an editor.</strong> Select with the mouse, undo, write over several lines, and search history across projects with <kbd>ctrl</kbd> <kbd>R</kbd>.</li>
-      <li><strong>Paths that open.</strong> <kbd>⌘</kbd>-click <code>src/main.rs:42</code> in any output to open that line beside the terminal.</li>
-      <li><strong>Done, with a notification.</strong> When a long build finishes in the background, a notification brings you back to its block.</li>
-      <li><strong>Projects as tabs.</strong> Every project and review opens as a tab in one window and comes back in order after a restart.</li>
-    </ul>
+    <div class="trio">
+      <figure class="win"><picture>
+        <source type="image/webp" srcset="img/app/cu-terminal-tests-1x.webp 1x, img/app/cu-terminal-tests.webp 2x">
+        <img src="img/app/cu-terminal-tests-1x.webp" loading="lazy" alt="A cargo test block summarised as 2 failed, 7 passed, with Re-run failed and Open errors actions.">
+      </picture><figcaption><b>Test runs you can act on.</b> <code>cargo test</code>, <code>pytest</code>, <code>jest</code> and friends are summarised. Rerun only the failures; <kbd>F8</kbd> jumps to each error.</figcaption></figure>
+      <figure class="win"><picture>
+        <source type="image/webp" srcset="img/app/cu-terminal-table-1x.webp 1x, img/app/cu-terminal-table.webp 2x">
+        <img src="img/app/cu-terminal-table-1x.webp" loading="lazy" alt="kubectl get pods output opened as a table above its block.">
+      </picture><figcaption><b>Output as a table.</b> JSON, <code>kubectl get</code> and <code>docker ps</code> output open as a table, or copy as CSV.</figcaption></figure>
+      <figure class="win"><picture>
+        <source type="image/webp" srcset="img/app/cu-terminal-git-1x.webp 1x, img/app/cu-terminal-git.webp 2x">
+        <img src="img/app/cu-terminal-git-1x.webp" loading="lazy" alt="git status output with stage, diff and discard actions beside each file.">
+      </picture><figcaption><b>git status, in place.</b> Stage, diff or discard each file right where <code>git status</code> listed it.</figcaption></figure>
+    </div>
   </div>
 </section>
 
 <!-- Code review -->
-<section id="review" class="group" style="--group: var(--review)">
+<section id="review" class="band band-alt">
   <div class="wrap">
-    <header class="group-head">
-      <p class="group-name">Code review</p>
-      <h2>Read a pull request the way you'd explain it.</h2>
-      <p>More code is written by agents than ever, so more of your day is reviewing it. Photon splits a change into steps, shows what each one touches, and lets you comment, check and merge without leaving the editor.</p>
-    </header>
-    <div class="features">
-      <article class="feature">
-        <figure><picture>
+    <p class="section-tag"><span>~</span> code review</p>
+    <h2>Read a pull request the way you'd explain it.</h2>
+    <p class="band-lede">More code is written by agents than ever, so more of your day is reviewing it. Photon splits a change into steps, shows what each one touches, and lets you comment, check and merge without leaving the editor.</p>
+
+    <div class="tabs" data-tabs>
+      <div class="tab-list" role="tablist" aria-label="Code review">
+        <button role="tab" aria-selected="true" aria-controls="t-steps" id="tab-steps">Steps</button>
+        <button role="tab" aria-selected="false" aria-controls="t-comments" id="tab-comments">Comments</button>
+        <button role="tab" aria-selected="false" aria-controls="t-ai" id="tab-ai">AI review</button>
+        <button role="tab" aria-selected="false" aria-controls="t-merge" id="tab-merge">Merge</button>
+        <button role="tab" aria-selected="false" aria-controls="t-conv" id="tab-conv">Conversation</button>
+      </div>
+      <div class="tab-panel" role="tabpanel" id="t-steps" aria-labelledby="tab-steps">
+        <figure class="win"><picture>
           <source type="image/webp" srcset="img/app/cu-review-steps-1x.webp 1x, img/app/cu-review-steps.webp 2x">
           <img src="img/app/cu-review-steps-1x.webp" loading="lazy" alt="The steps of a pull request with progress, comment counts and a step changed since it was viewed.">
         </picture></figure>
-        <h3>A review map in reading order</h3>
-        <p>Steps follow the call graph: helpers first, then their callers, tests last. Each step shows what changed and how many open comments it has.</p>
-      </article>
-      <article class="feature">
-        <figure><picture>
-          <source type="image/webp" srcset="img/app/cu-review-unreviewed-1x.webp 1x, img/app/cu-review-unreviewed.webp 2x">
-          <img src="img/app/cu-review-unreviewed-1x.webp" loading="lazy" alt="The View menu offering Only what you haven't reviewed.">
-        </picture></figure>
-        <h3>Only what you haven't reviewed</h3>
-        <p>Viewed marks belong to the push you reviewed. When the author pushes again, changed steps are flagged and one click shows just the new diff.</p>
-      </article>
-      <article class="feature">
-        <figure><picture>
+        <div class="tab-copy">
+          <h3>A review map in reading order</h3>
+          <p>Steps follow the call graph: helpers first, then their callers, tests last. Each step shows what changed and how many open comments it has. Tick a step when you've read it; Photon marks the files viewed on GitHub.</p>
+          <p>Viewed marks belong to the push you reviewed. When the author pushes again, changed steps say so, and <b>View → Only what you haven't reviewed</b> shows just the new diff.</p>
+        </div>
+      </div>
+      <div class="tab-panel" role="tabpanel" id="t-comments" aria-labelledby="tab-comments" hidden>
+        <figure class="win"><picture>
           <source type="image/webp" srcset="img/app/cu-review-comment-1x.webp 1x, img/app/cu-review-comment.webp 2x">
           <img src="img/app/cu-review-comment-1x.webp" loading="lazy" alt="An inline comment thread with replies and an AI draft comment marked should fix.">
         </picture></figure>
-        <h3>Comments you can read at a glance</h3>
-        <p>Who wrote it and when, with Draft, AI, severity and Resolved marked only when they matter. Resolved threads fold to one line.</p>
-      </article>
-      <article class="feature">
-        <figure><picture>
-          <source type="image/webp" srcset="img/app/cu-review-suggestion-1x.webp 1x, img/app/cu-review-suggestion.webp 2x">
-          <img src="img/app/cu-review-suggestion-1x.webp" loading="lazy" alt="A suggested change shown as a small before and after diff with a Commit suggestion button.">
-        </picture></figure>
-        <h3>Suggestions you can commit</h3>
-        <p>A suggested change shows as a small diff. Commit it to the branch in one click.</p>
-      </article>
-      <article class="feature">
-        <figure><picture>
+        <div class="tab-copy">
+          <h3>Comments you can read at a glance</h3>
+          <p>Who wrote it and when, with Draft, AI, severity and Resolved marked only when they matter. Replies sit under the first comment; resolved threads fold to one line.</p>
+          <p>Comment on any line, not only the diff. Drafts save as you type and survive restarts. A suggested change shows as a small diff you can commit to the branch in one click.</p>
+        </div>
+      </div>
+      <div class="tab-panel" role="tabpanel" id="t-ai" aria-labelledby="tab-ai" hidden>
+        <figure class="win"><picture>
           <source type="image/webp" srcset="img/app/cu-review-verifier-1x.webp 1x, img/app/cu-review-verifier.webp 2x">
-          <img src="img/app/cu-review-verifier-1x.webp" loading="lazy" alt="The AI review result: kept some findings and dropped the ones it couldn't confirm.">
+          <img src="img/app/cu-review-verifier-1x.webp" loading="lazy" alt="The AI review result: kept some findings and dropped the ones it couldn't confirm, with the dropped list open.">
         </picture></figure>
-        <h3>An AI reviewer that checks itself</h3>
-        <p>Run your own agent over the pull request. It confirms each finding against the code and drops what it can't prove, so you read fewer, better comments.</p>
-      </article>
-      <article class="feature">
-        <figure><picture>
+        <div class="tab-copy">
+          <h3>An AI reviewer that checks itself</h3>
+          <p>Run your own agent over the pull request. It reviews like the developer who gets paged when the change breaks, then re-checks every finding against the code and drops what it can't confirm. You read fewer, better comments.</p>
+          <p>Choose quiet, normal or thorough. Dismiss a finding with a reason and later reviews of that repository don't repeat it.</p>
+        </div>
+      </div>
+      <div class="tab-panel" role="tabpanel" id="t-merge" aria-labelledby="tab-merge" hidden>
+        <figure class="win"><picture>
           <source type="image/webp" srcset="img/app/cu-review-readiness-1x.webp 1x, img/app/cu-review-readiness.webp 2x">
-          <img src="img/app/cu-review-readiness-1x.webp" loading="lazy" alt="The merge readiness popover listing checks, the review decision and mergeability.">
+          <img src="img/app/cu-review-readiness-1x.webp" loading="lazy" alt="The merge readiness popover listing checks, the review decision and mergeability, beside the Merge button.">
         </picture></figure>
-        <h3>Merge what you reviewed</h3>
-        <p>The header says whether the pull request can merge and why not. Merge asks first and refuses if the author pushed after you loaded it.</p>
-      </article>
-      <article class="feature">
-        <figure><picture>
+        <div class="tab-copy">
+          <h3>Merge what you reviewed</h3>
+          <p>The header says whether the pull request can merge and, if not, why: checks, conflicts, a review still required. Merge asks first, warns about comments you haven't sent, and refuses if the author pushed after you loaded it.</p>
+        </div>
+      </div>
+      <div class="tab-panel" role="tabpanel" id="t-conv" aria-labelledby="tab-conv" hidden>
+        <figure class="win"><picture>
           <source type="image/webp" srcset="img/app/cu-conversation-1x.webp 1x, img/app/cu-conversation.webp 2x">
-          <img src="img/app/cu-conversation-1x.webp" loading="lazy" alt="The pull request description followed by the activity timeline.">
+          <img src="img/app/cu-conversation-1x.webp" loading="lazy" alt="The pull request description followed by the activity timeline and a comment box.">
         </picture></figure>
-        <h3>The description and conversation</h3>
-        <p>A new pull request opens on its description. Comments, reviews and pushes follow in order, with a box to reply.</p>
-      </article>
-      <article class="feature">
-        <figure><picture>
-          <source type="image/webp" srcset="img/app/cu-inbox-1x.webp 1x, img/app/cu-inbox.webp 2x">
-          <img src="img/app/cu-inbox-1x.webp" loading="lazy" alt="The Pull requests panel with sections for review requests and your own pull requests.">
-        </picture></figure>
-        <h3>What needs your review</h3>
-        <p>The Pull requests panel lists what's waiting on you, with checks and new commits. Each list is a GitHub search you can change.</p>
-      </article>
+        <div class="tab-copy">
+          <h3>The description and the conversation</h3>
+          <p>A pull request you haven't seen opens on its description. Comments, reviews and pushes follow in order, with a box to reply. Your inbox lists what's waiting on you, with checks and new commits since your last look.</p>
+        </div>
+      </div>
     </div>
-    <ul class="more">
-      <li><strong>Each change with its surroundings.</strong> The functions a change calls and the code that calls it appear beside the diff.</li>
-      <li><strong>Your team's checklist.</strong> Checklists in settings apply by path, so database, CI and dependency changes get the questions that matter.</li>
-      <li><strong>Run it locally, safely.</strong> A pull request opens in its own copy of the repository, never runs git hooks, and stays restricted until you trust it.</li>
+
+    <ul class="points points-row">
+      <li><b>Each change with its surroundings.</b> The functions a change calls and the code that calls it appear beside the diff; callers the pull request forgot are flagged.</li>
+      <li><b>Your team's checklist.</b> Checklists in settings apply by path, so database, CI and dependency changes get the questions that matter.</li>
+      <li><b>Run it locally, safely.</b> A pull request opens in its own copy of the repository, never runs git hooks, and stays restricted until you trust it.</li>
     </ul>
   </div>
 </section>
 
 <!-- Agents -->
-<section id="agents" class="group" style="--group: var(--agents)">
+<section id="agents" class="band">
   <div class="wrap">
-    <header class="group-head">
-      <p class="group-name">Agents</p>
-      <h2>Your agents, on your plans, under review.</h2>
-      <p>Photon doesn't sell an AI subscription. It runs the coding agents you already use and makes every turn easy to check and undo.</p>
-    </header>
-    <div class="features features-wide">
-      <article class="feature">
-        <figure><picture>
-          <source type="image/webp" srcset="img/app/cu-agent-turn-1x.webp 1x, img/app/cu-agent-turn.webp 2x">
-          <img src="img/app/cu-agent-turn-1x.webp" loading="lazy" alt="An agent turn with chips for the files it changed and a Revert Turn button.">
-        </picture></figure>
-        <h3>Review every turn</h3>
-        <p>Photon snapshots your files before each turn. Open a turn's diff from its file chips, or put everything back with Revert Turn.</p>
-      </article>
-      <div class="feature-notes">
-        <p><strong>Claude Code, Codex, or any ACP agent.</strong> Agents run as you, on your own accounts, with no server in between.</p>
-        <p><strong>Ask about a selection.</strong> Select code and press <kbd>⌥</kbd> <kbd>T</kbd> to start a thread about exactly those lines.</p>
-        <p><strong>Queue edits, apply once.</strong> Press <kbd>⌥</kbd> <kbd>E</kbd> on a selection to note a change; <strong>Apply All</strong> sends them together.</p>
-        <p><strong>This File.</strong> The thread list can show just the threads that touched the file you're in.</p>
-      </div>
+    <p class="section-tag"><span>~</span> agents</p>
+    <h2>Your agents, on your plans, under review.</h2>
+    <p class="band-lede">Photon doesn't sell an AI subscription. It runs the coding agents you already use and makes every turn easy to check and undo.</p>
+    <div class="duo duo-flip">
+      <figure class="win"><picture>
+        <source type="image/webp" srcset="img/app/cu-agent-turn-1x.webp 1x, img/app/cu-agent-turn.webp 2x">
+        <img src="img/app/cu-agent-turn-1x.webp" loading="lazy" alt="An agent turn with chips for the files it changed and a Revert Turn button.">
+      </picture><figcaption>Each turn lists the files it changed.</figcaption></figure>
+      <ul class="points">
+        <li><b>Claude Code, Codex, or any ACP agent.</b> Agents run as you, on your own accounts, with no server in between.</li>
+        <li><b>Review every turn.</b> Photon snapshots your files before each turn. Open a turn's diff from its file chips, or put everything back with <b>Revert Turn</b>.</li>
+        <li><b>Ask about a selection.</b> Select code and press <kbd>⌥</kbd> <kbd>T</kbd> to start a thread about exactly those lines.</li>
+        <li><b>Queue edits, apply once.</b> Press <kbd>⌥</kbd> <kbd>E</kbd> on a selection to note a change; <b>Apply All</b> sends them together.</li>
+      </ul>
     </div>
   </div>
 </section>
 
-<!-- Docs and diagrams -->
-<section id="docs" class="group" style="--group: var(--docs)">
+<!-- Docs -->
+<section id="docs" class="band band-alt">
   <div class="wrap">
-    <header class="group-head">
-      <p class="group-name">Docs and diagrams</p>
-      <h2>Specs and plans you can actually read.</h2>
-      <p>Markdown opens for reading, diagrams render in place, and editing is a double-click away.</p>
-    </header>
-    <div class="features features-wide">
-      <article class="feature">
-        <figure><picture>
-          <source type="image/webp" srcset="img/app/cu-markdown-mermaid-1x.webp 1x, img/app/cu-markdown-mermaid.webp 2x">
-          <img src="img/app/cu-markdown-mermaid-1x.webp" loading="lazy" alt="A Mermaid diagram rendered in the Markdown preview.">
-        </picture></figure>
-        <h3>Mermaid, rendered and full size</h3>
-        <p>Diagrams render in place, follow your theme and open full size in one click. So do images.</p>
-      </article>
-      <div class="feature-notes">
-        <p><strong>Preview first, source a keystroke away.</strong> <kbd>⌘</kbd> <kbd>⇧</kbd> <kbd>V</kbd> flips the tab to the source; a double-click edits the spot you're reading.</p>
-        <p><strong>Excalidraw, built in and offline.</strong> Open a <code>.excalidraw</code> file and draw, with the hand-drawn fonts and popular libraries included and no network calls.</p>
-        <p><strong>Diagrams in your docs.</strong> Save as <code>.excalidraw.svg</code> to show the drawing in Markdown and keep it editable.</p>
-      </div>
+    <p class="section-tag"><span>~</span> docs and diagrams</p>
+    <h2>Specs and plans you can actually read.</h2>
+    <p class="band-lede">Markdown opens for reading, diagrams render in place, and editing is a double-click away.</p>
+    <div class="duo">
+      <figure class="win"><picture>
+        <source type="image/webp" srcset="img/app/cu-markdown-mermaid-1x.webp 1x, img/app/cu-markdown-mermaid.webp 2x">
+        <img src="img/app/cu-markdown-mermaid-1x.webp" loading="lazy" alt="A Mermaid diagram rendered in the Markdown preview, with the table below it.">
+      </picture><figcaption>An architecture doc with a live Mermaid diagram.</figcaption></figure>
+      <ul class="points">
+        <li><b>Preview first.</b> <kbd>⌘</kbd> <kbd>⇧</kbd> <kbd>V</kbd> flips the same tab to the source; a double-click edits the spot you're reading.</li>
+        <li><b>Mermaid, full size.</b> Diagrams render in place, follow your theme and open full size in one click. So do images.</li>
+        <li><b>Excalidraw, built in and offline.</b> Open a <code>.excalidraw</code> file and draw, with the hand-drawn fonts and the popular libraries included. No network calls.</li>
+        <li><b>Diagrams in your docs.</b> Save as <code>.excalidraw.svg</code> to show the drawing in Markdown and keep it editable, here or in VS Code.</li>
+      </ul>
     </div>
   </div>
 </section>
 
 <!-- Understand code -->
-<section id="code" class="group" style="--group: var(--code)">
+<section id="code" class="band">
   <div class="wrap">
-    <header class="group-head">
-      <p class="group-name">Understand code</p>
-      <h2>See who calls what, even on a bad day.</h2>
-      <p>Follow calls through a tree, jump to definitions without a language server, and get a plain answer when one won't start.</p>
-    </header>
-    <div class="features">
-      <article class="feature">
-        <figure><picture>
-          <source type="image/webp" srcset="img/app/cu-call-tree-1x.webp 1x, img/app/cu-call-tree.webp 2x">
-          <img src="img/app/cu-call-tree-1x.webp" loading="lazy" alt="The Call Hierarchy panel showing the callers of a function as an expandable tree.">
-        </picture></figure>
-        <h3>Who calls what, and how</h3>
-        <p>Callers and calls as a tree, with the trail back to your function, entry points and tests marked, and the actual calling lines one keystroke away.</p>
-      </article>
-      <article class="feature">
-        <figure><picture>
-          <source type="image/webp" srcset="img/app/cu-call-map-1x.webp 1x, img/app/cu-call-map.webp 2x">
-          <img src="img/app/cu-call-map-1x.webp" loading="lazy" alt="The call map: callers drawn left to right with the selected path from main to charge lit up.">
-        </picture></figure>
-        <h3>The same trail as a map</h3>
-        <p>Switch to the map to see the shape of the calls at a glance. The path you selected is lit; click any function to open it.</p>
-      </article>
-      <article class="feature">
-        <figure><picture>
-          <source type="image/webp" srcset="img/app/cu-ls-help-1x.webp 1x, img/app/cu-ls-help.webp 2x">
-          <img src="img/app/cu-ls-help-1x.webp" loading="lazy" alt="Language server help explaining that jdtls needs Java 21, with the install command.">
-        </picture></figure>
-        <h3>Language server help</h3>
-        <p>When a server can't start, the status bar says why, with the command that fixes it, Restart and Show Log.</p>
-      </article>
+    <p class="section-tag"><span>~</span> understand code</p>
+    <h2>See who calls what, even on a bad day.</h2>
+    <p class="band-lede">Follow calls through a trail or a map, jump to definitions without a language server, and get a plain answer when one won't start.</p>
+    <figure class="win wide"><picture>
+      <source type="image/webp" srcset="img/app/cu-call-map-1x.webp 1x, img/app/cu-call-map.webp 2x">
+      <img src="img/app/cu-call-map-1x.webp" loading="lazy" alt="The call map: callers of charge drawn left to right with the selected trail from main lit up.">
+    </picture><figcaption>The call map: the trail you selected is lit, the rest dimmed. Click a function to open it.</figcaption></figure>
+    <div class="trio trio-2">
+      <figure class="win"><picture>
+        <source type="image/webp" srcset="img/app/cu-call-tree-1x.webp 1x, img/app/cu-call-tree.webp 2x">
+        <img src="img/app/cu-call-tree-1x.webp" loading="lazy" alt="The Call Trails panel: callers of charge as a tree with entry points and tests marked, and a call site expanded.">
+      </picture><figcaption><b>Call Trails.</b> Callers and calls as a tree with the trail back to your function, entry points and tests marked, and the actual calling lines one keystroke away.</figcaption></figure>
+      <figure class="win"><picture>
+        <source type="image/webp" srcset="img/app/cu-ls-help-1x.webp 1x, img/app/cu-ls-help.webp 2x">
+        <img src="img/app/cu-ls-help-1x.webp" loading="lazy" alt="Language server help explaining that jdtls needs Java 21, with the install command.">
+      </picture><figcaption><b>Language server help.</b> When a server can't start, the status bar says why, with the command that fixes it, Restart and Show Log. Without a server, <kbd>⌘</kbd>-click still finds the definition.</figcaption></figure>
     </div>
-    <ul class="more">
-      <li><strong>Navigation without a server.</strong> <kbd>⌘</kbd>-click still finds the definition when no language server runs, by searching the project.</li>
-    </ul>
   </div>
 </section>
 
-<!-- Lean and private -->
-<section id="lean" class="group" style="--group: var(--lean)">
+<!-- Lean: a block whose output is a table -->
+<section id="lean" class="band band-alt">
   <div class="wrap">
-    <header class="group-head">
-      <p class="group-name">Lean and private</p>
-      <h2>Quick to open, quiet on the wire.</h2>
-      <p>Photon is native, drawn on the GPU, and does nothing when you aren't using it.</p>
-    </header>
-    <dl class="facts">
-      <div><dt>0.4 s</dt><dd>to open a project</dd></div>
-      <div><dt>0.4%</dt><dd>CPU while it waits for you</dd></div>
-      <div><dt>No calls</dt><dd>to the network at startup, and telemetry off for good</dd></div>
-      <div><dt>No account</dt><dd>bring the agents and GitHub login you already have</dd></div>
-    </dl>
-    <ul class="more">
-      <li><strong>Make it yours.</strong> Switch themes with <kbd>⌘</kbd> <kbd>K</kbd> <kbd>⌘</kbd> <kbd>T</kbd>; font styles change the editor, menus and terminal together.</li>
-      <li><strong>Settings in one file.</strong> Everything is configured in <code>settings.json</code>, with the defaults documented beside each option.</li>
-      <li><strong>Updates with Homebrew.</strong> <code>brew upgrade photon</code> picks up each release.</li>
+    <p class="section-tag"><span>~</span> lean and private</p>
+    <h2>Quick to open, quiet on the wire.</h2>
+    <p class="band-lede">Native Rust, drawn on the GPU, and nothing running when you aren't. Measured on every release.</p>
+    <div class="term term-stats" aria-label="Photon's measurements, shown as a terminal block with its output opened as a table">
+      <div class="block done">
+        <div class="bh"><span class="path">~/code/photon</span><span class="branch">main</span><span class="dur">(0.1s)</span><span class="chip-ok">table</span></div>
+        <div class="cmd">photon --stats</div>
+        <table class="out-table">
+          <thead><tr><th>measure</th><th>value</th><th>note</th></tr></thead>
+          <tbody>
+            <tr><td>cold start</td><td>0.4 s</td><td>launch to first frame</td></tr>
+            <tr><td>idle cpu</td><td>0.4 %</td><td>focused window, nothing to do</td></tr>
+            <tr><td>idle memory</td><td>148 MB</td><td>a project open</td></tr>
+            <tr><td>network at idle</td><td>0 calls</td><td>also with a diagram open</td></tr>
+            <tr><td>account</td><td>none</td><td>your agents and GitHub login, as they are</td></tr>
+            <tr><td>telemetry</td><td>off</td><td>for good</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <ul class="points points-row">
+      <li><b>Make it yours.</b> Switch themes with <kbd>⌘</kbd> <kbd>K</kbd> <kbd>⌘</kbd> <kbd>T</kbd>; font styles change the editor, menus and terminal together.</li>
+      <li><b>Settings in one file.</b> Everything is configured in <code>settings.json</code>, with the defaults documented beside each option.</li>
+      <li><b>Updates with Homebrew.</b> <code>brew upgrade photon</code> picks up each release.</li>
     </ul>
   </div>
 </section>
@@ -330,7 +297,7 @@
       <code><span>$</span> brew tap heapworks-in/photon &amp;&amp; brew install photon</code>
       <button type="button" data-copy="brew tap heapworks-in/photon && brew install photon">Copy</button>
     </div>
-    <p class="meta"><a href="https://github.com/heapworks-in/photon">Source on GitHub</a> · <a href="https://github.com/heapworks-in/photon/releases">Release notes</a> · <a href="https://github.com/heapworks-in/photon/issues">Report a problem</a></p>
+    <p class="meta"><a href="https://github.com/heapworks-in/photon">Source on GitHub</a> <a href="https://github.com/heapworks-in/photon/releases">Release notes</a> <a href="https://github.com/heapworks-in/photon/issues">Report a problem</a></p>
   </div>
 </section>
 
@@ -345,13 +312,24 @@
 <script>
   for (const button of document.querySelectorAll("[data-copy]")) {
     button.addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(button.dataset.copy);
-        button.textContent = "Copied";
-      } catch {
-        button.textContent = "Select and copy";
-      }
+      try { await navigator.clipboard.writeText(button.dataset.copy); button.textContent = "Copied"; }
+      catch { button.textContent = "Select and copy"; }
       setTimeout(() => { button.textContent = "Copy"; }, 1800);
+    });
+  }
+  for (const tabs of document.querySelectorAll("[data-tabs]")) {
+    const buttons = [...tabs.querySelectorAll("[role=tab]")];
+    const panels = [...tabs.querySelectorAll("[role=tabpanel]")];
+    const show = (index) => {
+      buttons.forEach((b, i) => b.setAttribute("aria-selected", String(i === index)));
+      panels.forEach((p, i) => { p.hidden = i !== index; });
+    };
+    buttons.forEach((b, i) => {
+      b.addEventListener("click", () => show(i));
+      b.addEventListener("keydown", (e) => {
+        if (e.key === "ArrowRight") { show((i + 1) % buttons.length); buttons[(i + 1) % buttons.length].focus(); }
+        if (e.key === "ArrowLeft") { show((i - 1 + buttons.length) % buttons.length); buttons[(i - 1 + buttons.length) % buttons.length].focus(); }
+      });
     });
   }
 </script>
