@@ -34,13 +34,16 @@ scratch=$(mktemp -d)
 # A fresh data dir has no trust decisions, so Photon would open its "Trust this folder?" dialog,
 # which takes focus (and a diagram tab only starts its web view when focused). Trust the sample.
 mkdir -p "$scratch/data/config" && print -r -- '{ "session": { "trust_all_worktrees": true } }' >"$scratch/data/config/settings.json"
+# A copy outside ~/Documents: macOS asks before an app reads Documents, and each new ad-hoc
+# signature asks again, leaving the launch waiting behind that prompt.
+cp -R "$PWD/tooling/photon-perf/sample" "$scratch/sample"
 # The terminal's login shell would otherwise run the user's zsh rc files, whose network
 # calls (plugin managers, version checks) are not Photon's.
 mkdir "$scratch/zdotdir"
 export ZDOTDIR="$scratch/zdotdir"
 if (( ${#command} == 0 )); then
-  app_args=(--user-data-dir "$scratch/data" "$PWD/tooling/photon-perf/sample")
-  (( with_diagram )) && app_args+=("$PWD/tooling/photon-perf/sample/diagram.excalidraw")
+  app_args=(--user-data-dir "$scratch/data" "$scratch/sample")
+  (( with_diagram )) && app_args+=("$scratch/sample/diagram.excalidraw")
 fi
 source tooling/photon-perf/launch-as-app.zsh
 measure_dir=""

@@ -80,12 +80,15 @@ for (( run = 1; run <= runs; run++ )); do
   # A fresh data dir has no trust decisions, so Photon would open its "Trust this folder?" dialog,
   # which takes focus (and a diagram tab only starts its web view when focused). Trust the sample.
   mkdir -p "$scratch/data/config" && print -r -- '{ "session": { "trust_all_worktrees": true } }' >"$scratch/data/config/settings.json"
+  # A copy outside ~/Documents: macOS asks before an app reads Documents, and each new ad-hoc
+  # signature asks again, leaving the launch waiting behind that prompt.
+  cp -R "$PWD/tooling/photon-perf/sample" "$scratch/sample"
   # The terminal's zsh would otherwise run the user's rc files, whose prompt workers are not Photon's.
   mkdir "$scratch/zdotdir"
   export ZDOTDIR="$scratch/zdotdir"
   launched_ms=$(( int(EPOCHREALTIME * 1000) ))
   launch_as_app "$binary" "$scratch/stderr.log" PHOTON_PERF=1 ZDOTDIR="$scratch/zdotdir" \
-    -- --user-data-dir "$scratch/data" "$PWD/tooling/photon-perf/sample" || exit 2
+    -- --user-data-dir "$scratch/data" "$scratch/sample" || exit 2
   pid=$app_pid
   first_frame_ms=""
   for (( wait = 0; wait < 100; wait++ )); do
@@ -147,6 +150,9 @@ scratch=$(mktemp -d)
 # A fresh data dir has no trust decisions, so Photon would open its "Trust this folder?" dialog,
 # which takes focus (and a diagram tab only starts its web view when focused). Trust the sample.
 mkdir -p "$scratch/data/config" && print -r -- '{ "session": { "trust_all_worktrees": true } }' >"$scratch/data/config/settings.json"
+# A copy outside ~/Documents: macOS asks before an app reads Documents, and each new ad-hoc
+# signature asks again, leaving the launch waiting behind that prompt.
+cp -R "$PWD/tooling/photon-perf/sample" "$scratch/sample"
 pid=""
 cleanup() {
   [[ -n $pid ]] && kill $(descendants $pid) 2>/dev/null || true
@@ -156,7 +162,7 @@ cleanup() {
 trap cleanup EXIT
 mkdir "$scratch/zdotdir"
 launch_as_app "$binary" "$scratch/stderr.log" ZDOTDIR="$scratch/zdotdir" \
-  -- --user-data-dir "$scratch/data" "$PWD/tooling/photon-perf/sample" "$PWD/tooling/photon-perf/sample/diagram.excalidraw" || exit 2
+  -- --user-data-dir "$scratch/data" "$scratch/sample" "$scratch/sample/diagram.excalidraw" || exit 2
 pid=$app_pid
 # Launched by launchd, the app is its own responsible process.
 responsible_pid=$(/usr/bin/python3 -I tooling/photon-perf/responsible.py owner $pid)
