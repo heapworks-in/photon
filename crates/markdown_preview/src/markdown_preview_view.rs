@@ -86,6 +86,8 @@ pub struct MarkdownPreviewView {
     /// background parse is in flight. Tracked so matches can be invalidated once it lands.
     markdown_parse_pending: bool,
     nav_history: Option<ItemNavHistory>,
+    // photon: the number of tasks when the file reads as a plan, for "Review this plan".
+    photon_plan_tasks: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -455,6 +457,7 @@ impl MarkdownPreviewView {
                 mode,
                 markdown_parse_pending: false,
                 nav_history: None,
+                photon_plan_tasks: None, // photon: set with the source below
             };
 
             this.set_editor(active_editor, window, cx);
@@ -747,6 +750,9 @@ impl MarkdownPreviewView {
                     view.markdown.update(cx, |markdown, cx| {
                         markdown.reset(contents, cx);
                     });
+                    // photon: parsed here, after the typing debounce, so idle costs nothing.
+                    view.photon_plan_tasks =
+                        photon_plan_review::plan_task_count(view.markdown.read(cx).source());
                     view.markdown_parse_pending = view.markdown.read(cx).is_parsing();
                     view.sync_preview_to_source_index(selection_start, should_reveal_selection, cx);
                     cx.emit(SearchEvent::MatchesInvalidated);
@@ -1596,6 +1602,44 @@ fn open_preview_path_with_position(
     task.detach_and_notify_err(workspace_for_error, window, cx);
 }
 
+// photon: "Review this plan", top right of a plan's preview.
+impl MarkdownPreviewView {
+    fn photon_review_plan_button(&self, tasks: usize, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .absolute()
+            .top_2()
+            .right_4()
+            .debug_selector(|| "photon-review-this-plan".into())
+            .child(
+                Button::new("photon-review-this-plan", "Review this plan")
+                    .style(ButtonStyle::Outlined)
+                    .tooltip(ui::Tooltip::text(format!(
+                        "Review its {tasks} task{} one by one, checked against the repository",
+                        if tasks == 1 { "" } else { "s" }
+                    )))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let Some(project_path) = this.active_editor.as_ref().and_then(|state| {
+                            Self::project_path_for_active_editor(state.editor.read(cx), cx)
+                        }) else {
+                            return;
+                        };
+                        this.workspace
+                            .update(cx, |workspace, cx| {
+                                photon_plan_review::open_plan_review(
+                                    workspace,
+                                    project_path,
+                                    window,
+                                    cx,
+                                )
+                                .detach_and_log_err(cx)
+                            })
+                            .log_err();
+                    })),
+            )
+            .into_any_element()
+    }
+}
+
 // photon: an image source that fails to load, so the image's fallback card shows.
 fn missing_image_source() -> ImageSource {
     ImageSource::Custom(Arc::new(|_, _| {
@@ -2138,6 +2182,10 @@ impl Render for MarkdownPreviewView {
                 window,
                 cx,
             )
+            // photon: a plan opens as a review from its preview.
+            .when_some(self.photon_plan_tasks, |this, tasks| {
+                this.child(self.photon_review_plan_button(tasks, cx))
+            })
             .when_some(hovered_url, |this, hovered_url| {
                 this.child(
                     div()
@@ -3784,6 +3832,46 @@ mod tests {
         cx.simulate_click(edit, Modifiers::none());
         cx.run_until_parked();
         assert_editor_is_active_and_focused(cx, &multi_workspace, &editor);
+    }
+
+    const PHOTON_PLAN: &str =
+        "# Plan\n\n### Task 1: One\n\nDo this.\n\n### Task 2: Two\n\nThen that.\n";
+
+    fn photon_review_button(
+        cx: &mut TestAppContext,
+        multi_workspace: &WindowHandle<MultiWorkspace>,
+    ) -> Option<gpui::Bounds<gpui::Pixels>> {
+        dispatch_open_preview(cx, multi_workspace);
+        cx.executor().advance_clock(Duration::from_secs(1));
+        let cx = &mut VisualTestContext::from_window((*multi_workspace).into(), cx);
+        cx.run_until_parked();
+        cx.debug_bounds("photon-review-this-plan")
+    }
+
+    #[gpui::test]
+    async fn photon_a_plan_preview_opens_its_review(cx: &mut TestAppContext) {
+        let (multi_workspace, _) = open_markdown_source(cx, PHOTON_PLAN).await;
+        cx.update(photon_plan_review::init);
+        let button = photon_review_button(cx, &multi_workspace).expect("a plan offers a review");
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        cx.simulate_click(button.center(), Modifiers::none());
+        cx.run_until_parked();
+        multi_workspace
+            .update(cx, |multi_workspace, _, cx| {
+                let review = multi_workspace
+                    .workspace()
+                    .read(cx)
+                    .active_item_as::<photon_plan_review::PlanReviewItem>(cx)
+                    .expect("the review is open");
+                assert_eq!(review.read(cx).plan().tasks.len(), 2);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    async fn photon_a_plain_document_offers_no_review(cx: &mut TestAppContext) {
+        let (multi_workspace, _) = open_markdown_source(cx, "# Note\n\nJust text.\n").await;
+        assert!(photon_review_button(cx, &multi_workspace).is_none());
     }
 
     #[gpui::test]

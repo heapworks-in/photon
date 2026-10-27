@@ -434,6 +434,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
     photon::register_font_styles(cx); // photon: switchable font styles
     photon::register_review_agent(cx); // photon: PR agent pre-review through the agent panel
     photon::register_call_trail_hooks(cx); // photon: Call Trails' PR chip and agent explanation
+    photon::register_plan_review_hooks(cx); // photon: plan review verdicts and questions to the agent
     let mut _on_close_subscription = bind_on_window_closed(cx);
     cx.observe_global::<SettingsStore>(move |cx| {
         // A 1.92 regression causes unused-assignment to trigger on this variable.

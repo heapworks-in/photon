@@ -81,6 +81,38 @@ fn explain_call_trail(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
+    open_agent_thread(workspace, "Explain call trail", prompt, true, window, cx);
+}
+
+/// Plan review sends its verdict, and questions about a task, to a new agent thread.
+pub fn register_plan_review_hooks(cx: &mut App) {
+    photon_plan_review::set_hooks(
+        photon_plan_review::PlanReviewHooks {
+            send_to_agent: Some(std::rc::Rc::new(|workspace, message, window, cx| {
+                open_agent_thread(
+                    workspace,
+                    &message.title,
+                    message.prompt,
+                    message.send,
+                    window,
+                    cx,
+                )
+            })),
+        },
+        cx,
+    );
+}
+
+/// Opens a new thread in the agent panel with `prompt`, sent when `auto_submit`, otherwise left
+/// in the message box for the user to finish.
+fn open_agent_thread(
+    workspace: &mut Workspace,
+    title: &str,
+    prompt: String,
+    auto_submit: bool,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
     use agent_client_protocol::schema::v2 as acp_v2;
     use agent_ui::{AgentInitialContent, AgentPanel, AgentThreadSource, CreateThreadOptions};
     use workspace::{Toast, notifications::NotificationId};
@@ -99,10 +131,10 @@ fn explain_call_trail(
     panel.update(cx, |panel, cx| {
         let thread_id = panel.create_thread_with_options(
             CreateThreadOptions {
-                title: Some("Explain call trail".into()),
+                title: Some(title.to_string().into()),
                 initial_content: Some(AgentInitialContent::ContentBlock {
                     blocks,
-                    auto_submit: true,
+                    auto_submit,
                 }),
                 ..CreateThreadOptions::default()
             },

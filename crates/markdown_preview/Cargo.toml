@@ -24,6 +24,7 @@ language.workspace = true
 log.workspace = true
 markdown.workspace = true
 photon_markdown.workspace = true # photon: full-size images and diagrams
+photon_plan_review.workspace = true # photon: plans open as a review
 project.workspace = true
 settings.workspace = true
 theme.workspace = true
