@@ -766,6 +766,13 @@ impl PlanReviewItem {
         cx.notify();
     }
 
+    /// The selected section's first paragraph containing `needle`.
+    pub fn paragraph_containing(&self, needle: &str) -> Option<usize> {
+        let section = self.section(self.selected)?;
+        (0..section.blocks.len())
+            .find(|paragraph| self.block_text(section, *paragraph).contains(needle))
+    }
+
     fn draft_paragraph(&self, section: &Section, draft: &PlanDraft) -> usize {
         let last = section.blocks.len().saturating_sub(1);
         (0..section.blocks.len())
@@ -1678,6 +1685,7 @@ impl PlanReviewItem {
         };
         v_flex()
             .debug_selector(|| "plan-facts".into())
+            .flex_none()
             .gap_1p5()
             .mb_4()
             .px_3()
@@ -1754,6 +1762,7 @@ impl PlanReviewItem {
                     .id(("plan-paragraph", paragraph))
                     .debug_selector(move || format!("plan-paragraph-{paragraph}"))
                     .group(group.clone())
+                    .flex_none()
                     .items_start()
                     .max_w(px(820.))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -1834,6 +1843,7 @@ impl PlanReviewItem {
             .ml_8()
             .mb_3()
             .max_w(px(780.))
+            .flex_none()
             .items_stretch()
             .rounded_md()
             .border_1()
@@ -1862,18 +1872,8 @@ impl PlanReviewItem {
                         Label::new("gap")
                             .size(LabelSize::XSmall)
                             .color(Color::Muted),
-                    ),
-            )
-            .child(Label::new(finding.title.clone()).size(LabelSize::Small))
-            .child(
-                Label::new(finding.evidence.clone())
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            )
-            .child(
-                h_flex()
-                    .justify_end()
-                    .gap_1()
+                    )
+                    .child(div().flex_1())
                     .child(
                         div()
                             .debug_selector(move || format!("plan-finding-dismiss-{position}"))
@@ -1896,6 +1896,12 @@ impl PlanReviewItem {
                                     })),
                             ),
                     ),
+            )
+            .child(Label::new(finding.title.clone()).size(LabelSize::Small))
+            .child(
+                Label::new(finding.evidence.clone())
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
             );
         self.card(Color::Warning, content, cx)
             .debug_selector(move || format!("plan-finding-{position}"))
@@ -1914,13 +1920,8 @@ impl PlanReviewItem {
                         Label::new("draft")
                             .size(LabelSize::XSmall)
                             .color(Color::Muted),
-                    ),
-            )
-            .child(Label::new(entry.draft.body.clone()).size(LabelSize::Small))
-            .child(
-                h_flex()
-                    .justify_end()
-                    .gap_1()
+                    )
+                    .child(div().flex_1())
                     .child(
                         Button::new(("plan-draft-delete", local_id), "Delete")
                             .style(ButtonStyle::Subtle)
@@ -1935,7 +1936,8 @@ impl PlanReviewItem {
                                 this.open_composer(paragraph, Some(local_id), window, cx)
                             })),
                     ),
-            );
+            )
+            .child(Label::new(entry.draft.body.clone()).size(LabelSize::Small));
         self.card(Color::Accent, content, cx)
             .debug_selector(move || format!("plan-draft-{local_id}"))
             .into_any_element()
@@ -2512,12 +2514,9 @@ mod tests {
 
         /// Comments on the paragraph holding `needle`, by clicking it and pressing `c`.
         fn comment(&mut self, item: &Entity<PlanReviewItem>, needle: &str, body: &str) {
-            let paragraph = item.read_with(&self.cx, |item, _| {
-                let section = item.section(item.selected).expect("a section");
-                (0..section.blocks.len())
-                    .find(|paragraph| item.block_text(section, *paragraph).contains(needle))
-                    .expect("the paragraph")
-            });
+            let paragraph = item
+                .read_with(&self.cx, |item, _| item.paragraph_containing(needle))
+                .expect("the paragraph");
             self.click(&format!("plan-paragraph-{paragraph}"));
             self.cx.simulate_keystrokes("c");
             assert!(self.drawn("plan-composer"));
