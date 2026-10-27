@@ -15,15 +15,26 @@ const FONT_FALLBACK_EDITS: [string, string][] = [
   [".then(r=>`@font-face {", ".then(r=>r&&`@font-face {"],
 ];
 
-function noRemoteFontFallback(): Plugin {
+// The collaborator laser trails redraw on every animation frame for as long as the editor is open,
+// even with no collaborators (and Photon has no collaboration), which kept an idle diagram at ~4%
+// CPU. The animation handler stops a target whose frame callback returns true.
+const LASER_TRAIL_EDITS: [string, string][] = [
+  [
+    "onFrame(){this.updateCollabTrails()}",
+    "onFrame(){return this.updateCollabTrails(),this.app.state.collaborators.size===0}",
+  ],
+];
+
+// Applies `edits` to the one Excalidraw module containing `marker`.
+function excalidrawEdits(name: string, marker: string, edits: [string, string][]): Plugin {
   let edited = 0;
   return {
-    name: "photon-no-remote-font-fallback",
+    name,
     transform(code, id) {
-      if (!id.includes("@excalidraw/excalidraw/dist/prod/") || !code.includes("ASSETS_FALLBACK_URL")) {
+      if (!id.includes("@excalidraw/excalidraw/dist/prod/") || !code.includes(marker)) {
         return null;
       }
-      for (const [from, to] of FONT_FALLBACK_EDITS) {
+      for (const [from, to] of edits) {
         const count = code.split(from).length - 1;
         if (count !== 1) {
           throw new Error(`expected one ${JSON.stringify(from)} in ${id}, found ${count}`);
@@ -34,13 +45,17 @@ function noRemoteFontFallback(): Plugin {
       return { code, map: null };
     },
     buildEnd() {
-      if (edited !== 1) throw new Error(`edited ${edited} Excalidraw font modules, expected 1`);
+      if (edited !== 1) throw new Error(`${name}: edited ${edited} Excalidraw modules, expected 1`);
     },
   };
 }
 
 export default defineConfig({
-  plugins: [react(), noRemoteFontFallback()],
+  plugins: [
+    react(),
+    excalidrawEdits("photon-no-remote-font-fallback", "ASSETS_FALLBACK_URL", FONT_FALLBACK_EDITS),
+    excalidrawEdits("photon-idle-laser-trails", "updateCollabTrails", LASER_TRAIL_EDITS),
+  ],
   // The page is served from photon-web://excalidraw/editor/, so asset URLs must be relative.
   base: "./",
   build: {
