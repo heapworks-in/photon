@@ -566,6 +566,8 @@ mod mac {
                     },
                 ] },
                 "reviews": { "nodes": [] },
+                "latestReviews": { "nodes": [ { "author": { "login": "devon" } } ] },
+                "reviewRequests": { "nodes": [ { "requestedReviewer": { "login": "marcus" } } ] },
                 "state": "OPEN",
                 "additions": 94,
                 "deletions": 9,
@@ -1654,6 +1656,18 @@ mod mac {
             self.click(&win, "photon-review-view")?;
             self.dispatch(&win, menu::SelectLast);
             self.shoot_crops(&win, None, &[("cu-review-unreviewed", &[medium])])?;
+            self.close(win);
+
+            // The Comments view beside the thread it opened, with a reply mentioning someone.
+            let (win, item) = self.open_review_sized(&changed_since_viewed, WIDTH, HEIGHT)?;
+            self.select_step_with(&win, &item, "src/retry.rs")?;
+            self.click(&win, "photon-review-show-comments")?;
+            self.click(&win, "photon-review-comment-row-PRRT_jitter")?;
+            self.dispatch(&win, photon_review::ReplyToComment);
+            self.cx
+                .simulate_input(win.handle.into(), "Fine by me once it's documented. @");
+            self.settle();
+            self.shoot_crops(&win, None, &[("cu-review-comments-view", &[whole])])?;
             self.close(win);
 
             let (win, _item) = self.open_review_sized(&Self::all_unviewed(), WIDTH, HEIGHT)?;
