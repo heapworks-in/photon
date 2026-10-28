@@ -6074,6 +6074,14 @@ impl ReviewItem {
     }
 
     /// What's left to review.
+    /// The first step after the selected one, wrapping around, that isn't viewed yet.
+    fn next_unviewed(&self) -> Option<usize> {
+        let count = self.steps.len();
+        (1..count)
+            .map(|offset| (self.selected + offset) % count)
+            .find(|index| self.step_state(&self.steps[*index]) != ViewedState::Viewed)
+    }
+
     fn progress_text(&self) -> String {
         let states: Vec<ViewedState> = self
             .steps
@@ -7210,6 +7218,37 @@ impl ReviewItem {
         threads + drafts
     }
 
+    /// Marks a step whose files are all new, or all deleted, while its file list is folded.
+    fn step_status_icon(&self, step: &Step) -> Option<AnyElement> {
+        let statuses: Vec<&FileStatus> = step
+            .files
+            .iter()
+            .filter_map(|path| self.files.iter().find(|file| file.diff.path == *path))
+            .map(|file| &file.diff.status)
+            .collect();
+        let (icon, color, tooltip) = match statuses.first()? {
+            FileStatus::Added => (IconName::SquarePlus, Color::VersionControlAdded, "New file"),
+            FileStatus::Deleted => (
+                IconName::SquareMinus,
+                Color::VersionControlDeleted,
+                "Deleted file",
+            ),
+            _ => return None,
+        };
+        if statuses.iter().any(|status| *status != statuses[0]) {
+            return None;
+        }
+        let selector = format!("photon-review-step-status-{icon:?}:{}", step.files.first()?);
+        Some(
+            div()
+                .id(SharedString::from(selector.clone()))
+                .debug_selector(move || selector)
+                .tooltip(Tooltip::text(tooltip))
+                .child(Icon::new(icon).size(IconSize::Small).color(color))
+                .into_any_element(),
+        )
+    }
+
     fn render_map(&self, cx: &Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let map = v_flex()
@@ -7241,6 +7280,19 @@ impl ReviewItem {
                                     .color(Color::Muted),
                             ),
                     )
+                    .children(self.next_unviewed().map(|index| {
+                        div()
+                            .debug_selector(|| "photon-review-next-unviewed".into())
+                            .child(
+                                Button::new("photon-review-next-unviewed", "Next unviewed")
+                                    .style(ButtonStyle::Subtle)
+                                    .size(ButtonSize::Compact)
+                                    .label_size(LabelSize::XSmall)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.select_step(index, window, cx)
+                                    })),
+                            )
+                    }))
                     .child(
                         div()
                             .debug_selector(|| "photon-review-show-comments".into())
@@ -7369,6 +7421,7 @@ impl ReviewItem {
                                 )
                             }),
                     )
+                    .children((!selected).then(|| self.step_status_icon(step)).flatten())
                     .children(comment_badge(
                         format!("photon-review-step-comments-{index}"),
                         self.comment_count(&step.files),
@@ -10582,6 +10635,27 @@ fn verify_password(user: &str, password: &str) -> bool {
     }
 
     #[gpui::test]
+    async fn next_unviewed_selects_the_next_step_left_to_review(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_reformatted(cx).await;
+        let fake = install_fake(&mut cx);
+        fake.respond(
+            |request| {
+                request
+                    .stdin
+                    .as_deref()
+                    .is_some_and(|stdin| stdin.contains("FileAsViewed("))
+            },
+            Ok(r#"{"data":{"x":{}}}"#.to_string()),
+        );
+        assert_eq!(item.read_with(&cx, |item, _| item.selected), 0);
+        click("photon-review-step-viewed-0", &mut cx);
+        click("photon-review-next-unviewed", &mut cx);
+        assert_eq!(item.read_with(&cx, |item, _| item.selected), 1);
+        click("photon-review-step-viewed-1", &mut cx);
+        assert!(!drawn("photon-review-next-unviewed", &mut cx));
+    }
+
+    #[gpui::test]
     async fn the_selected_step_lists_its_files_with_status(cx: &mut TestAppContext) {
         let added = PrFile {
             path: "src/new.rs",
@@ -10630,6 +10704,15 @@ fn verify_password(user: &str, password: &str) -> bool {
         });
         assert!(drawn("photon-review-file-SquareDot:src/b.rs", &mut cx));
         assert!(!drawn("photon-review-file-SquarePlus:src/new.rs", &mut cx));
+        // An unselected step still says its files are new.
+        assert!(drawn(
+            "photon-review-step-status-SquarePlus:src/new.rs",
+            &mut cx
+        ));
+        assert!(!drawn(
+            "photon-review-step-status-SquareDot:src/b.rs",
+            &mut cx
+        ));
         item.read_with(&cx, |item, _| {
             let new_file = item
                 .files
