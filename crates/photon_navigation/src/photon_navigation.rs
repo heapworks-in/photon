@@ -1,3 +1,4 @@
+mod java_setup;
 mod language_server_fixes;
 mod set_up_language_server;
 
@@ -15,8 +16,9 @@ use project::{
     search::{SearchQuery, SearchResult},
 };
 use util::{ResultExt as _, paths::PathMatcher};
-use workspace::Toast;
+use workspace::{Toast, Workspace};
 
+pub use java_setup::JavaSetup;
 pub use set_up_language_server::SetUpLanguageServer;
 
 gpui::actions!(
@@ -29,6 +31,38 @@ gpui::actions!(
 
 pub fn init(cx: &mut App) {
     cx.set_global(DefinitionFallback(Rc::new(definition_fallback)));
+    cx.set_global(JavaSetup::new(java_setup::real_detect()));
+    register_language_server_help(cx);
+}
+
+fn register_language_server_help(cx: &mut App) {
+    cx.observe_new(|workspace: &mut Workspace, _, _| {
+        workspace.register_action(show_language_server_help);
+    })
+    .detach();
+}
+
+fn show_language_server_help(
+    workspace: &mut Workspace,
+    _: &ShowLanguageServerHelp,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(item) = workspace
+        .status_bar()
+        .read(cx)
+        .item_of_type::<SetUpLanguageServer>()
+    else {
+        return;
+    };
+    if let Some(needs) = item.read(cx).needs_java() {
+        java_setup::show_needs_java(workspace, &needs, cx);
+    } else if !item.update(cx, |item, cx| item.show_help(window, cx))
+        && let Some(action) = cx.build_action("lsp_tool::ToggleMenu", None).log_err()
+    {
+        // Nothing failed (e.g. the server is still starting): the language server menu says why.
+        window.dispatch_action(action, cx);
+    }
 }
 
 /// The search behind the latest go-to-definition; replacing it drops, and so cancels, the previous one.
