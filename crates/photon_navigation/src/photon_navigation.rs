@@ -19,6 +19,14 @@ use workspace::Toast;
 
 pub use set_up_language_server::SetUpLanguageServer;
 
+gpui::actions!(
+    photon_navigation,
+    [
+        /// Opens the language server setup help for the active file.
+        ShowLanguageServerHelp
+    ]
+);
+
 pub fn init(cx: &mut App) {
     cx.set_global(DefinitionFallback(Rc::new(definition_fallback)));
 }
