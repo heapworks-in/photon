@@ -131,6 +131,8 @@ pub struct CallHierarchyPanel {
     server_problem: Option<ServerProblem>,
     /// Servers that are downloading, starting or failed, project-wide.
     server_statuses: HashMap<LanguageServerName, ServerStatus>,
+    /// The last start error of each failed server, to match a known fix.
+    server_errors: HashMap<LanguageServerName, String>,
     /// The function the user asked for while its language server wasn't ready; traced once it is.
     pending_trace: Option<(WeakEntity<Buffer>, language::Anchor)>,
     /// Most recent first.
@@ -157,6 +159,8 @@ enum ServerProblem {
     },
     Failed {
         server: SharedString,
+        /// A known fix's one sentence, like "jdtls needs Java 21 or newer."
+        hint: Option<&'static str>,
     },
     Missing {
         language: SharedString,
@@ -173,7 +177,7 @@ impl ServerProblem {
             ServerProblem::Starting { language, .. } => {
                 format!("No call trails for {language} yet")
             }
-            ServerProblem::Failed { server } => format!("{server} failed to start"),
+            ServerProblem::Failed { server, .. } => format!("{server} failed to start"),
             ServerProblem::Missing { language } => format!("No language server for {language}"),
             ServerProblem::Unsupported { language, .. } => {
                 format!("No call trails for {language}")
@@ -186,7 +190,9 @@ impl ServerProblem {
             ServerProblem::Starting { server, .. } => {
                 format!("{server} is starting… This panel fills in as soon as it's ready.")
             }
-            ServerProblem::Failed { .. } => "Call trails need it running.".to_string(),
+            ServerProblem::Failed { hint, .. } => {
+                hint.unwrap_or("Call trails need it running.").to_string()
+            }
             ServerProblem::Missing { .. } => "Call trails need one to find callers.".to_string(),
             ServerProblem::Unsupported { server, .. } => {
                 format!("{server} can't find a function's callers and calls.")
@@ -367,6 +373,7 @@ impl CallHierarchyPanel {
             active_buffer: active_buffer(workspace, cx),
             server_problem: None,
             server_statuses: HashMap::default(),
+            server_errors: HashMap::default(),
             pending_trace: None,
             recent: Vec::new(),
             start_points: None,
@@ -391,7 +398,7 @@ impl CallHierarchyPanel {
                 message:
                     proto::update_language_server::Variant::StatusUpdate(proto::StatusUpdate {
                         status: Some(proto::status_update::Status::Binary(status)),
-                        ..
+                        message,
                     }),
                 ..
             } => {
@@ -410,6 +417,12 @@ impl CallHierarchyPanel {
                 match status {
                     Some(status) => self.server_statuses.insert(name.clone(), status),
                     None => self.server_statuses.remove(name),
+                };
+                match (status, message) {
+                    (Some(ServerStatus::Failed), Some(message)) => {
+                        self.server_errors.insert(name.clone(), message.clone())
+                    }
+                    _ => self.server_errors.remove(name),
                 };
                 self.refresh_server_problem(window, cx);
             }
@@ -521,8 +534,15 @@ impl CallHierarchyPanel {
                 .find(|adapter| self.server_statuses.get(&adapter.name) == Some(&status))
                 .map(|adapter| SharedString::from(adapter.name.0.to_string()))
         };
-        if let Some(server) = status(ServerStatus::Failed) {
-            return Some(ServerProblem::Failed { server });
+        if let Some(adapter) = adapters
+            .iter()
+            .find(|adapter| self.server_statuses.get(&adapter.name) == Some(&ServerStatus::Failed))
+        {
+            let error = self.server_errors.get(&adapter.name).map(String::as_str);
+            return Some(ServerProblem::Failed {
+                server: SharedString::from(adapter.name.0.to_string()),
+                hint: photon_navigation::known_fix(&language_name, error).map(|fix| fix.hint),
+            });
         }
         if let Some(server) = status(ServerStatus::Busy).or_else(|| {
             (!server_ids.is_empty())
@@ -3517,6 +3537,21 @@ mod tests {
         setup.open_panel();
         setup.click("call-trail-set-up-server");
         assert_eq!(shown.get(), 1);
+    }
+
+    #[test]
+    fn a_failed_java_server_says_what_it_needs() {
+        let hint = photon_navigation::known_fix(
+            "Java",
+            Some("This version of the Java Runtime only recognizes class file versions up to 61.0"),
+        )
+        .map(|fix| fix.hint);
+        let problem = ServerProblem::Failed {
+            server: "jdtls".into(),
+            hint,
+        };
+        assert_eq!(problem.title(), "jdtls failed to start");
+        assert_eq!(problem.body(), "jdtls needs Java 21 or newer.");
     }
 
     #[test]
