@@ -40,7 +40,7 @@ impl photon_review::ReviewAgent for PanelReviewAgent {
         let thread_id = panel.update(cx, |panel, cx| {
             let thread_id = panel.create_thread_with_options(
                 CreateThreadOptions {
-                    title: Some("PR pre-review".into()),
+                    title: Some("Agent pre-review".into()),
                     initial_content: Some(AgentInitialContent::ContentBlock {
                         blocks,
                         auto_submit: true,
@@ -81,7 +81,14 @@ fn explain_call_trail(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    open_agent_thread(workspace, "Explain call trail", prompt, true, window, cx);
+    open_agent_thread(
+        workspace,
+        "Explain call hierarchy",
+        prompt,
+        true,
+        window,
+        cx,
+    );
 }
 
 /// Plan review sends its verdict, and questions about a task, to a new agent thread.

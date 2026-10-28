@@ -9,7 +9,7 @@ use settings::Settings;
 use theme_settings::ThemeSettings;
 use ui::{
     ContextMenu, DynamicSpacing, IconButton, IconButtonShape, IconName, IconSize, Indicator, Label,
-    LabelSize, Tab, prelude::*, right_click_menu,
+    LabelSize, Tab, Tooltip, prelude::*, right_click_menu,
 };
 use util::ResultExt as _;
 use workspace::{
@@ -549,13 +549,17 @@ impl ProjectTabs {
                     }
                 };
                 ContextMenu::build(window, cx, move |menu, _, _| {
-                    menu.entry("Close Tab", None, move |window, cx| close(window, cx))
-                        .entry("Close Other Tabs", None, move |window, cx| {
-                            close_others(window, cx)
-                        })
-                        .entry("Move Tab to New Window", None, move |window, cx| {
-                            move_to_new_window(window, cx)
-                        })
+                    menu.entry("Close Tab", Some(Box::new(CloseTab)), move |window, cx| {
+                        close(window, cx)
+                    })
+                    .entry("Close Other Tabs", None, move |window, cx| {
+                        close_others(window, cx)
+                    })
+                    .entry(
+                        "Move Tab to New Window",
+                        Some(Box::new(MoveTabToNewWindow)),
+                        move |window, cx| move_to_new_window(window, cx),
+                    )
                 })
             });
 
@@ -696,6 +700,7 @@ impl Render for ProjectTabs {
                         IconButton::new("photon-new-tab", IconName::Plus)
                             .icon_size(IconSize::Small)
                             .icon_color(Color::Muted)
+                            .tooltip(|_, cx| Tooltip::for_action("New Tab", &NewTab, cx))
                             .on_click(|_, window, cx| window.dispatch_action(Box::new(NewTab), cx)),
                     ),
             )

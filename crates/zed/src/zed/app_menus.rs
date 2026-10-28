@@ -1,4 +1,3 @@
-use collab_ui::collab_panel;
 use gpui::{App, Menu, MenuItem, OsAction};
 use project::DisableAiSettings;
 use release_channel::ReleaseChannel;
@@ -41,7 +40,9 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
         MenuItem::separator(),
         MenuItem::action("Project Panel", project_panel::ToggleFocus),
         MenuItem::action("Outline Panel", outline_panel::ToggleFocus),
-        MenuItem::action("Collab Panel", collab_panel::ToggleFocus),
+        // photon: collaboration is off; Photon's own panels take its place.
+        MenuItem::action("Pull Requests", photon_review::ToggleInbox),
+        MenuItem::action("Call Hierarchy", photon_call_trails::ToggleFocus),
         // photon: terminals live in the center; this switches to one, opening it if needed
         MenuItem::action("Terminal", super::photon::ToggleTerminalEditorFocus),
         MenuItem::action("Debugger Panel", debug_panel::ToggleFocus),

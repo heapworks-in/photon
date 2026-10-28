@@ -175,12 +175,12 @@ impl ServerProblem {
     fn title(&self) -> String {
         match self {
             ServerProblem::Starting { language, .. } => {
-                format!("No call trails for {language} yet")
+                format!("No call hierarchy for {language} yet")
             }
             ServerProblem::Failed { server, .. } => format!("{server} failed to start"),
             ServerProblem::Missing { language } => format!("No language server for {language}"),
             ServerProblem::Unsupported { language, .. } => {
-                format!("No call trails for {language}")
+                format!("No call hierarchy for {language}")
             }
         }
     }
@@ -190,10 +190,12 @@ impl ServerProblem {
             ServerProblem::Starting { server, .. } => {
                 format!("{server} is starting… This panel fills in as soon as it's ready.")
             }
-            ServerProblem::Failed { hint, .. } => {
-                hint.unwrap_or("Call trails need it running.").to_string()
+            ServerProblem::Failed { hint, .. } => hint
+                .unwrap_or("The call hierarchy needs it running.")
+                .to_string(),
+            ServerProblem::Missing { .. } => {
+                "The call hierarchy needs one to find callers.".to_string()
             }
-            ServerProblem::Missing { .. } => "Call trails need one to find callers.".to_string(),
             ServerProblem::Unsupported { server, .. } => {
                 format!("{server} can't find a function's callers and calls.")
             }
@@ -3445,7 +3447,7 @@ mod tests {
         assert_eq!(
             setup.problem(),
             Some((
-                "No call trails for Rust yet".to_string(),
+                "No call hierarchy for Rust yet".to_string(),
                 "rust-analyzer is starting… This panel fills in as soon as it's ready.".to_string()
             ))
         );
@@ -3484,7 +3486,7 @@ mod tests {
             setup.problem(),
             Some((
                 "rust-analyzer failed to start".to_string(),
-                "Call trails need it running.".to_string()
+                "The call hierarchy needs it running.".to_string()
             ))
         );
         assert!(setup.cx.debug_bounds("call-trail-set-up-server").is_some());
@@ -3500,7 +3502,7 @@ mod tests {
             setup.problem(),
             Some((
                 "No language server for Java".to_string(),
-                "Call trails need one to find callers.".to_string()
+                "The call hierarchy needs one to find callers.".to_string()
             ))
         );
         assert!(setup.cx.debug_bounds("call-trail-set-up-server").is_some());
@@ -3511,7 +3513,7 @@ mod tests {
         let mut setup = setup(false, cx).await;
         setup.open_panel();
         let unsupported = Some((
-            "No call trails for Rust".to_string(),
+            "No call hierarchy for Rust".to_string(),
             "rust-analyzer can't find a function's callers and calls.".to_string(),
         ));
         assert_eq!(setup.problem(), unsupported);

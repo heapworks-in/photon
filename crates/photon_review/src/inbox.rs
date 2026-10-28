@@ -35,9 +35,9 @@ use crate::{
 actions!(
     photon_review,
     [
-        /// Toggles the pull request inbox.
+        /// Toggles the Pull Requests panel.
         ToggleInbox,
-        /// Reloads the pull request inbox from GitHub.
+        /// Reloads the Pull Requests panel from GitHub.
         RefreshInbox
     ]
 );

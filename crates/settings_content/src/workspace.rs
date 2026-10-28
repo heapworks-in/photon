@@ -475,7 +475,7 @@ impl CloseWindowWhenNoItems {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum CliDefaultOpenBehavior {
-    /// Open directories as a new workspace in the current Photon window's sidebar.
+    /// Open directories as a new project tab in the current Photon window.
     #[default]
     #[strum(serialize = "Add to Existing Window")]
     ExistingWindow,

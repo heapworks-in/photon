@@ -269,7 +269,7 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "CLI Default Open Behavior",
-                description: "How `zed <path>` opens directories when no flag is specified.",
+                description: "How `photon <path>` opens directories when no flag is specified.", /* photon: the CLI is photon */
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("cli_default_open_behavior"),

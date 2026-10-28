@@ -27,9 +27,7 @@
   // 9. "None"
   "base_keymap": "Zed",
   // The name of a font to use for rendering text in the editor
-  // ".ZedMono" currently aliases to Lilex
-  // but this may change in the future.
-  "buffer_font_family": "Lilex", // photon: Lilex pairs with the IBM Plex Sans UI font (.ZedSans); `photon: use mono font style` or `photon: use hack font style` to switch
+  "buffer_font_family": "Lilex", // photon: Lilex pairs with the IBM Plex Sans UI font; the `photon: use … font style` actions (Mono, Hack, Menlo, Monaco) switch
   // Set the buffer text's font fallbacks, this will be merged with
   // the platform's default fallbacks.
   "buffer_font_fallbacks": null,
@@ -175,7 +173,7 @@
   // an explicit `-e` (existing window) or `-n` (new window) flag.
   //
   // May take 2 values:
-  //  1. Open directories as a new workspace in the current Photon window's sidebar
+  //  1. Open directories as a new project tab in the current Photon window
   //         "cli_default_open_behavior": "existing_window"
   //  2. Open paths in a new window, unless they are subpaths of an existing project
   //         "cli_default_open_behavior": "new_window"
@@ -612,7 +610,7 @@
     "code_actions": false,
   },
   // Whether to allow windows to tab together based on the user's tabbing preference (macOS only).
-  "use_system_window_tabs": false, // photon: projects are tabs inside one window (photon_tabs), like Warp
+  "use_system_window_tabs": false, // photon: projects are tabs inside one window, like Warp
   // Which fullscreen mode the `zed::ToggleFullScreen` action enters (macOS only).
   //
   // 1. Use macOS's native fullscreen, which moves the window into its own Mission Control space.
@@ -2127,7 +2125,7 @@
     "shell": "system",
     // Where to dock terminals panel. Can be `left`, `right`, `bottom`.
     "dock": "bottom",
-    // photon: null follows the editor's font (Hack 13), so terminal and editor stay in sync.
+    // photon: null follows the editor's font and size, so terminal and editor stay in sync.
     "font_family": null,
     "font_size": null,
     "font_fallbacks": ["Symbols Nerd Font Mono", "Apple Symbols"], // photon: Nerd symbols are bundled
