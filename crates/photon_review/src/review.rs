@@ -337,6 +337,12 @@ pub struct ReviewItem {
     meaning_blocks: HashSet<CustomBlockId>,
     /// Rename-only hunks opened from their one-line fold, by path and first row.
     shown_renames: HashSet<(String, u32)>,
+    /// The base text each file's meanings were worked out on, for files with a rename-only hunk.
+    meaning_bases: HashMap<String, String>,
+    line_numbers: Arc<crate::DiffLineNumbers>,
+    /// Diffs whose base takes in their folded renames, so those hunks drop out of the diff.
+    folded_diffs: HashSet<EntityId>,
+    _fold_task: Task<()>,
     /// The changed test functions that call each changed function, by function index.
     test_reach: Vec<Vec<usize>>,
     _meaning_task: Task<()>,
@@ -2055,12 +2061,13 @@ impl ReviewItem {
             multibuffer.set_all_diff_hunks_expanded(cx);
             multibuffer
         });
+        let line_numbers = Arc::new(crate::DiffLineNumbers::default());
         let editor = cx.new(|cx| {
             let mut editor =
                 Editor::for_multibuffer(multibuffer.clone(), Some(project.clone()), window, cx);
             editor.set_show_line_numbers(false, cx);
             editor.set_show_git_diff_gutter(false, cx);
-            editor.set_gutter_columns(Some(Arc::new(crate::DiffLineNumbers)), cx);
+            editor.set_gutter_columns(Some(line_numbers.clone()), cx);
             // Commenting with the mouse: select lines, then right-click.
             editor.set_custom_context_menu(|editor, _, window, cx| {
                 let focus = editor.focus_handle(cx);
@@ -2190,6 +2197,10 @@ impl ReviewItem {
             hunk_meanings: Vec::new(),
             meaning_blocks: HashSet::new(),
             shown_renames: HashSet::new(),
+            meaning_bases: HashMap::new(),
+            line_numbers,
+            folded_diffs: HashSet::new(),
+            _fold_task: Task::ready(()),
             test_reach: Vec::new(),
             _meaning_task: Task::ready(()),
             callers: Vec::new(),
@@ -2652,6 +2663,8 @@ impl ReviewItem {
     /// Gives every shown file's diff the base text the toggles call for, then rebuilds the map
     /// from the diff that results.
     fn apply_diff_view(&mut self, cx: &mut Context<Self>) {
+        // Every folded diff has its base in `original_bases`, so this puts it back.
+        self.folded_diffs.clear();
         let (hide_whitespace, hide_moves) = (self.hide_whitespace, self.hide_moves);
         let mut entries = Vec::new();
         for file in &self.files {
@@ -2717,6 +2730,11 @@ impl ReviewItem {
     }
 
     fn reindex_files(&mut self, cx: &mut Context<Self>) {
+        // A folded rename's base hides its hunk, so the real bases go back before indexing.
+        if !self.folded_diffs.is_empty() {
+            self.apply_diff_view(cx);
+            return;
+        }
         let (lsp_handles, changed_rows) = index_files(&self.project, &self.files, cx);
         // The full set's handles live in `_lsp_handles`; only the subset's are replaced here.
         self._since_review_lsp_handles = if self.full_files.is_some() {
@@ -5250,6 +5268,7 @@ impl ReviewItem {
         self.callers = Vec::new();
         self.test_reach = Vec::new();
         self.hunk_meanings = Vec::new();
+        self.meaning_bases = HashMap::new();
         self.analyses = analyses;
         self.rebuild_map(&[], cx);
         self._meaning_task = self.load_meanings(cx);
@@ -5655,9 +5674,14 @@ impl ReviewItem {
                         .collect();
                     let moves = simplified_bases(&files, false, true).moves;
                     let mut meanings = Vec::new();
-                    for ((path, buffer, diff, viewed), (_, head_text)) in inputs.iter().zip(&texts)
+                    let mut bases = HashMap::new();
+                    for ((path, buffer, diff, viewed), (base_text, head_text)) in
+                        inputs.iter().zip(&texts)
                     {
                         let mut hunks = classify_file(path, buffer, diff, &functions, &moves);
+                        if hunks.iter().any(|hunk| hunk.rename().is_some()) {
+                            bases.insert(path.clone(), base_text.clone());
+                        }
                         if let Some(viewed) = viewed {
                             // Only a commit already in the clone: the user viewed it from here.
                             match git_raw(&repo, &["show", &format!("{viewed}:{path}")]).await {
@@ -5670,12 +5694,14 @@ impl ReviewItem {
                         }
                         meanings.extend(hunks);
                     }
-                    meanings
+                    (meanings, bases)
                 })
                 .await;
             this.update(cx, |this, cx| {
-                this.hunk_meanings = meanings;
+                this.hunk_meanings = meanings.0;
+                this.meaning_bases = meanings.1;
                 this.show_meanings(cx);
+                this.fold_renames(cx);
                 cx.notify();
             })
             .log_err();
@@ -5688,7 +5714,76 @@ impl ReviewItem {
             self.shown_renames.insert(key);
         }
         self.show_meanings(cx);
+        self.fold_renames(cx);
         cx.notify();
+    }
+
+    /// Gives each file with folded renames a base that already has the renamed lines, so those
+    /// hunks leave the diff (no removed or added rows) while their header stands in for them.
+    fn fold_renames(&mut self, cx: &mut Context<Self>) {
+        let mut updates = Vec::new();
+        for (path, unfolded) in &self.meaning_bases {
+            let Some((buffer, diff)) = self
+                .files
+                .iter()
+                .find(|file| file.diff.path == *path)
+                .and_then(|file| file.contents.as_ref())
+            else {
+                continue;
+            };
+            let head = buffer.read(cx).snapshot().text;
+            let head_text = head.text();
+            let head_lines: Vec<&str> = head_text.split_inclusive('\n').collect();
+            let base_lines: Vec<&str> = unfolded.split_inclusive('\n').collect();
+            let mut base = String::with_capacity(unfolded.len());
+            let mut next = 0;
+            for hunk in self.hunk_meanings.iter().filter(|hunk| {
+                hunk.path == *path
+                    && hunk.rename().is_some()
+                    && !self
+                        .shown_renames
+                        .contains(&(path.clone(), hunk.rows.start))
+            }) {
+                let (Some(before), Some(renamed)) = (
+                    base_lines.get(next..hunk.base_rows.start as usize),
+                    head_lines.get(hunk.rows.start as usize..hunk.rows.end as usize),
+                ) else {
+                    continue;
+                };
+                base.extend(before.iter().copied());
+                base.extend(renamed.iter().copied());
+                next = hunk.base_rows.end as usize;
+            }
+            base.extend(base_lines.get(next..).unwrap_or_default().iter().copied());
+            let id = diff.entity_id();
+            if base == *unfolded {
+                if !self.folded_diffs.remove(&id) {
+                    continue;
+                }
+            } else {
+                self.original_bases
+                    .entry(id)
+                    .or_insert_with(|| Some(unfolded.clone()));
+                self.folded_diffs.insert(id);
+            }
+            updates.push((diff.clone(), base, head));
+        }
+        if updates.is_empty() {
+            return;
+        }
+        self._fold_task = cx.spawn(async move |this, cx| {
+            for (diff, base, head) in updates {
+                diff.update(cx, |diff, cx| {
+                    diff.set_base_text(Some(base.into()), head, cx)
+                })
+                .await;
+            }
+            this.update(cx, |this, cx| {
+                this.show_meanings(cx);
+                cx.notify();
+            })
+            .log_err();
+        });
     }
 
     /// The hunk's changed rows inside changed functions, as (reached by a changed test, not
@@ -5877,6 +5972,7 @@ impl ReviewItem {
         let mut blocks = Vec::new();
         let mut new_rows = Vec::new();
         let mut faded = Vec::new();
+        let mut folded_rows = HashSet::new();
         for hunk in &self.hunk_meanings {
             let Some((buffer, diff)) = self
                 .files
@@ -5897,8 +5993,12 @@ impl ReviewItem {
             else {
                 continue;
             };
-            let deletes =
-                !hunk.base_rows.is_empty() && hunk.base_rows.end <= base.max_point().row + 1;
+            let header = self.meaning_header(hunk);
+            let folded = header.folded_rename.is_some();
+            // A folded rename has left the diff: only its head rows remain to cover.
+            let deletes = !folded
+                && !hunk.base_rows.is_empty()
+                && hunk.base_rows.end <= base.max_point().row + 1;
             let top = if deletes {
                 start.with_diff_base_anchor(base.anchor_before(Point::new(hunk.base_rows.start, 0)))
             } else {
@@ -5932,8 +6032,10 @@ impl ReviewItem {
             if hunk.since_viewed == SinceViewed::Reviewed {
                 faded.push(top..end);
             }
-            let header = self.meaning_header(hunk);
-            let folded = header.folded_rename.is_some();
+            if folded {
+                let buffer_id = buffer.remote_id();
+                folded_rows.extend(hunk.rows.clone().map(|row| (buffer_id, row)));
+            }
             blocks.push(BlockProperties {
                 placement: if folded {
                     BlockPlacement::Replace(top..=end)
@@ -5946,6 +6048,7 @@ impl ReviewItem {
                 priority: 0,
             });
         }
+        *self.line_numbers.folded_rows.write() = folded_rows;
         let stale = std::mem::take(&mut self.meaning_blocks);
         self.meaning_blocks = self.editor.update(cx, |editor, cx| {
             editor.remove_blocks(stale.into_iter().collect(), None, cx);
@@ -14400,12 +14503,42 @@ fn test_delay() {
         let folded = display(&item, &mut cx);
         assert!(!folded.contains("total * attempts"), "{folded}");
         assert!(!folded.contains("total * max_attempts"), "{folded}");
+        // Folded, the hunk leaves the diff: no removed rows hide under the header, whose
+        // gutter would still show their numbers and tint.
+        let diffed = |item: &Entity<ReviewItem>, cx: &mut VisualTestContext| {
+            item.read_with(cx, |item, cx| item.multibuffer.read(cx).snapshot(cx).text())
+        };
+        let text = diffed(&item, &mut cx);
+        assert!(!text.contains("max_attempts"), "{text}");
+        // Nor does the header row take the folded row's line numbers.
+        let unnumbered = |item: &Entity<ReviewItem>, cx: &mut VisualTestContext| {
+            item.read_with(cx, |item, _| {
+                let mut rows: Vec<u32> = item
+                    .line_numbers
+                    .folded_rows
+                    .read()
+                    .iter()
+                    .map(|(_, row)| *row)
+                    .collect();
+                rows.sort();
+                rows
+            })
+        };
+        assert_eq!(unnumbered(&item, &mut cx), [4, 5, 6]);
 
         click("photon-review-hunk-lines-src/retry.rs:5", &mut cx);
         assert!(!drawn("photon-review-rename-fold-src/retry.rs:5", &mut cx));
         let shown = display(&item, &mut cx);
         assert!(shown.contains("total * attempts"), "{shown}");
         assert!(shown.contains("total * max_attempts"), "{shown}");
+        let text = diffed(&item, &mut cx);
+        assert!(text.contains("max_attempts"), "{text}");
+        assert!(unnumbered(&item, &mut cx).is_empty());
+
+        click("photon-review-hunk-lines-src/retry.rs:5", &mut cx);
+        assert!(drawn("photon-review-rename-fold-src/retry.rs:5", &mut cx));
+        let text = diffed(&item, &mut cx);
+        assert!(!text.contains("max_attempts"), "{text}");
     }
 
     #[gpui::test]
