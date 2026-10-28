@@ -14,8 +14,8 @@ cask "photon" do
   binary "#{appdir}/Photon.app/Contents/MacOS/cli", target: "photon"
 
   # Alpha builds aren't notarized yet, so Gatekeeper would refuse to open them.
-  postflight do
-    system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{appdir}/Photon.app"]
+  postflight_steps do
+    run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/Photon.app"]
   end
 
   zap trash: [
