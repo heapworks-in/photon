@@ -8,8 +8,13 @@ use gpui::{
     UniformListScrollHandle, WeakEntity, Window, actions, anchored, deferred, point, px, size,
     uniform_list,
 };
-use language::{Buffer, ToPoint as _};
-use project::{CallHierarchyItem, Project};
+use language::{
+    Buffer, LanguageServerName, PLAIN_TEXT, PointUtf16, ToPoint as _, ToPointUtf16 as _,
+};
+use project::{
+    CallHierarchyItem, Project, ProjectPath, Symbol,
+    lsp_store::{LspStoreEvent, SymbolLocation},
+};
 use smallvec::SmallVec;
 use std::{ops::Range, rc::Rc};
 use ui::{
@@ -40,8 +45,6 @@ actions!(
 );
 
 const PANEL_NAME: &str = "Call Hierarchy";
-const NO_FUNCTION: &str = "Put the cursor on a function to see its callers.";
-const UNSUPPORTED: &str = "This file's language server doesn't support call hierarchy.";
 const INDENT: Pixels = px(12.);
 
 /// What the app plugs into the panel, so this crate needs neither the review nor the agent crates.
@@ -85,7 +88,7 @@ fn show_in_panel(
     let editor = workspace.active_item_as::<Editor>(cx);
     panel.update(cx, |panel, cx| match editor {
         Some(editor) => panel.show_symbol_under_cursor(editor, window, cx),
-        None => panel.show_message(NO_FUNCTION, cx),
+        None => panel.show_empty(cx),
     });
 }
 
@@ -123,6 +126,84 @@ pub struct CallHierarchyPanel {
     root_task: Option<Task<()>>,
     child_tasks: HashMap<usize, Task<()>>,
     context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
+    /// The active editor's buffer, whose language server the panel reports on.
+    active_buffer: Option<WeakEntity<Buffer>>,
+    server_problem: Option<ServerProblem>,
+    /// Servers that are downloading, starting or failed, project-wide.
+    server_statuses: HashMap<LanguageServerName, ServerStatus>,
+    /// The function the user asked for while its language server wasn't ready; traced once it is.
+    pending_trace: Option<(WeakEntity<Buffer>, language::Anchor)>,
+    /// Most recent first.
+    recent: Vec<StartPoint>,
+    /// `None` until first looked up.
+    start_points: Option<Vec<StartPoint>>,
+    start_points_task: Option<Task<()>>,
+    active: bool,
+    _subscriptions: Vec<Subscription>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ServerStatus {
+    Busy,
+    Failed,
+}
+
+/// Why the active file's language server can't give call trails.
+#[derive(Clone, Debug, PartialEq)]
+enum ServerProblem {
+    Starting {
+        server: SharedString,
+        language: SharedString,
+    },
+    Failed {
+        server: SharedString,
+    },
+    Missing {
+        language: SharedString,
+    },
+    Unsupported {
+        server: SharedString,
+        language: SharedString,
+    },
+}
+
+impl ServerProblem {
+    fn title(&self) -> String {
+        match self {
+            ServerProblem::Starting { language, .. } => {
+                format!("No call trails for {language} yet")
+            }
+            ServerProblem::Failed { server } => format!("{server} failed to start"),
+            ServerProblem::Missing { language } => format!("No language server for {language}"),
+            ServerProblem::Unsupported { language, .. } => {
+                format!("No call trails for {language}")
+            }
+        }
+    }
+
+    fn body(&self) -> String {
+        match self {
+            ServerProblem::Starting { server, .. } => {
+                format!("{server} is starting… This panel fills in as soon as it's ready.")
+            }
+            ServerProblem::Failed { .. } => "Call trails need it running.".to_string(),
+            ServerProblem::Missing { .. } => "Call trails need one to find callers.".to_string(),
+            ServerProblem::Unsupported { server, .. } => {
+                format!("{server} can't find a function's callers and calls.")
+            }
+        }
+    }
+}
+
+/// A function to trace from the empty panel.
+#[derive(Clone, Debug, PartialEq)]
+struct StartPoint {
+    name: SharedString,
+    tag: Option<Tag>,
+    path: ProjectPath,
+    file_name: SharedString,
+    /// Where the function's declaration starts; its name is at or after this.
+    position: PointUtf16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,7 +220,8 @@ struct RootHeader {
 }
 
 enum Content {
-    Message(&'static str),
+    /// Nothing traced: where to start, or why the language server can't help.
+    Empty,
     LoadingRoot,
     /// `nodes[0]` is the root; the rows show its descendants.
     Tree(Vec<Node>),
@@ -226,38 +308,243 @@ impl CallHierarchyPanel {
         cx: AsyncWindowContext,
     ) -> Task<anyhow::Result<Entity<Self>>> {
         cx.spawn(async move |cx| {
-            workspace.update_in(cx, |workspace, _, cx| {
-                let project = workspace.project().clone();
-                let workspace = cx.entity().downgrade();
-                cx.new(|cx| Self::new(workspace, project, cx))
+            workspace.update_in(cx, |workspace, window, cx| {
+                cx.new(|cx| Self::new(workspace, window, cx))
             })
         })
     }
 
-    fn new(workspace: WeakEntity<Workspace>, project: Entity<Project>, cx: &mut App) -> Self {
-        Self {
-            workspace,
+    fn new(workspace: &Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let project = workspace.project().clone();
+        let lsp_store = project.read(cx).lsp_store();
+        let mut subscriptions = vec![
+            cx.subscribe_in(&lsp_store, window, Self::on_lsp_store_event),
+            cx.subscribe(&project, |this, _, event, cx| {
+                if matches!(
+                    event,
+                    project::Event::WorktreeAdded(_) | project::Event::WorktreeRemoved(_)
+                ) {
+                    this.start_points = None;
+                    this.start_points_task = None;
+                    if this.active {
+                        this.load_start_points(cx);
+                    }
+                    cx.notify();
+                }
+            }),
+        ];
+        if let Some(workspace_entity) = workspace.weak_handle().upgrade() {
+            subscriptions.push(cx.subscribe_in(
+                &workspace_entity,
+                window,
+                |this, workspace, event, window, cx| {
+                    if matches!(event, workspace::Event::ActiveItemChanged) {
+                        let buffer = active_buffer(workspace.read(cx), cx);
+                        if buffer != this.active_buffer {
+                            this.active_buffer = buffer;
+                            this.pending_trace = None;
+                            this.refresh_server_problem(window, cx);
+                        }
+                    }
+                },
+            ));
+        }
+        let mut this = Self {
+            workspace: workspace.weak_handle(),
             project,
             focus_handle: cx.focus_handle(),
             scroll_handle: UniformListScrollHandle::new(),
             map_scroll_handle: ScrollHandle::new(),
             mode: CallHierarchyMode::Incoming,
             view: TrailView::List,
-            content: Content::Message(NO_FUNCTION),
+            content: Content::Empty,
             root_header: RootHeader::default(),
             selected: None,
             rows: Vec::new(),
             root_task: None,
             child_tasks: HashMap::default(),
             context_menu: None,
+            active_buffer: active_buffer(workspace, cx),
+            server_problem: None,
+            server_statuses: HashMap::default(),
+            pending_trace: None,
+            recent: Vec::new(),
+            start_points: None,
+            start_points_task: None,
+            active: false,
+            _subscriptions: subscriptions,
+        };
+        this.refresh_server_problem(window, cx);
+        this
+    }
+
+    fn on_lsp_store_event(
+        &mut self,
+        _: &Entity<project::LspStore>,
+        event: &LspStoreEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            LspStoreEvent::LanguageServerUpdate {
+                name: Some(name),
+                message:
+                    proto::update_language_server::Variant::StatusUpdate(proto::StatusUpdate {
+                        status: Some(proto::status_update::Status::Binary(status)),
+                        ..
+                    }),
+                ..
+            } => {
+                let busy = [
+                    proto::ServerBinaryStatus::CheckingForUpdate,
+                    proto::ServerBinaryStatus::Downloading,
+                    proto::ServerBinaryStatus::Starting,
+                ];
+                let status = if *status == proto::ServerBinaryStatus::Failed as i32 {
+                    Some(ServerStatus::Failed)
+                } else if busy.iter().any(|busy| *status == *busy as i32) {
+                    Some(ServerStatus::Busy)
+                } else {
+                    None
+                };
+                match status {
+                    Some(status) => self.server_statuses.insert(name.clone(), status),
+                    None => self.server_statuses.remove(name),
+                };
+                self.refresh_server_problem(window, cx);
+            }
+            LspStoreEvent::LanguageServerAdded(_, name, _) => {
+                self.server_statuses.remove(name);
+                // Servers that weren't running had no symbols to offer.
+                if self
+                    .start_points
+                    .as_ref()
+                    .is_some_and(|start_points| start_points.is_empty())
+                {
+                    self.start_points = None;
+                    if self.active {
+                        self.load_start_points(cx);
+                    }
+                }
+                self.refresh_server_problem(window, cx);
+            }
+            LspStoreEvent::LanguageServerRemoved(_) | LspStoreEvent::LanguageDetected { .. } => {
+                self.refresh_server_problem(window, cx)
+            }
+            _ => {}
         }
     }
 
-    fn show_message(&mut self, message: &'static str, cx: &mut Context<Self>) {
+    fn refresh_server_problem(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let problem = self
+            .active_buffer
+            .as_ref()
+            .and_then(WeakEntity::upgrade)
+            .and_then(|buffer| self.server_problem_for(&buffer, cx));
+        if problem != self.server_problem {
+            self.server_problem = problem;
+            cx.notify();
+        }
+        if self.server_problem.is_none()
+            && let Some((buffer, position)) = self.pending_trace.take()
+            && let Some(buffer) = buffer.upgrade()
+        {
+            self.trace(buffer, position, window, cx);
+        }
+    }
+
+    /// Remote projects check servers on the host, so they never report a problem here.
+    fn server_problem_for(&self, buffer: &Entity<Buffer>, cx: &mut App) -> Option<ServerProblem> {
+        if !self.project.read(cx).is_local() {
+            return None;
+        }
+        let lsp_store = self.project.read(cx).lsp_store();
+        let (server_ids, running) = lsp_store.update(cx, |lsp_store, cx| {
+            buffer.update(cx, |buffer, cx| {
+                let server_ids = lsp_store.language_servers_for_local_buffer(buffer, cx);
+                let running = server_ids
+                    .iter()
+                    .filter_map(|server_id| {
+                        let (_, server) =
+                            lsp_store.language_server_for_local_buffer(buffer, *server_id, cx)?;
+                        let supported = lsp_store
+                            .lsp_server_capabilities
+                            .get(server_id)
+                            .is_some_and(|capabilities| {
+                                match &capabilities.call_hierarchy_provider {
+                                    Some(lsp::CallHierarchyServerCapability::Simple(supported)) => {
+                                        *supported
+                                    }
+                                    Some(lsp::CallHierarchyServerCapability::Options(_)) => true,
+                                    None => false,
+                                }
+                            });
+                        Some((SharedString::from(server.name().0.to_string()), supported))
+                    })
+                    .collect::<Vec<_>>();
+                (server_ids, running)
+            })
+        });
+        let language = buffer
+            .read(cx)
+            .language()
+            .filter(|language| **language != *PLAIN_TEXT)
+            .cloned();
+        let Some(language) = language else {
+            let suggestion = extension_suggest::suggest_extension(buffer.read(cx).file()?.path())?;
+            let mut name = suggestion.extension_id.to_string();
+            if let Some(first) = name.get_mut(..1) {
+                first.make_ascii_uppercase();
+            }
+            return Some(ServerProblem::Missing {
+                language: name.into(),
+            });
+        };
+        let language_name = SharedString::from(language.name().to_string());
+        if running.iter().any(|(_, supported)| *supported) {
+            return None;
+        }
+        if let Some((server, _)) = running.into_iter().next() {
+            return Some(ServerProblem::Unsupported {
+                server,
+                language: language_name,
+            });
+        }
+        let adapters = self
+            .project
+            .read(cx)
+            .languages()
+            .lsp_adapters(&language.name());
+        let status = |status: ServerStatus| {
+            adapters
+                .iter()
+                .find(|adapter| self.server_statuses.get(&adapter.name) == Some(&status))
+                .map(|adapter| SharedString::from(adapter.name.0.to_string()))
+        };
+        if let Some(server) = status(ServerStatus::Failed) {
+            return Some(ServerProblem::Failed { server });
+        }
+        if let Some(server) = status(ServerStatus::Busy).or_else(|| {
+            (!server_ids.is_empty())
+                .then(|| adapters.first())
+                .flatten()
+                .map(|adapter| SharedString::from(adapter.name.0.to_string()))
+        }) {
+            return Some(ServerProblem::Starting {
+                server,
+                language: language_name,
+            });
+        }
+        (!adapters.is_empty()).then_some(ServerProblem::Missing {
+            language: language_name,
+        })
+    }
+
+    fn show_empty(&mut self, cx: &mut Context<Self>) {
         self.root_task = None;
         self.child_tasks.clear();
         self.selected = None;
-        self.content = Content::Message(message);
+        self.content = Content::Empty;
         cx.notify();
     }
 
@@ -272,9 +559,26 @@ impl CallHierarchyPanel {
             editor.buffer().read(cx).text_anchor_for_position(head, cx)
         });
         let Some((buffer, position)) = position else {
-            self.show_message(NO_FUNCTION, cx);
+            self.show_empty(cx);
             return;
         };
+        self.trace(buffer, position, window, cx);
+    }
+
+    /// Traces the function at `position`, or, while its language server isn't ready, waits for it.
+    fn trace(
+        &mut self,
+        buffer: Entity<Buffer>,
+        position: language::Anchor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.server_problem_for(&buffer, cx).is_some() {
+            self.show_empty(cx);
+            self.pending_trace = Some((buffer.downgrade(), position));
+            return;
+        }
+        self.pending_trace = None;
         let prepare = self.project.update(cx, |project, cx| {
             project.prepare_call_hierarchy(&buffer, position, cx)
         });
@@ -289,17 +593,82 @@ impl CallHierarchyPanel {
                 }
             };
             let Some(item) = item else {
-                this.update(cx, |this, cx| {
-                    let supported = supports_call_hierarchy(&this.project, &buffer, cx);
-                    this.show_message(if supported { NO_FUNCTION } else { UNSUPPORTED }, cx);
-                })
-                .ok();
+                this.update(cx, |this, cx| this.show_empty(cx)).ok();
                 return;
             };
             let root = call_hierarchy::call_for_item(item, &project, cx).await;
             this.update_in(cx, |this, window, cx| this.show_root(root, window, cx))
                 .ok();
         }));
+    }
+
+    fn trace_start_point(
+        &mut self,
+        start_point: StartPoint,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let open = self
+            .project
+            .update(cx, |project, cx| project.open_buffer(start_point.path, cx));
+        self.start_loading_root(cx);
+        self.root_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let buffer = match open.await {
+                Ok(buffer) => buffer,
+                Err(error) => {
+                    log::error!("failed to open {}: {error:#}", start_point.name);
+                    this.update(cx, |this, cx| this.show_empty(cx)).ok();
+                    return;
+                }
+            };
+            this.update_in(cx, |this, window, cx| {
+                let snapshot = buffer.read(cx).snapshot();
+                let start = language::Unclipped(start_point.position).to_point(&snapshot);
+                let position =
+                    snapshot.anchor_after(name_position(&snapshot, start, &start_point.name));
+                this.trace(buffer, position, window, cx)
+            })
+            .ok();
+        }));
+    }
+
+    fn load_start_points(&mut self, cx: &mut Context<Self>) {
+        if self.start_points.is_some() || self.start_points_task.is_some() {
+            return;
+        }
+        let symbols = self
+            .project
+            .update(cx, |project, cx| project.symbols("", cx));
+        self.start_points_task = Some(cx.spawn(async move |this, cx| {
+            let symbols = symbols.await.log_err().unwrap_or_default();
+            this.update(cx, |this, cx| {
+                this.start_points = Some(start_points(&this.project, symbols, cx));
+                this.start_points_task = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn remember(&mut self, item: &CallHierarchyItem, tag: Option<Tag>, cx: &App) {
+        let Some(file) = item.buffer.read(cx).file() else {
+            return;
+        };
+        let snapshot = item.buffer.read(cx).snapshot();
+        let start_point = StartPoint {
+            name: item.name.clone().into(),
+            tag,
+            path: ProjectPath {
+                worktree_id: file.worktree_id(cx),
+                path: file.path().clone(),
+            },
+            file_name: file.file_name(cx).to_string().into(),
+            position: item.selection_range.start.to_point_utf16(&snapshot),
+        };
+        self.recent
+            .retain(|recent| recent.name != start_point.name || recent.path != start_point.path);
+        self.recent.insert(0, start_point);
+        self.recent.truncate(5);
     }
 
     pub fn set_root(
@@ -332,7 +701,9 @@ impl CallHierarchyPanel {
         self.child_tasks.clear();
         self.selected = None;
         self.root_header = self.root_header(&root, cx);
-        self.content = Content::Tree(vec![Node::new(root, None, 0, false, cx)]);
+        let root = Node::new(root, None, 0, false, cx);
+        self.remember(&root.call.item, root.tag, cx);
+        self.content = Content::Tree(vec![root]);
         self.expand(0, window, cx);
     }
 
@@ -409,7 +780,7 @@ impl CallHierarchyPanel {
     fn nodes(&self) -> &[Node] {
         match &self.content {
             Content::Tree(nodes) => nodes,
-            Content::Message(_) | Content::LoadingRoot => &[],
+            Content::Empty | Content::LoadingRoot => &[],
         }
     }
 
@@ -1243,6 +1614,184 @@ impl CallHierarchyPanel {
             .into_any_element()
     }
 
+    fn render_server_problem(&self, problem: &ServerProblem, cx: &mut Context<Self>) -> AnyElement {
+        let (icon, color) = match problem {
+            ServerProblem::Starting { .. } => (IconName::Info, Color::Muted),
+            _ => (IconName::Warning, Color::Warning),
+        };
+        v_flex()
+            .debug_selector(|| "call-trail-server-problem".into())
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .px_6()
+            .gap_1()
+            .child(Icon::new(icon).color(color))
+            .child(
+                Label::new(problem.title())
+                    .weight(FontWeight::SEMIBOLD)
+                    .mt_1(),
+            )
+            .child(
+                div().text_center().child(
+                    Label::new(problem.body())
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                ),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "call-trail-set-up-server".into())
+                    .mt_2()
+                    .child(
+                        Button::new("call-trail-set-up-server", "Set up language server")
+                            .style(ButtonStyle::Outlined)
+                            .label_size(LabelSize::Small)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.focus_handle.dispatch_action(
+                                    &photon_navigation::ShowLanguageServerHelp,
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_start(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let mut editor_context = KeyContext::default();
+        editor_context.add("Editor");
+        let key_binding = window
+            .highest_precedence_binding_for_action_in_context(
+                &call_hierarchy::ShowIncomingCalls,
+                editor_context,
+            )
+            .map(|binding| {
+                KeyBinding::from_keystrokes(
+                    binding.keystrokes().into(),
+                    KeyBinding::is_vim_mode(cx),
+                )
+                .size(rems_from_px(12_f32))
+            });
+        let start_points = self.start_points.as_deref().unwrap_or_default();
+        let has_rows = !self.recent.is_empty() || !start_points.is_empty();
+        let hint = |text: &'static str| Label::new(text).size(LabelSize::Small).color(Color::Muted);
+        let how = h_flex()
+            .flex_wrap()
+            .justify_center()
+            .gap_1()
+            .map(|this| match key_binding {
+                Some(key_binding) => this
+                    .child(hint("Put the cursor on a function and press"))
+                    .child(key_binding)
+                    .when(has_rows, |this| this.child(hint("or pick one below."))),
+                None if has_rows => {
+                    this.child(hint("Put the cursor on a function, or pick one below."))
+                }
+                None => this.child(hint("Put the cursor on a function.")),
+            });
+        v_flex()
+            .debug_selector(|| "call-trail-start".into())
+            .id("call-trail-start")
+            .flex_1()
+            .overflow_y_scroll()
+            .child(
+                v_flex()
+                    .items_center()
+                    .px_4()
+                    .pt_8()
+                    .pb_4()
+                    .gap_1()
+                    .child(trail_picture(cx))
+                    .child(
+                        Label::new("Who calls this, and what does it call?")
+                            .weight(FontWeight::SEMIBOLD)
+                            .mt_3(),
+                    )
+                    .child(how),
+            )
+            .children(self.render_start_points(
+                "Recent",
+                "this project",
+                "call-trail-recent",
+                &self.recent,
+                cx,
+            ))
+            .children(self.render_start_points(
+                "Start points",
+                "found in this project",
+                "call-trail-start-point",
+                start_points,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn render_start_points(
+        &self,
+        title: &'static str,
+        source: &'static str,
+        id: &'static str,
+        start_points: &[StartPoint],
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if start_points.is_empty() {
+            return None;
+        }
+        let header = h_flex()
+            .px_2()
+            .pt_3()
+            .pb_1()
+            .justify_between()
+            .child(Label::new(title).size(LabelSize::Small).color(Color::Muted))
+            .child(
+                Label::new(source)
+                    .size(LabelSize::XSmall)
+                    .color(Color::Disabled),
+            );
+        let rows = start_points.iter().enumerate().map(|(ix, start_point)| {
+            let selector = format!("{id}-{}", start_point.name);
+            let clicked = start_point.clone();
+            div().debug_selector(move || selector.clone()).child(
+                ListItem::new((id, ix))
+                    .height(row_height())
+                    .start_slot(glyph(start_point.tag, cx))
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(
+                                Label::new(start_point.name.clone())
+                                    .size(LabelSize::Small)
+                                    .single_line(),
+                            )
+                            .children(
+                                start_point
+                                    .tag
+                                    .map(|tag| chip(tag.label(), tag.color(), cx)),
+                            ),
+                    )
+                    .end_slot(
+                        Label::new(start_point.file_name.clone())
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.trace_start_point(clicked.clone(), window, cx)
+                    })),
+            )
+        });
+        Some(
+            v_flex()
+                .px_1()
+                .child(header)
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
     fn render_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let rows = self.rows(cx);
         self.rows = rows.clone();
@@ -1308,11 +1857,11 @@ impl Render for CallHierarchyPanel {
         let mut key_context = KeyContext::new_with_defaults(cx.platform_info().os);
         key_context.add("CallHierarchyPanel");
         key_context.add("menu");
-        let message = match &self.content {
-            Content::Message(message) => Some(*message),
-            Content::LoadingRoot => Some("Loading…"),
-            Content::Tree(_) => None,
-        };
+        let message = matches!(self.content, Content::LoadingRoot).then_some("Loading…");
+        let empty = matches!(self.content, Content::Empty).then(|| match &self.server_problem {
+            Some(problem) => self.render_server_problem(problem, cx),
+            None => self.render_start(window, cx),
+        });
         let header = self
             .nodes()
             .first()
@@ -1340,6 +1889,7 @@ impl Render for CallHierarchyPanel {
                     .py_1()
                     .child(Label::new(message).color(Color::Muted))
             }))
+            .children(empty)
             .children(header)
             .when(has_tree, |this| this.child(self.render_breadcrumb(cx)))
             .children(body)
@@ -1404,7 +1954,9 @@ impl Panel for CallHierarchyPanel {
     }
 
     fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.active = active;
         if active {
+            self.load_start_points(cx);
             // Closing dropped the root's fetch, if it was still loading.
             if self
                 .nodes()
@@ -1416,8 +1968,9 @@ impl Panel for CallHierarchyPanel {
             return;
         }
         self.root_task = None;
+        self.start_points_task = None;
         if matches!(self.content, Content::LoadingRoot) {
-            self.content = Content::Message(NO_FUNCTION);
+            self.content = Content::Empty;
         }
         let pending = std::mem::take(&mut self.child_tasks);
         if let Content::Tree(nodes) = &mut self.content {
@@ -1455,6 +2008,55 @@ fn glyph(tag: Option<Tag>, cx: &App) -> AnyElement {
             None => this.child(Label::new("ƒ").size(LabelSize::XSmall).color(color)),
         })
         .into_any_element()
+}
+
+/// Two callers joining at a function that goes on to call more: what a trail looks like.
+fn trail_picture(cx: &App) -> impl IntoElement {
+    let colors = cx.theme().colors();
+    let border = colors.border;
+    let function = |name: &'static str, color: Color| {
+        div()
+            .h(px(20.))
+            .px_2()
+            .flex()
+            .items_center()
+            .rounded_sm()
+            .border_1()
+            .border_color(if color == Color::Accent {
+                color.color(cx)
+            } else {
+                border
+            })
+            .bg(colors.editor_background)
+            .child(
+                Label::new(name)
+                    .size(LabelSize::XSmall)
+                    .buffer_font(cx)
+                    .color(color),
+            )
+    };
+    h_flex()
+        .child(
+            v_flex()
+                .items_end()
+                .gap(px(10.))
+                .child(function("handler", Color::Muted))
+                .child(function("test", Color::Muted)),
+        )
+        // The bracket's top and bottom edges meet the two callers' middles.
+        .child(
+            div()
+                .w_3()
+                .h(px(31.))
+                .border_y_1()
+                .border_r_1()
+                .rounded_r_md()
+                .border_color(border),
+        )
+        .child(div().w_3().h(px(1.)).bg(border))
+        .child(function("charge()", Color::Accent))
+        .child(div().w_4().h(px(1.)).bg(border))
+        .child(Label::new("…").size(LabelSize::XSmall).color(Color::Muted))
 }
 
 fn chip(label: impl Into<SharedString>, color: Color, cx: &App) -> Chip {
@@ -1523,7 +2125,17 @@ fn signature(snapshot: &language::BufferSnapshot, row: u32) -> String {
 fn tag_for(item: &CallHierarchyItem, cx: &App) -> Option<Tag> {
     let snapshot = item.buffer.read(cx).snapshot();
     let start = item.range.start.to_point(&snapshot).row;
-    let name_row = item.selection_range.start.to_point(&snapshot).row;
+    let name = item.selection_range.start.to_point(&snapshot);
+    tag_at(&snapshot, &item.name, start, name)
+}
+
+fn tag_at(
+    snapshot: &language::BufferSnapshot,
+    name: &str,
+    start: u32,
+    name_position: language::Point,
+) -> Option<Tag> {
+    let name_row = name_position.row;
     let line = |row: u32| {
         snapshot
             .text_for_range(
@@ -1551,13 +2163,13 @@ fn tag_for(item: &CallHierarchyItem, cx: &App) -> Option<Tag> {
         }
     }
     let in_test_module = snapshot
-        .symbols_containing(item.selection_range.start, None)
+        .symbols_containing(name_position, None)
         .iter()
         .any(|symbol| symbol.text == "mod tests" || symbol.text == "mod test");
     detect_tag(
-        &item.name,
+        name,
         &attributes,
-        &signature(&snapshot, name_row),
+        &signature(snapshot, name_row),
         in_test_module,
     )
 }
@@ -1617,31 +2229,85 @@ fn same_item(left: &CallHierarchyItem, right: &CallHierarchyItem) -> bool {
         && left.name == right.name
 }
 
-/// Remote projects check capabilities on the host, so they count as supported.
-fn supports_call_hierarchy(
-    project: &Entity<Project>,
-    buffer: &Entity<Buffer>,
-    cx: &mut App,
-) -> bool {
-    if !project.read(cx).is_local() {
-        return true;
+fn active_buffer(workspace: &Workspace, cx: &App) -> Option<WeakEntity<Buffer>> {
+    let editor = workspace.active_item_as::<Editor>(cx)?;
+    let buffer = editor.read(cx).buffer().read(cx).as_singleton()?;
+    Some(buffer.downgrade())
+}
+
+/// Where `name` is written, on the line of `start` or one of the next few: workspace symbols
+/// start at the declaration, which may begin with attributes.
+fn name_position(
+    snapshot: &language::BufferSnapshot,
+    start: language::Point,
+    name: &str,
+) -> language::Point {
+    let last_row = (start.row + 5).min(snapshot.max_point().row);
+    for row in start.row..=last_row {
+        let line_start = if row == start.row {
+            start
+        } else {
+            language::Point::new(row, 0)
+        };
+        let line = snapshot
+            .text_for_range(line_start..language::Point::new(row, snapshot.line_len(row)))
+            .collect::<String>();
+        if let Some(column) = line.find(name) {
+            return language::Point::new(row, line_start.column + column as u32);
+        }
     }
-    let lsp_store = project.read(cx).lsp_store();
-    lsp_store.update(cx, |lsp_store, cx| {
-        let server_ids = buffer.update(cx, |buffer, cx| {
-            lsp_store.language_servers_for_local_buffer(buffer, cx)
+    start
+}
+
+/// Up to five entry points, HTTP handlers and tests among the project's function symbols. Symbols
+/// in open files are tagged like trail rows; the rest only by name, to avoid opening files.
+fn start_points(project: &Entity<Project>, symbols: Vec<Symbol>, cx: &App) -> Vec<StartPoint> {
+    let mut start_points = Vec::new();
+    for symbol in symbols {
+        if !matches!(
+            language::symbol_kind_to_lsp(symbol.kind),
+            lsp::SymbolKind::FUNCTION | lsp::SymbolKind::METHOD
+        ) {
+            continue;
+        }
+        let SymbolLocation::InProject(path) = symbol.path else {
+            continue;
+        };
+        let position = symbol.range.start.0;
+        let tag = match project.read(cx).get_open_buffer(&path, cx) {
+            Some(buffer) => {
+                let snapshot = buffer.read(cx).snapshot();
+                let start = language::Unclipped(position).to_point(&snapshot);
+                let name = name_position(&snapshot, start, &symbol.name);
+                tag_at(&snapshot, &symbol.name, start.row, name)
+            }
+            None => detect_tag(&symbol.name, &[], "", false),
+        };
+        let Some(tag) = tag else {
+            continue;
+        };
+        let name = SharedString::from(symbol.name);
+        if start_points
+            .iter()
+            .any(|start_point: &StartPoint| start_point.name == name && start_point.path == path)
+        {
+            continue;
+        }
+        start_points.push(StartPoint {
+            name,
+            tag: Some(tag),
+            file_name: path.path.file_name().unwrap_or_default().to_string().into(),
+            path,
+            position,
         });
-        server_ids.iter().any(|server_id| {
-            lsp_store
-                .lsp_server_capabilities
-                .get(server_id)
-                .is_some_and(|capabilities| match &capabilities.call_hierarchy_provider {
-                    Some(lsp::CallHierarchyServerCapability::Simple(supported)) => *supported,
-                    Some(lsp::CallHierarchyServerCapability::Options(_)) => true,
-                    None => false,
-                })
-        })
-    })
+    }
+    start_points.sort_by_key(|start_point| match start_point.tag {
+        Some(Tag::EntryPoint) => 0,
+        Some(Tag::HttpHandler) => 1,
+        _ => 2,
+    });
+    start_points.truncate(5);
+    start_points
 }
 
 #[cfg(test)]
@@ -1751,6 +2417,15 @@ mod tests {
     }
 
     async fn setup<'a>(call_hierarchy_support: bool, cx: &'a mut TestAppContext) -> Setup<'a> {
+        setup_with(call_hierarchy_support, None, cx).await
+    }
+
+    /// With `initialized`, the language server stays starting until it receives.
+    async fn setup_with<'a>(
+        call_hierarchy_support: bool,
+        initialized: Option<futures::channel::oneshot::Receiver<()>>,
+        cx: &'a mut TestAppContext,
+    ) -> Setup<'a> {
         cx.update(|cx| {
             let _state = AppState::test(cx);
             editor::init(cx);
@@ -1758,8 +2433,11 @@ mod tests {
             init(cx);
         });
         let fs = FakeFs::new(cx.executor());
-        fs.insert_tree(path!("/test"), json!({"src": {"main.rs": SOURCE}}))
-            .await;
+        fs.insert_tree(
+            path!("/test"),
+            json!({"src": {"main.rs": SOURCE, "App.java": "class App {}\n"}}),
+        )
+        .await;
         let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
         project.read_with(cx, |project, _| {
             project.languages().add(Arc::new(Language::new(
@@ -1774,15 +2452,40 @@ mod tests {
                 Some(tree_sitter_rust::LANGUAGE.into()),
             )))
         });
+        let capabilities = lsp::ServerCapabilities {
+            call_hierarchy_provider: call_hierarchy_support
+                .then_some(lsp::CallHierarchyServerCapability::Simple(true)),
+            workspace_symbol_provider: Some(lsp::OneOf::Left(true)),
+            ..lsp::ServerCapabilities::default()
+        };
+        let initializer = initialized.map(|initialized| {
+            let initialized = Arc::new(Mutex::new(Some(initialized)));
+            let capabilities = capabilities.clone();
+            Box::new(move |server: &mut lsp::FakeLanguageServer| {
+                let initialized = initialized.clone();
+                let capabilities = capabilities.clone();
+                server.set_request_handler::<lsp::request::Initialize, _, _>(move |_, _| {
+                    let initialized = initialized.lock().unwrap().take();
+                    let capabilities = capabilities.clone();
+                    async move {
+                        if let Some(initialized) = initialized {
+                            initialized.await.ok();
+                        }
+                        Ok(lsp::InitializeResult {
+                            capabilities,
+                            ..lsp::InitializeResult::default()
+                        })
+                    }
+                });
+            }) as Box<dyn Fn(&mut lsp::FakeLanguageServer) + Send + Sync>
+        });
         let mut fake_servers = project.read_with(cx, |project, _| {
             project.languages().register_fake_lsp(
                 "Rust",
                 FakeLspAdapter {
-                    capabilities: lsp::ServerCapabilities {
-                        call_hierarchy_provider: call_hierarchy_support
-                            .then_some(lsp::CallHierarchyServerCapability::Simple(true)),
-                        ..lsp::ServerCapabilities::default()
-                    },
+                    name: "rust-analyzer",
+                    capabilities,
+                    initializer,
                     ..FakeLspAdapter::default()
                 },
             )
@@ -1812,8 +2515,7 @@ mod tests {
             .downcast::<Editor>()
             .unwrap();
         let panel = workspace.update_in(cx, |workspace, window, cx| {
-            let weak_workspace = cx.entity().downgrade();
-            let panel = cx.new(|cx| CallHierarchyPanel::new(weak_workspace, project.clone(), cx));
+            let panel = cx.new(|cx| CallHierarchyPanel::new(workspace, window, cx));
             workspace.add_panel(panel.clone(), window, cx);
             panel
         });
@@ -1849,6 +2551,30 @@ mod tests {
                     .unwrap()
                     .push(format!("callers of {}", params.item.name));
                 async move { Ok(Some(incoming(&params.item.name, &uri))) }
+            }
+        });
+        fake_server.set_request_handler::<lsp::request::WorkspaceSymbolRequest, _, _>({
+            let uri = uri.clone();
+            move |_, _| {
+                // other_works's declaration starts at its `#[test]` attribute.
+                let symbols = [("main", 0), ("helper", 1), ("leaf", 2), ("other_works", 4)]
+                    .into_iter()
+                    .map(|(name, line)| {
+                        #[allow(deprecated)]
+                        lsp::SymbolInformation {
+                            name: name.to_string(),
+                            kind: lsp::SymbolKind::FUNCTION,
+                            tags: None,
+                            deprecated: None,
+                            location: lsp::Location {
+                                uri: uri.clone(),
+                                range: site(line, 0),
+                            },
+                            container_name: None,
+                        }
+                    })
+                    .collect();
+                async move { Ok(Some(lsp::WorkspaceSymbolResponse::Flat(symbols))) }
             }
         });
         fake_server.set_request_handler::<lsp::request::CallHierarchyOutgoingCalls, _, _>({
@@ -1941,12 +2667,59 @@ mod tests {
             })
         }
 
-        fn message(&mut self) -> Option<&'static str> {
+        fn is_empty(&mut self) -> bool {
             self.panel
-                .read_with(self.cx, |panel, _| match panel.content {
-                    Content::Message(message) => Some(message),
-                    _ => None,
+                .read_with(self.cx, |panel, _| matches!(panel.content, Content::Empty))
+        }
+
+        /// The message the empty panel shows instead of where to start, if any.
+        fn problem(&mut self) -> Option<(String, String)> {
+            self.panel.read_with(self.cx, |panel, _| {
+                panel
+                    .server_problem
+                    .as_ref()
+                    .map(|problem| (problem.title(), problem.body()))
+            })
+        }
+
+        fn open_panel(&mut self) {
+            self.workspace.update_in(self.cx, |workspace, window, cx| {
+                workspace.open_panel::<CallHierarchyPanel>(window, cx)
+            });
+            self.cx.run_until_parked();
+        }
+
+        fn open_file(&mut self, path: &'static str) {
+            let worktree_id = self.workspace.update(self.cx, |workspace, cx| {
+                workspace.project().update(cx, |project, cx| {
+                    project.worktrees(cx).next().unwrap().read(cx).id()
                 })
+            });
+            self.workspace
+                .update_in(self.cx, |workspace, window, cx| {
+                    workspace.open_path((worktree_id, rel_path(path)), None, true, window, cx)
+                })
+                .detach();
+            self.cx.run_until_parked();
+        }
+
+        /// Recent functions, then start points, as `name [tag]`.
+        fn start_rows(&mut self) -> (Vec<String>, Vec<String>) {
+            self.panel.read_with(self.cx, |panel, _| {
+                let names = |start_points: &[StartPoint]| {
+                    start_points
+                        .iter()
+                        .map(|start_point| match start_point.tag {
+                            Some(tag) => format!("{} [{}]", start_point.name, tag.label()),
+                            None => start_point.name.to_string(),
+                        })
+                        .collect()
+                };
+                (
+                    names(&panel.recent),
+                    names(panel.start_points.as_deref().unwrap_or_default()),
+                )
+            })
         }
 
         /// The visible rows, two spaces of indent per level; call-site lines show their line
@@ -2094,7 +2867,7 @@ mod tests {
     #[gpui::test]
     async fn show_in_panel_roots_the_tree_and_lists_callers(cx: &mut TestAppContext) {
         let mut setup = setup(true, cx).await;
-        assert_eq!(setup.message(), Some(NO_FUNCTION));
+        assert!(setup.is_empty());
 
         setup.show_in_panel(1);
         assert_eq!(setup.root().as_deref(), Some("helper"));
@@ -2599,15 +3372,151 @@ mod tests {
     async fn explains_when_there_is_nothing_to_show(cx: &mut TestAppContext) {
         let mut setup = setup(true, cx).await;
         setup.show_in_panel(4);
-        assert_eq!(setup.message(), Some(NO_FUNCTION));
+        assert!(setup.is_empty());
+        assert_eq!(setup.problem(), None);
         assert_eq!(setup.root(), None);
+        assert!(setup.cx.debug_bounds("call-trail-start").is_some());
+    }
+
+    #[gpui::test]
+    async fn empty_panel_offers_recent_functions_and_start_points(cx: &mut TestAppContext) {
+        let mut setup = setup(true, cx).await;
+        setup.open_panel();
+        assert!(setup.cx.debug_bounds("call-trail-start").is_some());
+        assert_eq!(
+            setup.start_rows(),
+            (
+                Vec::new(),
+                vec![
+                    "main [entry point]".to_string(),
+                    "other_works [test]".to_string()
+                ]
+            )
+        );
+
+        setup.show_in_panel(1);
+        setup.show_in_panel(2);
+        setup.show_in_panel(4);
+        assert!(setup.is_empty());
+        assert_eq!(setup.start_rows().0, ["leaf", "helper"]);
+
+        setup.click("call-trail-start-point-other_works");
+        assert_eq!(setup.root().as_deref(), Some("other_works"));
+        assert_eq!(
+            setup.start_rows().0,
+            ["other_works [test]", "leaf", "helper"]
+        );
+
+        setup.show_in_panel(4);
+        setup.click("call-trail-recent-helper");
+        assert_eq!(setup.root().as_deref(), Some("helper"));
+        assert_eq!(setup.tree(), ["main ×2 [entry point]", "helper ↻"]);
+        assert_eq!(
+            setup.start_rows().0,
+            ["helper", "other_works [test]", "leaf"]
+        );
+    }
+
+    #[gpui::test]
+    async fn waits_for_a_starting_server_then_traces_the_function(cx: &mut TestAppContext) {
+        let (initialized_tx, initialized_rx) = futures::channel::oneshot::channel();
+        let mut setup = setup_with(true, Some(initialized_rx), cx).await;
+        setup.open_panel();
+        assert_eq!(
+            setup.problem(),
+            Some((
+                "No call trails for Rust yet".to_string(),
+                "rust-analyzer is starting… This panel fills in as soon as it's ready.".to_string()
+            ))
+        );
+
+        setup.show_in_panel(1);
+        assert_eq!(setup.root(), None);
+        assert!(setup.cx.debug_bounds("call-trail-server-problem").is_some());
+        assert!(setup.cx.debug_bounds("call-trail-set-up-server").is_some());
+
+        initialized_tx.send(()).unwrap();
+        setup.cx.run_until_parked();
+        assert_eq!(setup.problem(), None);
+        assert_eq!(setup.root().as_deref(), Some("helper"));
+        assert_eq!(setup.tree(), ["main ×2 [entry point]", "helper ↻"]);
+    }
+
+    #[gpui::test]
+    async fn explains_a_server_that_failed_to_start(cx: &mut TestAppContext) {
+        let (_initialized_tx, initialized_rx) = futures::channel::oneshot::channel();
+        let mut setup = setup_with(true, Some(initialized_rx), cx).await;
+        setup.open_panel();
+        setup.workspace.read_with(setup.cx, |workspace, cx| {
+            workspace
+                .project()
+                .read(cx)
+                .languages()
+                .update_lsp_binary_status(
+                    LanguageServerName::new_static("rust-analyzer"),
+                    language::BinaryStatus::Failed {
+                        error: "could not start".to_string(),
+                    },
+                )
+        });
+        setup.cx.run_until_parked();
+        assert_eq!(
+            setup.problem(),
+            Some((
+                "rust-analyzer failed to start".to_string(),
+                "Call trails need it running.".to_string()
+            ))
+        );
+        assert!(setup.cx.debug_bounds("call-trail-set-up-server").is_some());
+    }
+
+    #[gpui::test]
+    async fn explains_a_language_without_a_server(cx: &mut TestAppContext) {
+        let mut setup = setup(true, cx).await;
+        setup.open_panel();
+        assert_eq!(setup.problem(), None);
+        setup.open_file("src/App.java");
+        assert_eq!(
+            setup.problem(),
+            Some((
+                "No language server for Java".to_string(),
+                "Call trails need one to find callers.".to_string()
+            ))
+        );
+        assert!(setup.cx.debug_bounds("call-trail-set-up-server").is_some());
     }
 
     #[gpui::test]
     async fn explains_an_unsupported_language_server(cx: &mut TestAppContext) {
         let mut setup = setup(false, cx).await;
+        setup.open_panel();
+        let unsupported = Some((
+            "No call trails for Rust".to_string(),
+            "rust-analyzer can't find a function's callers and calls.".to_string(),
+        ));
+        assert_eq!(setup.problem(), unsupported);
+        assert!(setup.cx.debug_bounds("call-trail-server-problem").is_some());
+
         setup.show_in_panel(1);
-        assert_eq!(setup.message(), Some(UNSUPPORTED));
+        assert_eq!(setup.problem(), unsupported);
+        assert_eq!(setup.root(), None);
+    }
+
+    #[gpui::test]
+    async fn set_up_language_server_opens_the_setup_help(cx: &mut TestAppContext) {
+        let mut setup = setup(false, cx).await;
+        let shown = Rc::new(std::cell::Cell::new(0));
+        setup.workspace.update(setup.cx, |workspace, _| {
+            let shown = shown.clone();
+            workspace.register_action(
+                move |_, _: &photon_navigation::ShowLanguageServerHelp, _, _| {
+                    shown.set(shown.get() + 1)
+                },
+            );
+        });
+        setup.open_panel();
+        setup.click("call-trail-set-up-server");
+        assert_eq!(shown.get(), 1);
     }
 
     #[test]
