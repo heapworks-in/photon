@@ -1214,6 +1214,8 @@ pub struct Editor {
     pub change_list: ChangeList,
     inline_value_cache: InlineValueCache,
     number_deleted_lines: bool,
+    // photon: see `GutterColumns`.
+    gutter_columns: Option<Arc<dyn GutterColumns>>,
 
     selection_drag_state: SelectionDragState,
     colors: Option<LspColorData>,
@@ -1285,6 +1287,8 @@ pub struct EditorSnapshot {
     sticky_line_number_digits: usize,
     show_line_numbers: Option<bool>,
     number_deleted_lines: bool,
+    // photon: see `GutterColumns`.
+    gutter_columns: Option<Arc<dyn GutterColumns>>,
     show_git_diff_gutter: Option<bool>,
     show_code_actions: Option<bool>,
     show_runnables: Option<bool>,
@@ -1313,6 +1317,22 @@ pub struct NavigationOverlayLabel {
     pub text_color: Hsla,
     pub x_offset: Pixels,
     pub scale_factor: f32,
+}
+
+// photon: lets an embedder draw its own columns at the start of the gutter (the PR review's
+// old and new line numbers), without the editor knowing what they show.
+pub trait GutterColumns: Send + Sync {
+    fn width(&self, buffer: &MultiBufferSnapshot, ch_advance: Pixels, cx: &App) -> Pixels;
+    /// One element for the visible rows, `line_height` tall per row, starting at the first one.
+    fn render(
+        &self,
+        rows: &[RowInfo],
+        buffer: &MultiBufferSnapshot,
+        text_style: &TextStyle,
+        line_height: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement;
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -2619,6 +2639,7 @@ impl Editor {
             accent_data: None,
             bracket_fetched_tree_sitter_chunks: HashMap::default(),
             number_deleted_lines: false,
+            gutter_columns: None, // photon: see `GutterColumns`.
             refresh_matching_bracket_highlights_task: Task::ready(()),
             refresh_document_symbols_task: Task::ready(()).shared(),
             lsp_document_links: LspDocumentLinks::new(cx),
@@ -3189,6 +3210,7 @@ impl Editor {
                 .map_or(0, |hold| hold.min_line_number_digits),
             show_line_numbers: self.show_line_numbers,
             number_deleted_lines: self.number_deleted_lines,
+            gutter_columns: self.gutter_columns.clone(), // photon: see `GutterColumns`.
             show_git_diff_gutter: self.show_git_diff_gutter,
             semantic_tokens_enabled: self.semantic_token_state.enabled(),
             show_code_actions: self.show_code_actions,
@@ -12501,7 +12523,11 @@ impl EditorSnapshot {
             GutterDimensions {
                 left_padding,
                 right_padding,
-                width: line_gutter_width + left_padding + right_padding,
+                width: line_gutter_width + left_padding + right_padding
+                    // photon: room for an embedder's `GutterColumns`.
+                    + self.gutter_columns.as_ref().map_or(Pixels::ZERO, |columns| {
+                        columns.width(self.buffer_snapshot(), ch_advance, cx)
+                    }),
                 margin: GutterDimensions::default_gutter_margin(font_id, font_size, cx),
                 git_blame_entries_width,
             }
