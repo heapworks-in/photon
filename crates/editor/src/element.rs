@@ -9091,6 +9091,25 @@ impl Element for EditorElement {
                         cx,
                     );
 
+                    // photon: an embedder's `GutterColumns`, after the gutter's left padding.
+                    let gutter_columns = snapshot.gutter_columns.clone().map(|columns| {
+                        let mut element = columns.render(
+                            &row_infos,
+                            snapshot.buffer_snapshot(),
+                            &self.style.text,
+                            line_height,
+                            window,
+                            cx,
+                        );
+                        let scroll_top = scroll_position.y * ScrollPixelOffset::from(line_height);
+                        let first_row_offset =
+                            Pixels::from(scroll_top % ScrollPixelOffset::from(line_height));
+                        let origin = gutter_hitbox.origin
+                            + point(gutter_dimensions.left_padding, -first_row_offset);
+                        element.prepaint_as_root(origin, AvailableSpace::min_size(), window, cx);
+                        element
+                    });
+
                     let mut expand_toggles =
                         window.with_element_namespace("expand_toggles", |window| {
                             self.layout_expand_toggles(
@@ -10057,6 +10076,7 @@ impl Element for EditorElement {
                         document_colors,
                         line_elements,
                         line_numbers,
+                        gutter_columns, // photon: see `GutterColumns`.
                         blamed_display_rows,
                         inline_diagnostics,
                         point_diagnostic_underline_offset,
@@ -10157,6 +10177,10 @@ impl Element for EditorElement {
                         if layout.gutter_hitbox.size.width > Pixels::ZERO {
                             self.paint_blamed_display_rows(layout, window, cx);
                             self.paint_line_numbers(layout, window, cx);
+                            // photon: see `GutterColumns`.
+                            if let Some(gutter_columns) = layout.gutter_columns.as_mut() {
+                                gutter_columns.paint(window, cx);
+                            }
                         }
 
                         self.paint_text(layout, window, cx);
@@ -10273,6 +10297,7 @@ pub struct EditorLayout {
     highlighted_rows: BTreeMap<DisplayRow, LineHighlight>,
     line_elements: SmallVec<[AnyElement; 1]>,
     line_numbers: Arc<HashMap<MultiBufferRow, LineNumberLayout>>,
+    gutter_columns: Option<AnyElement>, // photon: see `GutterColumns`.
     display_hunks: Vec<(DisplayDiffHunk, Option<Hitbox>)>,
     blamed_display_rows: Option<Vec<AnyElement>>,
     inline_diagnostics: HashMap<DisplayRow, AnyElement>,

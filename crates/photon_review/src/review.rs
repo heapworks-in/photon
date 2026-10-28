@@ -1811,6 +1811,9 @@ impl ReviewItem {
         let editor = cx.new(|cx| {
             let mut editor =
                 Editor::for_multibuffer(multibuffer.clone(), Some(project.clone()), window, cx);
+            editor.set_show_line_numbers(false, cx);
+            editor.set_show_git_diff_gutter(false, cx);
+            editor.set_gutter_columns(Some(Arc::new(crate::DiffLineNumbers)), cx);
             // Commenting with the mouse: select lines, then right-click.
             editor.set_custom_context_menu(|editor, _, window, cx| {
                 let focus = editor.focus_handle(cx);

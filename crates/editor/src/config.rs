@@ -195,6 +195,16 @@ impl Editor {
         cx.notify();
     }
 
+    // photon: see `GutterColumns`.
+    pub fn set_gutter_columns(
+        &mut self,
+        columns: Option<std::sync::Arc<dyn crate::GutterColumns>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.gutter_columns = columns;
+        cx.notify();
+    }
+
     pub fn set_show_git_diff_gutter(&mut self, show_git_diff_gutter: bool, cx: &mut Context<Self>) {
         self.show_git_diff_gutter = Some(show_git_diff_gutter);
         cx.notify();
