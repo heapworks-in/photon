@@ -181,32 +181,20 @@ async fn scan(environment: &HashMap<String, String, impl BuildHasher>) -> JavaSc
         }
     };
     let home = util::paths::home_dir();
-    let mut homes = Vec::new();
-    homes.extend(
-        children(Path::new("/opt/homebrew/opt"))
-            .into_iter()
-            .filter(|dir| {
-                dir.file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with("openjdk"))
-            })
-            .map(|dir| dir.join("libexec/openjdk.jdk/Contents/Home")),
-    );
+    // Homebrew's `opt` links come first: they survive `brew upgrade`, the Cellar folders they
+    // point at don't.
+    let mut homes: Vec<PathBuf> = children(Path::new("/opt/homebrew/opt"))
+        .into_iter()
+        .filter(|dir| {
+            dir.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("openjdk"))
+        })
+        .map(|dir| dir.join("libexec/openjdk.jdk/Contents/Home"))
+        .collect();
+    homes.extend(listing.iter().map(|install| install.home.clone()));
     homes.extend(children(&home.join(".sdkman/candidates/java")));
     homes.extend(children(&home.join(".jenv/versions")));
-
-    let mut installs = Vec::new();
-    for home in listing
-        .iter()
-        .map(|install| install.home.clone())
-        .chain(homes)
-    {
-        let Ok(home) = std::fs::canonicalize(&home) else {
-            continue;
-        };
-        if let Some(major) = release_version(&home) {
-            installs.push(JavaInstall { major, home });
-        }
-    }
+    let installs = installs_at(homes);
 
     let path = environment.get("PATH").cloned().unwrap_or_default();
     let on_path = |name: &str| {
@@ -248,6 +236,25 @@ fn children(dir: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(dir)
         .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
         .unwrap_or_default()
+}
+
+/// The Java installs among `homes`, each once. The first path seen for an install is the one kept,
+/// so a stable link wins over the versioned folder it resolves to.
+fn installs_at(homes: impl IntoIterator<Item = PathBuf>) -> Vec<JavaInstall> {
+    let mut seen = HashSet::new();
+    let mut installs = Vec::new();
+    for home in homes {
+        let Ok(resolved) = std::fs::canonicalize(&home) else {
+            continue;
+        };
+        if !seen.insert(resolved.clone()) {
+            continue;
+        }
+        if let Some(major) = release_version(&resolved) {
+            installs.push(JavaInstall { major, home });
+        }
+    }
+    installs
 }
 
 fn release_version(home: &Path) -> Option<u32> {
@@ -673,6 +680,23 @@ impl PickerDelegate for JavaPickerDelegate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_homebrew_link_is_kept_over_its_versioned_folder() {
+        let root = std::env::temp_dir().join(format!("photon-java-{}", std::process::id()));
+        let cellar = root.join("Cellar/openjdk/27.0.1/Home");
+        std::fs::create_dir_all(&cellar).expect("cellar");
+        std::fs::write(cellar.join("release"), "JAVA_VERSION=\"27.0.1\"\n").expect("release");
+        let link = root.join("opt-openjdk");
+        std::os::unix::fs::symlink(&cellar, &link).expect("link");
+
+        let installs = installs_at([link.clone(), cellar, root.join("missing")]);
+        std::fs::remove_dir_all(&root).expect("clean up");
+
+        assert_eq!(installs.len(), 1);
+        assert_eq!(installs[0].home, link);
+        assert_eq!(installs[0].major, 27);
+    }
 
     fn install(major: u32, home: &str) -> JavaInstall {
         JavaInstall {
