@@ -15524,6 +15524,18 @@ mod tests {
             });
 
             click("photon-revert-turn", &mut cx);
+            assert!(cx.has_pending_prompt(), "reverting asks first");
+            cx.simulate_prompt_answer("Cancel");
+            cx.run_until_parked();
+            assert_eq!(
+                fs.load(Path::new("/project/main.rs"))
+                    .await
+                    .expect("main.rs is there"),
+                "new\n"
+            );
+            click("photon-revert-turn", &mut cx);
+            cx.simulate_prompt_answer("Revert");
+            cx.run_until_parked();
             assert_eq!(
                 fs.load(Path::new("/project/main.rs"))
                     .await

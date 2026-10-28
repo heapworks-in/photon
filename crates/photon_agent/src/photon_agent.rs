@@ -11,7 +11,7 @@ use agent_client_protocol::schema::v2 as acp_v2;
 use db::kvp::KeyValueStore;
 use file_icons::FileIcons;
 use git_ui_core::file_diff_view::{FileDiffView, build_buffer_diff};
-use gpui::{AnyElement, App, Entity, Global, Task, WeakEntity};
+use gpui::{AnyElement, App, Entity, Global, PromptLevel, Task, WeakEntity};
 use project::Project;
 use project::git_store::{
     GitStore, GitStoreCheckpoint, LocalRepositoryState, Repository, RepositoryState,
@@ -349,14 +349,34 @@ pub fn render_turn_review(
                             .label_size(LabelSize::XSmall)
                             .color(Color::Muted)
                             .tooltip(Tooltip::text(
-                                "Puts every file back the way it was before this turn.",
+                                "Put every file back the way it was before this turn",
                             ))
                             .on_click(move |_, window, cx| {
-                                git_store
-                                    .update(cx, |git_store, cx| {
-                                        git_store.restore_checkpoint(before.clone(), cx)
+                                let answer = window.prompt(
+                                    PromptLevel::Warning,
+                                    "Revert this turn?",
+                                    Some(
+                                        "Every file goes back to how it was before this turn, \
+                                         including edits made since.",
+                                    ),
+                                    &["Revert", "Cancel"],
+                                    cx,
+                                );
+                                let git_store = git_store.clone();
+                                let before = before.clone();
+                                let workspace = workspace.clone();
+                                window
+                                    .spawn(cx, async move |cx| {
+                                        if answer.await != Ok(0) {
+                                            return anyhow::Ok(());
+                                        }
+                                        git_store
+                                            .update(cx, |git_store, cx| {
+                                                git_store.restore_checkpoint(before, cx)
+                                            })
+                                            .await
                                     })
-                                    .detach_and_notify_err(workspace.clone(), window, cx);
+                                    .detach_and_notify_err(workspace, window, cx);
                             }),
                     ),
                 )
