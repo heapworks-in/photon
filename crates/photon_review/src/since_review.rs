@@ -37,7 +37,7 @@ impl SinceReviewPlan {
     }
 }
 
-fn is_commit_id(reviewed: &str) -> bool {
+pub(crate) fn is_commit_id(reviewed: &str) -> bool {
     matches!(reviewed.len(), 40 | 64) && reviewed.chars().all(|c| c.is_ascii_hexdigit())
 }
 

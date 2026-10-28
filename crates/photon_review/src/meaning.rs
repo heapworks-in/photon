@@ -1,7 +1,9 @@
+use std::collections::HashSet;
 use std::ops::Range;
 
 use buffer_diff::BufferDiffSnapshot;
 use language::{BufferSnapshot, Point};
+use similar::{Algorithm, DiffOp, capture_diff_slices};
 
 use crate::{ChangedFunction, FunctionChange, Move};
 
@@ -23,6 +25,15 @@ pub enum Chip {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SinceViewed {
+    /// The file wasn't viewed at an older head, or that head's text isn't available.
+    NotViewed,
+    /// Rows of the hunk that changed after the viewed head.
+    New(Vec<u32>),
+    Reviewed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HunkMeaning {
     pub path: String,
     /// Head rows, as `changed_rows` gives them: a deletion is the one row at the deletion point.
@@ -34,6 +45,7 @@ pub struct HunkMeaning {
     pub chips: Vec<Chip>,
     /// The innermost changed function the hunk starts in, as an index into the review's functions.
     pub function: Option<usize>,
+    pub since_viewed: SinceViewed,
 }
 
 impl HunkMeaning {
@@ -306,9 +318,46 @@ pub fn classify_file(
                 base_rows,
                 chips,
                 function,
+                since_viewed: SinceViewed::NotViewed,
             }
         })
         .collect()
+}
+
+/// Head rows that differ from the text the user viewed: inserted or changed rows, and the row
+/// where something was deleted.
+pub fn rows_changed_since(viewed: &str, head: &str) -> HashSet<u32> {
+    let viewed: Vec<&str> = viewed.lines().collect();
+    let head: Vec<&str> = head.lines().collect();
+    let mut rows = HashSet::new();
+    for op in capture_diff_slices(Algorithm::Myers, &viewed, &head) {
+        match op {
+            DiffOp::Equal { .. } => {}
+            DiffOp::Delete { new_index, .. } => {
+                rows.insert(new_index as u32);
+            }
+            DiffOp::Insert { .. } | DiffOp::Replace { .. } => {
+                rows.extend(op.new_range().map(|row| row as u32));
+            }
+        }
+    }
+    rows
+}
+
+/// Marks each hunk new or reviewed against the rows changed since the viewed head.
+pub fn mark_since_viewed(hunks: &mut [HunkMeaning], changed: &HashSet<u32>) {
+    for hunk in hunks {
+        let new: Vec<u32> = hunk
+            .rows
+            .clone()
+            .filter(|row| changed.contains(row))
+            .collect();
+        hunk.since_viewed = if new.is_empty() {
+            SinceViewed::Reviewed
+        } else {
+            SinceViewed::New(new)
+        };
+    }
 }
 
 #[cfg(test)]
@@ -323,6 +372,7 @@ mod tests {
             base_rows: 0..1,
             chips,
             function: None,
+            since_viewed: SinceViewed::NotViewed,
         }
     }
 
@@ -345,5 +395,14 @@ mod tests {
             Some("3 hunks: 1 behaviour change, 1 rename, 1 moved")
         );
         assert_eq!(file_summary(&[]), None);
+    }
+
+    #[test]
+    fn rows_changed_since_viewing() {
+        let viewed = "a\nb\nc\nd\n";
+        let head = "a\nB\nc\nnew\nd\n";
+        let mut rows: Vec<u32> = rows_changed_since(viewed, head).into_iter().collect();
+        rows.sort();
+        assert_eq!(rows, [1, 3]);
     }
 }
