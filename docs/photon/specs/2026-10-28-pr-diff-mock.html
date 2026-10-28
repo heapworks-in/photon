@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Photon diff: what the change means</title>
+<style>
+  :root { --bg:#050505; --panel:#0d0d0d; --raised:#141414; --line:#1e1e1e; --txt:#ffffff; --muted:#a0a0a0; --dim:#5c5c5c; --accent:#19aad8;
+    --kw:#bb9af7; --fn:#7aa2f7; --str:#9ece6a; --ty:#2ac3de; --num:#ff9e64; --add:#9ece6a; --del:#f7768e; --warn:#e0af68; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:#161616; color:#dcdcdc; font:13px/1.45 -apple-system, "Helvetica Neue", sans-serif; padding:24px; }
+  h1 { font-size:18px; margin:0 0 4px; } .intro { color:#9a9a9a; margin:0 0 18px; max-width:110ch; }
+  .v { background:var(--bg); border:1px solid #2a2a2a; border-radius:10px; overflow:hidden; margin-bottom:18px; }
+  .v h2 { font-size:13px; font-weight:600; margin:0; padding:9px 14px; border-bottom:1px solid var(--line); background:#101010; color:#e4e4e4; }
+  .v h2 small { color:#7a7a7a; font-weight:400; margin-left:8px; }
+  .file { display:flex; gap:8px; align-items:center; padding:7px 14px; border-bottom:1px solid var(--line); font:12.5px -apple-system, "Helvetica Neue", sans-serif; color:var(--txt); }
+  .file .p { color:var(--muted); } .file .st { margin-left:auto; font:12px "SF Mono", Menlo, monospace; } .g { color:var(--add); } .r { color:var(--del); }
+  .file .sum { color:var(--muted); font-size:12px; }
+  .code { font:12.5px/1.75 "SF Mono", Menlo, monospace; padding:4px 0 10px; }
+  .l { display:flex; white-space:pre; color:var(--txt); position:relative; }
+  .n, .n2 { width:38px; text-align:right; padding-right:10px; color:var(--dim); flex:none; }
+  .tm { width:16px; flex:none; text-align:center; font-size:11px; }
+  .m { width:16px; flex:none; text-align:center; color:var(--dim); }
+  .t { padding-left:4px; }
+  .k { color:var(--kw); } .f { color:var(--fn); } .ty { color:var(--ty); } .nm { color:var(--num); }
+  .add { background:#9ece6a14; } .add .n, .add .n2 { background:#9ece6a22; color:#b8dc95; } .add .m { color:var(--add); }
+  .del { background:#f7768e14; } .del .n, .del .n2 { background:#f7768e22; color:#f2a3b1; } .del .m { color:var(--del); }
+  .wa { background:#9ece6a45; border-radius:2px; } .wd { background:#f7768e48; border-radius:2px; }
+  .hunk { display:flex; align-items:center; gap:8px; padding:5px 14px 5px 98px; background:#0a0a0a; border-top:1px solid var(--line); border-bottom:1px solid var(--line); font:12px -apple-system, "Helvetica Neue", sans-serif; color:var(--muted); }
+  .hunk .where { font:11.5px "SF Mono", Menlo, monospace; color:var(--dim); }
+  .chip { font:11px -apple-system, "Helvetica Neue", sans-serif; padding:1px 8px; border-radius:10px; white-space:nowrap; border:1px solid transparent; }
+  .c-beh { color:var(--warn); background:#e0af681c; border-color:#e0af6833; }
+  .c-sig { color:var(--del); background:#f7768e18; border-color:#f7768e33; }
+  .c-ren { color:var(--muted); background:#ffffff0d; border-color:#ffffff1a; }
+  .c-mov { color:var(--muted); background:#ffffff0d; border-color:#ffffff1a; }
+  .c-new { color:var(--accent); background:#19aad81c; border-color:#19aad840; }
+  .c-test { color:var(--add); background:#9ece6a18; border-color:#9ece6a33; }
+  .hunk .act { margin-left:auto; color:var(--accent); font-size:11.5px; }
+  .seen { opacity:.42; }
+  .fresh { box-shadow: inset 3px 0 0 var(--accent); }
+  .tok { color:var(--add); } .tno { color:var(--warn); }
+  .folded { display:flex; align-items:center; gap:10px; padding:5px 14px 5px 98px; color:var(--muted); font:12px -apple-system, "Helvetica Neue", sans-serif; background:#080808; }
+  .folded code { font:12px "SF Mono", Menlo, monospace; color:var(--txt); }
+  .legend { display:grid; grid-template-columns:repeat(5,1fr); gap:12px; } .legend div { background:#111; border:1px solid #262626; border-radius:9px; padding:12px 14px; color:#9a9a9a; font-size:12.5px; } .legend b { color:#e4e4e4; display:block; margin-bottom:4px; }
+  .num { display:inline-grid; place-items:center; width:18px; height:18px; border-radius:50%; background:var(--accent); color:#04141b; font:700 11px -apple-system; margin-right:6px; }
+</style></head><body>
+<h1>Photon's diff: what the change means, not just what moved</h1>
+<p class="intro">GitHub-style lines (old | new numbers, + and −, changed words) plus five things only Photon shows, numbered below. Second review of PR #214, after the author pushed one more commit.</p>
+
+<div class="v">
+<h2>Photon diff<small>second review · 1 commit since you viewed</small></h2>
+<div class="file">retry.rs <span class="p">src/</span><span class="sum">· 3 hunks: 1 behaviour change, 1 rename, 1 moved</span><span class="st"><span class="g">+9</span> <span class="r">−7</span></span></div>
+
+<div class="hunk"><span class="num">1</span><span class="chip c-sig">signature changed</span><span class="chip c-beh">behaviour change</span><span class="chip c-new">new since you viewed</span><span class="where">fn delay · line 25</span><span class="act">2 callers not updated ›</span></div>
+<div class="code">
+<div class="l"><span class="tm"></span><span class="n">24</span><span class="n2">24</span><span class="m"> </span><span class="t"><span class="k">impl</span> Backoff {</span></div>
+<div class="l del fresh"><span class="tm"></span><span class="n">25</span><span class="n2"></span><span class="m">−</span><span class="t">    <span class="k">pub fn</span> <span class="f">delay</span>(&amp;self, attempt: <span class="ty"><span class="wd">u32</span></span>) -&gt; <span class="ty">Duration</span> {</span></div>
+<div class="l add fresh"><span class="tm"></span><span class="n"></span><span class="n2">25</span><span class="m">+</span><span class="t">    <span class="k">pub fn</span> <span class="f">delay</span>(&amp;self, attempt: <span class="ty"><span class="wa">u8</span></span>) -&gt; <span class="ty">Duration</span> {</span></div>
+<div class="l del fresh"><span class="tm"></span><span class="n">26</span><span class="n2"></span><span class="m">−</span><span class="t">        <span class="k">let</span> capped = self.initial * <span class="wd">attempt</span>;</span></div>
+<div class="l add fresh"><span class="tm tok" title="covered by retries_gateway_timeouts">✓</span><span class="n"></span><span class="n2">26</span><span class="m">+</span><span class="t">        <span class="k">let</span> capped = self.initial * <span class="wa"><span class="nm">2</span>.pow(attempt)</span>;</span></div>
+<div class="l add fresh"><span class="tm tno" title="no changed test reaches this line">○</span><span class="n"></span><span class="n2">27</span><span class="m">+</span><span class="t">        <span class="k">if</span> capped &gt; self.max { <span class="k">return</span> self.max; }</span></div>
+<div class="l"><span class="tm"></span><span class="n">27</span><span class="n2">28</span><span class="m"> </span><span class="t">        capped</span></div>
+</div>
+
+<div class="hunk"><span class="num">2</span><span class="chip c-ren">rename only</span><span class="where">fn retry_with_backoff · line 41</span><span class="act">show lines</span></div>
+<div class="folded"><span class="num" style="visibility:hidden">2</span><code>max_attempts</code> → <code>attempts</code> in 4 places · nothing else changed</div>
+
+<div class="hunk seen"><span class="num">3</span><span class="chip c-mov">moved</span><span class="chip c-test">tests cover it</span><span class="where">fn is_retryable · from line 120 to 58</span><span class="act">reviewed ✓</span></div>
+<div class="code seen">
+<div class="l add"><span class="tm tok">✓</span><span class="n"></span><span class="n2">58</span><span class="m">+</span><span class="t"><span class="k">fn</span> <span class="f">is_retryable</span>(error: &amp;<span class="ty">ChargeError</span>) -&gt; <span class="ty">bool</span> {</span></div>
+<div class="l add"><span class="tm tok">✓</span><span class="n"></span><span class="n2">59</span><span class="m">+</span><span class="t">    matches!(error, <span class="ty">ChargeError</span>::Timeout | <span class="ty">ChargeError</span>::Gateway5xx)</span></div>
+<div class="l add"><span class="tm"></span><span class="n"></span><span class="n2">60</span><span class="m">+</span><span class="t">}</span></div>
+</div>
+</div>
+
+<div class="legend">
+  <div><b><span class="num">1</span>Meaning chips</b>Every hunk says what it does: signature changed, behaviour change, rename only, moved, formatting only. From the syntax tree and the language server.</div>
+  <div><b>New since you viewed</b>Lines added after your last review get a cyan edge and chip; hunks you already reviewed fade, marked "reviewed ✓". A second review is just the bright parts.</div>
+  <div><b><span class="num">2</span>Renames collapsed</b>A pure rename becomes one line, "max_attempts → attempts in 4 places", instead of four red and green pairs. One click shows them.</div>
+  <div><b>Test marks</b>✓ on changed lines a changed test reaches, ○ on changed logic no test touches, from the test files in the PR and the call graph. Hover says which test.</div>
+  <div><b>Impact, inline</b>"2 callers not updated ›" sits on the signature change itself and opens the callers. Token-level highlights show exactly what changed: <code>u32 → u8</code>.</div>
+</div>
+</body></html>

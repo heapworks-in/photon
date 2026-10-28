@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Diff lines in PR review</title>
+<style>
+  :root { --bg:#050505; --panel:#0d0d0d; --line:#1e1e1e; --txt:#ffffff; --muted:#a0a0a0; --dim:#5c5c5c;
+    --kw:#bb9af7; --fn:#7aa2f7; --str:#9ece6a; --ty:#2ac3de; --num:#ff9e64; --cm:#565f89; --add:#9ece6a; --del:#f7768e; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:#161616; color:#dcdcdc; font:13px/1.45 -apple-system, "Helvetica Neue", sans-serif; padding:24px; }
+  h1 { font-size:18px; margin:0 0 4px; } .intro { color:#9a9a9a; margin:0 0 18px; max-width:100ch; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+  .v { background:var(--bg); border:1px solid #2a2a2a; border-radius:10px; overflow:hidden; }
+  .v h2 { font-size:13px; font-weight:600; margin:0; padding:9px 14px; border-bottom:1px solid var(--line); background:#101010; color:#e4e4e4; }
+  .v h2 small { color:#7a7a7a; font-weight:400; margin-left:8px; }
+  .file { display:flex; gap:8px; align-items:center; padding:7px 14px; border-bottom:1px solid var(--line); font:12.5px -apple-system, "Helvetica Neue", sans-serif; color:var(--txt); }
+  .file .p { color:var(--muted); } .file .st { margin-left:auto; font:12px "SF Mono", Menlo, monospace; } .g { color:var(--add); } .r { color:var(--del); }
+  .code { font:12.5px/1.75 "SF Mono", Menlo, monospace; padding:6px 0 10px; }
+  .l { display:flex; white-space:pre; color:var(--txt); }
+  .n { width:40px; text-align:right; padding-right:12px; color:var(--dim); flex:none; user-select:none; }
+  .n2 { width:40px; text-align:right; padding-right:12px; color:var(--dim); flex:none; }
+  .m { width:18px; flex:none; text-align:center; color:var(--dim); }
+  .t { padding-left:4px; }
+  .k { color:var(--kw); } .f { color:var(--fn); } .s { color:var(--str); } .ty { color:var(--ty); } .nm { color:var(--num); }
+  /* A: today */
+  .A .add { background:#9ece6a14; box-shadow:inset 2px 0 0 #9ece6a; } .A .add .n { color:#9ece6a; }
+  .A .del { background:#f7768e24; } .A .del .n { visibility:hidden; }
+  /* B: GitHub-style */
+  .B .add { background:#9ece6a17; } .B .add .n, .B .add .n2 { background:#9ece6a24; color:#b8dc95; } .B .add .m { color:var(--add); }
+  .B .del { background:#f7768e17; } .B .del .n, .B .del .n2 { background:#f7768e24; color:#f2a3b1; } .B .del .m { color:var(--del); }
+  .B .wa { background:#9ece6a40; border-radius:2px; } .B .wd { background:#f7768e45; border-radius:2px; }
+  /* C: one column, quiet */
+  .C .add { background:#9ece6a12; box-shadow:inset 3px 0 0 #9ece6a99; } .C .add .m { color:var(--add); }
+  .C .del { background:#f7768e12; box-shadow:inset 3px 0 0 #f7768e99; } .C .del .m { color:var(--del); } .C .del .t { color:#c9c9c9; }
+  .C .del .n { color:#6e4a52; }
+  .C .wa { background:#9ece6a3a; border-radius:2px; } .C .wd { background:#f7768e3d; border-radius:2px; text-decoration: line-through; text-decoration-color:#f7768e88; }
+  /* D: split */
+  .split { display:grid; grid-template-columns:1fr 1fr; } .split > div:first-child { border-right:1px solid var(--line); }
+  .D .add { background:#9ece6a17; } .D .add .n { color:#b8dc95; background:#9ece6a24; }
+  .D .del { background:#f7768e17; } .D .del .n { color:#f2a3b1; background:#f7768e24; }
+  .D .gap { background: repeating-linear-gradient(135deg, #0a0a0a 0 6px, #0d0d0d 6px 12px); }
+  .D .wa { background:#9ece6a40; border-radius:2px; } .D .wd { background:#f7768e45; border-radius:2px; }
+  .notes { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-top:18px; } .notes div { background:#111; border:1px solid #262626; border-radius:9px; padding:12px 14px; color:#9a9a9a; font-size:12.5px; } .notes b { color:#e4e4e4; display:block; margin-bottom:4px; }
+</style></head><body>
+<h1>Added and removed lines in the PR review</h1>
+<p class="intro">The same change four ways, in Photon Black. A is today. B, C and D add old and new line numbers, +/− markers, and highlight the exact words that changed inside a line.</p>
+<div class="grid">
+
+<div class="v A"><h2>A · Today<small>green numbers on added lines; removed lines have none</small></h2>
+<div class="file">retry.rs <span class="p">src/</span><span class="st"><span class="g">+3</span> <span class="r">−2</span></span></div>
+<div class="code">
+<div class="l"><span class="n">24</span><span class="t"><span class="k">impl</span> Backoff {</span></div>
+<div class="l"><span class="n">25</span><span class="t">    <span class="k">pub fn</span> <span class="f">delay</span>(&amp;self, attempt: <span class="ty">u32</span>) -&gt; <span class="ty">Duration</span> {</span></div>
+<div class="l del"><span class="n">26</span><span class="t">        <span class="k">let</span> capped = self.initial * attempt;</span></div>
+<div class="l del"><span class="n">27</span><span class="t">        capped.min(self.max)</span></div>
+<div class="l add"><span class="n">26</span><span class="t">        <span class="k">let</span> capped = self.initial.saturating_mul(<span class="nm">2</span>.pow(attempt)).min(self.max);</span></div>
+<div class="l add"><span class="n">27</span><span class="t">        <span class="k">let</span> jitter = rng.random_range(<span class="nm">0</span>..=capped.as_millis() / <span class="nm">4</span>);</span></div>
+<div class="l add"><span class="n">28</span><span class="t">        capped + Duration::from_millis(jitter)</span></div>
+<div class="l"><span class="n">29</span><span class="t">    }</span></div>
+</div></div>
+
+<div class="v B"><h2>B · GitHub-style<small>old | new numbers, tinted gutters, +/−, changed words</small></h2>
+<div class="file">retry.rs <span class="p">src/</span><span class="st"><span class="g">+3</span> <span class="r">−2</span></span></div>
+<div class="code">
+<div class="l"><span class="n">24</span><span class="n2">24</span><span class="m"> </span><span class="t"><span class="k">impl</span> Backoff {</span></div>
+<div class="l"><span class="n">25</span><span class="n2">25</span><span class="m"> </span><span class="t">    <span class="k">pub fn</span> <span class="f">delay</span>(&amp;self, attempt: <span class="ty">u32</span>) -&gt; <span class="ty">Duration</span> {</span></div>
+<div class="l del"><span class="n">26</span><span class="n2"></span><span class="m">−</span><span class="t">        <span class="k">let</span> capped = <span class="wd">self.initial * attempt</span>;</span></div>
+<div class="l del"><span class="n">27</span><span class="n2"></span><span class="m">−</span><span class="t">        <span class="wd">capped.min(self.max)</span></span></div>
+<div class="l add"><span class="n"></span><span class="n2">26</span><span class="m">+</span><span class="t">        <span class="k">let</span> capped = <span class="wa">self.initial.saturating_mul(<span class="nm">2</span>.pow(attempt)).min(self.max)</span>;</span></div>
+<div class="l add"><span class="n"></span><span class="n2">27</span><span class="m">+</span><span class="t">        <span class="k">let</span> jitter = rng.random_range(<span class="nm">0</span>..=capped.as_millis() / <span class="nm">4</span>);</span></div>
+<div class="l add"><span class="n"></span><span class="n2">28</span><span class="m">+</span><span class="t">        <span class="wa">capped + Duration::from_millis(jitter)</span></span></div>
+<div class="l"><span class="n">28</span><span class="n2">29</span><span class="m"> </span><span class="t">    }</span></div>
+</div></div>
+
+<div class="v C"><h2>C · One column, quiet<small>one number per line, old numbers muted on removed lines</small></h2>
+<div class="file">retry.rs <span class="p">src/</span><span class="st"><span class="g">+3</span> <span class="r">−2</span></span></div>
+<div class="code">
+<div class="l"><span class="n">24</span><span class="m"> </span><span class="t"><span class="k">impl</span> Backoff {</span></div>
+<div class="l"><span class="n">25</span><span class="m"> </span><span class="t">    <span class="k">pub fn</span> <span class="f">delay</span>(&amp;self, attempt: <span class="ty">u32</span>) -&gt; <span class="ty">Duration</span> {</span></div>
+<div class="l del"><span class="n">26</span><span class="m">−</span><span class="t">        <span class="k">let</span> capped = <span class="wd">self.initial * attempt</span>;</span></div>
+<div class="l del"><span class="n">27</span><span class="m">−</span><span class="t">        <span class="wd">capped.min(self.max)</span></span></div>
+<div class="l add"><span class="n">26</span><span class="m">+</span><span class="t">        <span class="k">let</span> capped = <span class="wa">self.initial.saturating_mul(<span class="nm">2</span>.pow(attempt)).min(self.max)</span>;</span></div>
+<div class="l add"><span class="n">27</span><span class="m">+</span><span class="t">        <span class="k">let</span> jitter = rng.random_range(<span class="nm">0</span>..=capped.as_millis() / <span class="nm">4</span>);</span></div>
+<div class="l add"><span class="n">28</span><span class="m">+</span><span class="t">        <span class="wa">capped + Duration::from_millis(jitter)</span></span></div>
+<div class="l"><span class="n">29</span><span class="m"> </span><span class="t">    }</span></div>
+</div></div>
+
+<div class="v D"><h2>D · Side by side<small>old on the left, new on the right, from the View menu</small></h2>
+<div class="file">retry.rs <span class="p">src/</span><span class="st"><span class="g">+3</span> <span class="r">−2</span></span></div>
+<div class="code split">
+<div>
+<div class="l"><span class="n">24</span><span class="t"><span class="k">impl</span> Backoff {</span></div>
+<div class="l"><span class="n">25</span><span class="t">    <span class="k">pub fn</span> <span class="f">delay</span>(…) {</span></div>
+<div class="l del"><span class="n">26</span><span class="t">    <span class="k">let</span> capped = <span class="wd">self.initial * attempt</span>;</span></div>
+<div class="l del"><span class="n">27</span><span class="t">    <span class="wd">capped.min(self.max)</span></span></div>
+<div class="l gap"><span class="n"></span><span class="t"> </span></div>
+<div class="l"><span class="n">28</span><span class="t">  }</span></div>
+</div>
+<div>
+<div class="l"><span class="n">24</span><span class="t"><span class="k">impl</span> Backoff {</span></div>
+<div class="l"><span class="n">25</span><span class="t">    <span class="k">pub fn</span> <span class="f">delay</span>(…) {</span></div>
+<div class="l add"><span class="n">26</span><span class="t">    <span class="k">let</span> capped = <span class="wa">…saturating_mul(<span class="nm">2</span>.pow(attempt))…</span>;</span></div>
+<div class="l add"><span class="n">27</span><span class="t">    <span class="k">let</span> jitter = rng.random_range(…);</span></div>
+<div class="l add"><span class="n">28</span><span class="t">    <span class="wa">capped + Duration::from_millis(jitter)</span></span></div>
+<div class="l"><span class="n">29</span><span class="t">  }</span></div>
+</div>
+</div></div>
+</div>
+
+<div class="notes">
+  <div><b>A · Today</b>Removed lines have no number, added numbers turn green, and nothing marks which words changed.</div>
+  <div><b>B · GitHub-style</b>Old and new numbers side by side, tinted number gutters, + and −, and the changed words brighter. Familiar from GitHub; uses 40 px more width.</div>
+  <div><b>C · One column, quiet</b>One number column (old number on removed lines), + and −, a thin edge, softer tints, changed words highlighted and struck through when removed.</div>
+  <div><b>D · Side by side</b>Old and new next to each other, aligned. Best for heavily rewritten code; offered as a View option next to B or C.</div>
+</div>
+</body></html>
