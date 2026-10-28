@@ -1484,6 +1484,14 @@
     },
   },
   {
+    // photon: in a plan comment box, cmd-enter saves the comment instead of moving to the next task.
+    "context": "PlanComposer > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-enter": "plan::SaveComment",
+    },
+  },
+  {
     // photon: start a draft comment on the selected lines of a pull request review.
     "context": "PhotonReview > Editor",
     "use_key_equivalents": true,

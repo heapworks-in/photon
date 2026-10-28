@@ -46,6 +46,8 @@ actions!(
         PreviousTask,
         /// Asks the agent about the selected task, in a new thread.
         AskAgent,
+        /// Saves the comment being written on the plan.
+        SaveComment,
     ]
 );
 
@@ -1967,6 +1969,10 @@ impl PlanReviewItem {
         );
         self.card(Color::Accent, content, cx)
             .debug_selector(|| "plan-composer".into())
+            .key_context("PlanComposer")
+            .on_action(
+                cx.listener(|this, _: &SaveComment, window, cx| this.save_composer(window, cx)),
+            )
             .on_action(
                 cx.listener(|this, _: &editor::actions::Cancel, window, cx| {
                     this.close_composer(window, cx)
@@ -2655,6 +2661,31 @@ mod tests {
         setup.hover("plan-paragraph-1");
         setup.click("plan-paragraph-add-1");
         assert!(setup.drawn("plan-composer"));
+    }
+
+    #[gpui::test]
+    async fn save_comment_keeps_the_task_and_saves_the_draft(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        let item = setup.open_review();
+        setup.select_task_three(&item);
+        let paragraph = item
+            .read_with(&setup.cx, |item, _| {
+                item.paragraph_containing("Replace the direct")
+            })
+            .expect("the paragraph");
+        setup.click(&format!("plan-paragraph-{paragraph}"));
+        setup.cx.simulate_keystrokes("c");
+        setup.cx.simulate_input("Why here?");
+        setup.cx.dispatch_action(SaveComment);
+        setup.cx.run_until_parked();
+        assert!(!setup.drawn("plan-composer"));
+        item.read_with(&setup.cx, |item, _| {
+            assert_eq!(item.selected(), 3);
+            assert_eq!(item.drafts().len(), 1);
+        });
+        let keymap = include_str!("../../../assets/keymaps/default-macos.json");
+        assert!(keymap.contains("\"context\": \"PlanComposer > Editor\""));
+        assert!(keymap.contains("\"cmd-enter\": \"plan::SaveComment\""));
     }
 
     #[gpui::test]
