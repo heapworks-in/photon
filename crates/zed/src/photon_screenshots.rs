@@ -136,7 +136,7 @@ mod mac {
                 .is_none_or(|only| only.split(',').any(|name| name == scene))
         };
         type Scene = fn(&mut Shooter) -> Result<()>;
-        let scenes: [(&str, Scene); 17] = [
+        let scenes: [(&str, Scene); 18] = [
             ("hero", |shooter| shooter.hero("hero", false)),
             ("hero-light", |shooter| shooter.hero("hero-light", true)),
             ("pr-review", Shooter::pr_review),
@@ -147,6 +147,7 @@ mod mac {
             ("plan-review", Shooter::plan_review),
             ("markdown", Shooter::markdown),
             ("call-hierarchy", Shooter::call_hierarchy),
+            ("call-trails-empty", Shooter::call_trails_empty),
             ("language-server-help", Shooter::language_server_help),
             ("agent", Shooter::agent),
             ("inbox", Shooter::inbox),
@@ -379,6 +380,32 @@ mod mac {
     }
 
     fn answer_call_hierarchy(server: &mut FakeLanguageServer, functions: &Arc<Vec<Function>>) {
+        server.set_request_handler::<lsp::request::WorkspaceSymbolRequest, _, _>({
+            let functions = functions.clone();
+            move |_, _| {
+                let symbols = functions
+                    .iter()
+                    .map(|function| {
+                        #[allow(deprecated)]
+                        lsp::SymbolInformation {
+                            name: function.name.to_string(),
+                            kind: lsp::SymbolKind::FUNCTION,
+                            tags: None,
+                            deprecated: None,
+                            location: lsp::Location {
+                                uri: function.uri.clone(),
+                                range: lsp::Range::new(
+                                    lsp::Position::new(function.start, 0),
+                                    lsp::Position::new(function.end, 0),
+                                ),
+                            },
+                            container_name: None,
+                        }
+                    })
+                    .collect();
+                async move { Ok(Some(lsp::WorkspaceSymbolResponse::Flat(symbols))) }
+            }
+        });
         server.set_request_handler::<lsp::request::CallHierarchyPrepare, _, _>({
             let functions = functions.clone();
             move |params, _| {
@@ -808,6 +835,7 @@ mod mac {
                                 call_hierarchy_provider: Some(
                                     lsp::CallHierarchyServerCapability::Simple(true),
                                 ),
+                                workspace_symbol_provider: Some(lsp::OneOf::Left(true)),
                                 ..lsp::ServerCapabilities::default()
                             },
                             initializer: Some(Box::new(move |server| {
@@ -2006,6 +2034,36 @@ mod mac {
                     )],
                 )],
             );
+            self.close(win);
+            result
+        }
+
+        /// Call Trails with nothing traced: where to start, after tracing two functions; then a
+        /// Java file, whose language server can't do call trails.
+        fn call_trails_empty(&mut self) -> Result<()> {
+            let win = self.scene_window()?;
+            // Start points are tagged from the text of open files.
+            for path in ["src/api.rs", "src/jobs.rs", "src/retry.rs"] {
+                self.open_file(&win, path)?;
+            }
+            self.add_panel(&win, photon_call_trails::CallHierarchyPanel::load)?;
+            let editor = self.open_file(&win, "src/api.rs")?;
+            self.place_cursor(&win, &editor, "fn charge_invoice")?;
+            self.dispatch(&win, photon_call_trails::ShowInPanel);
+            let editor = self.open_file(&win, "src/retry.rs")?;
+            self.place_cursor(&win, &editor, "fn retry_with_backoff")?;
+            self.dispatch(&win, photon_call_trails::ShowInPanel);
+            self.place_cursor(&win, &editor, "use ")?;
+            self.dispatch(&win, photon_call_trails::ShowInPanel);
+            let result = self.shoot_scene(&win, true, "call-trails-empty", "cu-call-start");
+            if result.is_ok() {
+                self.open_file(
+                    &win,
+                    "clients/java/src/main/java/dev/billing/client/BillingClient.java",
+                )?;
+                self.settle();
+                self.shoot_scene(&win, true, "call-trails-empty", "cu-call-no-server")?;
+            }
             self.close(win);
             result
         }
