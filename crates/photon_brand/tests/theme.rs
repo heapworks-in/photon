@@ -130,3 +130,36 @@ fn syntax_and_text_pass_aa() {
         }
     }
 }
+
+#[test]
+fn photon_black_chrome_is_neutral_grey_with_photons_accent() {
+    let style = &theme("Photon Black")["style"];
+    for name in [
+        "text",
+        "text.muted",
+        "text.placeholder",
+        "hint",
+        "ignored",
+        "hidden",
+        "predictive",
+        "unreachable",
+        "terminal.dim_foreground",
+    ] {
+        let color = hex(&style[name]);
+        let (red, green, blue) = (color >> 16, (color >> 8) & 0xff, color & 0xff);
+        assert!(
+            red == green && green == blue,
+            "{name} is #{color:06x}; Photon Black's chrome stays grey"
+        );
+    }
+    for name in [
+        "text.accent",
+        "icon.accent",
+        "border.focused",
+        "border.selected",
+        "pane.focused_border",
+        "panel.focused_border",
+    ] {
+        assert_eq!(hex(&style[name]), photon_brand::MAHA, "{name}");
+    }
+}
