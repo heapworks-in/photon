@@ -1564,7 +1564,7 @@ fn draft_renderer(
                             .color(Color::Error),
                     )
                     .child(
-                        crate::button("retry", "Retry")
+                        crate::button("retry", "Try again")
                             .style(ButtonStyle::Outlined)
                             .on_click(move |_, _, cx| {
                                 retry_item
@@ -3812,7 +3812,7 @@ impl ReviewItem {
             PromptLevel::Info,
             &message,
             detail.as_deref(),
-            &["Merge", "Cancel"],
+            &[method.label(), "Cancel"],
             cx,
         );
         let request = merge_request(
@@ -4421,9 +4421,9 @@ impl ReviewItem {
         }
         let answer = window.prompt(
             PromptLevel::Warning,
-            "Discard this draft?",
+            "Delete this draft?",
             None,
-            &["Discard", "Keep"],
+            &["Delete", "Cancel"],
             cx,
         );
         cx.spawn(async move |this, cx| {
@@ -7508,7 +7508,7 @@ impl ReviewItem {
                         )))
                         .pl_6()
                         .gap_1p5()
-                        .tooltip(Tooltip::text("Unchanged, pulled in by the call graph"))
+                        .tooltip(Tooltip::text("Unchanged code that calls or is called by this change"))
                         .child(
                             div()
                                 .size_1p5()
@@ -7787,7 +7787,7 @@ impl ReviewItem {
                     .py_1()
                     .gap_2()
                     .child(
-                        Label::new("no call information")
+                        Label::new("Callers unavailable")
                             .size(LabelSize::Small)
                             .color(Color::Warning),
                     )
@@ -10819,7 +10819,7 @@ fn verify_password(user: &str, password: &str) -> bool {
         });
         cx.run_until_parked();
         assert!(cx.has_pending_prompt());
-        cx.simulate_prompt_answer("Keep");
+        cx.simulate_prompt_answer("Cancel");
         cx.run_until_parked();
         item.read_with(&cx, |item, _| assert_eq!(item.drafts().len(), 1));
         assert_eq!(database.drafts(&key()).expect("drafts").len(), 1);
@@ -10828,7 +10828,7 @@ fn verify_password(user: &str, password: &str) -> bool {
             item.cancel_draft(typed, window, cx)
         });
         cx.run_until_parked();
-        cx.simulate_prompt_answer("Discard");
+        cx.simulate_prompt_answer("Delete");
         cx.run_until_parked();
         item.read_with(&cx, |item, _| {
             assert!(item.drafts().is_empty());
@@ -11272,7 +11272,7 @@ fn verify_password(user: &str, password: &str) -> bool {
         item.update_in(&mut cx, |item, window, cx| item.cancel_draft(0, window, cx));
         cx.run_until_parked();
         assert!(cx.has_pending_prompt());
-        cx.simulate_prompt_answer("Discard");
+        cx.simulate_prompt_answer("Delete");
         cx.run_until_parked();
         item.read_with(&cx, |item, _| {
             assert!(item.drafts().is_empty());
@@ -12602,7 +12602,7 @@ fn verify_password(user: &str, password: &str) -> bool {
 
         item.update_in(&mut cx, |item, window, cx| item.cancel_draft(1, window, cx));
         cx.run_until_parked();
-        cx.simulate_prompt_answer("Discard");
+        cx.simulate_prompt_answer("Delete");
         cx.run_until_parked();
         let stored = database.drafts(&key()).expect("drafts");
         assert_eq!(stored.len(), 1);
@@ -13510,7 +13510,7 @@ fn verify_password(user: &str, password: &str) -> bool {
         fake.respond(is_merge, Ok(MERGED.into()));
         fake.respond(is_detail, Ok(merged_detail()));
         click("photon-review-merge", &mut cx);
-        cx.simulate_prompt_answer("Merge");
+        cx.simulate_prompt_answer("Squash and merge");
         cx.run_until_parked();
         let merges: Vec<_> = fake.requests().into_iter().filter(is_merge).collect();
         assert_eq!(merges.len(), 1);
@@ -13533,8 +13533,8 @@ fn verify_password(user: &str, password: &str) -> bool {
         let fake = install_fake(&mut cx);
         click("photon-review-merge-methods", &mut cx);
         assert!(drawn("MENU_ITEM-Merge", &mut cx));
-        assert!(!drawn("MENU_ITEM-Squash and Merge", &mut cx));
-        assert!(!drawn("MENU_ITEM-Rebase and Merge", &mut cx));
+        assert!(!drawn("MENU_ITEM-Squash and merge", &mut cx));
+        assert!(!drawn("MENU_ITEM-Rebase and merge", &mut cx));
         fake.respond(is_merge, Ok(MERGED.into()));
         fake.respond(is_detail, Ok(merged_detail()));
         click("MENU_ITEM-Merge", &mut cx);
@@ -13558,7 +13558,7 @@ fn verify_password(user: &str, password: &str) -> bool {
             Ok(r#"{"data":null,"errors":[{"message":"Head branch was modified. Review and try the merge again."}]}"#.into()),
         );
         click("photon-review-merge", &mut cx);
-        cx.simulate_prompt_answer("Merge");
+        cx.simulate_prompt_answer("Squash and merge");
         cx.run_until_parked();
         assert!(drawn("photon-review-merge-error", &mut cx));
         item.read_with(&cx, |item, _| {

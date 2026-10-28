@@ -39,7 +39,7 @@ submitting a review or merging.
 ## Merge
 
 A split button in the header after the pill: the primary action is the repository's default
-method that's allowed ("Squash and Merge", "Merge", "Rebase and Merge"); the dropdown lists the
+method that's allowed ("Squash and merge", "Merge", "Rebase and merge"); the dropdown lists the
 other allowed methods. It shows only for open pull requests, and is disabled with a tooltip saying
 why for Draft and Conflicts. Other blocks (branch protection, failing checks) are left to GitHub:
 the merge is attempted and GitHub's reason is shown.
