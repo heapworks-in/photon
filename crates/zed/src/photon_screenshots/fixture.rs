@@ -335,11 +335,12 @@ pub async fn charge_invoice(
 
 fn charge_failed(error: ChargeError) -> (StatusCode, String) {
     match error {
-        ChargeError::Declined(reason) => (StatusCode::PAYMENT_REQUIRED, reason),
         ChargeError::Unavailable(_) => (
             StatusCode::BAD_GATEWAY,
             "payment gateway unavailable".into(),
         ),
+        // The gateway's own words, so support can match them to its dashboard.
+        ChargeError::Declined(reason) => (StatusCode::PAYMENT_REQUIRED, reason),
     }
 }
 
@@ -422,7 +423,6 @@ pub async fn charge_invoice(
 
 fn charge_failed(error: ChargeError) -> (StatusCode, String) {
     match error {
-        ChargeError::Declined(reason) => (StatusCode::PAYMENT_REQUIRED, reason),
         ChargeError::Unavailable(error) => {
             tracing::warn!(%error, "gateway unavailable after retries");
             (
@@ -430,6 +430,8 @@ fn charge_failed(error: ChargeError) -> (StatusCode, String) {
                 "payment gateway unavailable, try again shortly".into(),
             )
         }
+        // The gateway's own words, so support can match them to its dashboard.
+        ChargeError::Declined(message) => (StatusCode::PAYMENT_REQUIRED, message),
     }
 }
 
@@ -913,12 +915,20 @@ pub fn base_files() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// The pull request's first push, then its second.
-pub fn first_push() -> Vec<(&'static str, &'static str)> {
+/// The pull request's first push, then its second. The first renames a variable in `api.rs`,
+/// which the second push then changes elsewhere.
+pub fn first_push() -> Vec<(&'static str, String)> {
     vec![
-        ("src/main.rs", MAIN_RS),
-        ("src/payments.rs", PAYMENTS_RS_HEAD),
-        ("src/retry.rs", RETRY_RS_FIRST),
+        ("src/main.rs", MAIN_RS.to_string()),
+        ("src/payments.rs", PAYMENTS_RS_HEAD.to_string()),
+        ("src/retry.rs", RETRY_RS_FIRST.to_string()),
+        (
+            "src/api.rs",
+            API_RS_BASE.replace(
+                "Declined(reason) => (StatusCode::PAYMENT_REQUIRED, reason)",
+                "Declined(message) => (StatusCode::PAYMENT_REQUIRED, message)",
+            ),
+        ),
     ]
 }
 
@@ -943,6 +953,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("retry_failed_invoices", "src/jobs.rs"),
     ("main", "src/main.rs"),
     ("retries_gateway_timeouts", "src/jobs.rs"),
+    ("delays_double_up_to_the_cap", "src/retry.rs"),
 ];
 
 pub const CALLS: &[(&str, &str)] = &[
@@ -961,6 +972,7 @@ pub const CALLS: &[(&str, &str)] = &[
     ("charge", "is_retryable"),
     ("retry_with_backoff", "delay"),
     ("retries_gateway_timeouts", "charge"),
+    ("delays_double_up_to_the_cap", "delay"),
 ];
 
 /// An untracked file in the `git status` close-up.
