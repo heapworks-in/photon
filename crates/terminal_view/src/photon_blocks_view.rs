@@ -3,7 +3,7 @@ use std::ops::Range;
 use gpui::{
     App, Bounds, ClipboardItem, Context, Entity, Focusable as _, FontWeight, Hsla, KeyDownEvent,
     Pixels, Point, SharedString, Stateful, Task, TextRun, TextStyle, Window, actions, fill, point,
-    px, rgb, rgba, size,
+    px, size,
 };
 use photon_blocks::{
     Block, BlockId, BlockList, Phase, VisibleBlock, format_duration, visible_blocks,
@@ -39,11 +39,7 @@ actions!(
     ]
 );
 
-const SELECTED_EDGE: u32 = 0x19AAD8;
-const SELECTED_TINT: u32 = 0x19AAD814;
-const FAILED_EDGE: u32 = 0xFF8272;
-const SEPARATOR: u32 = 0x1a1a1a;
-const METADATA: u32 = 0x8E8E8E;
+const SELECTED_TINT_OPACITY: f32 = 0.08;
 const EDGE_WIDTH: Pixels = px(3.);
 const CHIP_BACKGROUND_OPACITY: f32 = 0.15;
 const CHIP_CORNER_RADIUS: Pixels = px(3.);
@@ -91,13 +87,13 @@ pub(crate) struct BlockChrome {
     /// Prompt rows after the first (multi-line commands), which the header replaces.
     hidden_rows: Range<i32>,
     starts_on_screen: bool,
-    edge: Option<Hsla>,
+    edge: Option<Color>,
     pub(crate) selected: bool,
     command: SharedString,
     metadata: SharedString,
     /// What a smart block turned out to be, painted after the metadata (Photon's prompt) or
     /// after the command.
-    pub(crate) summary: Option<(SharedString, Hsla)>,
+    pub(crate) summary: Option<(SharedString, Color)>,
 }
 
 pub(crate) fn layout_block_chrome(
@@ -135,9 +131,9 @@ pub(crate) fn layout_block_chrome(
             let is_selected = selected == Some(block.id);
             let failed = block.end_line.is_some() && block.exit_code != Some(0);
             let edge = if failed {
-                Some(rgb(FAILED_EDGE).into())
+                Some(Color::Error)
             } else if is_selected {
-                Some(rgb(SELECTED_EDGE).into())
+                Some(Color::Accent)
             } else {
                 None
             };
@@ -221,7 +217,13 @@ pub(crate) fn paint_block_chrome(
         }
         let block_bounds = row_bounds(&block.rows);
         if block.selected {
-            window.paint_quad(fill(block_bounds, rgba(SELECTED_TINT)));
+            window.paint_quad(fill(
+                block_bounds,
+                cx.theme()
+                    .colors()
+                    .text_accent
+                    .opacity(SELECTED_TINT_OPACITY),
+            ));
         }
         if let Some(edge) = block.edge {
             window.paint_quad(fill(
@@ -229,13 +231,13 @@ pub(crate) fn paint_block_chrome(
                     block_bounds.origin,
                     size(EDGE_WIDTH, block_bounds.size.height),
                 ),
-                edge,
+                edge.color(cx),
             ));
         }
         if block.starts_on_screen {
             window.paint_quad(fill(
                 Bounds::new(block_bounds.origin, size(full_width, px(1.))),
-                rgb(SEPARATOR),
+                cx.theme().colors().border_variant,
             ));
         }
 
@@ -271,7 +273,7 @@ pub(crate) fn paint_block_chrome(
                 &[TextRun {
                     len: block.metadata.len(),
                     font: text_style.font(),
-                    color: rgb(METADATA).into(),
+                    color: Color::Muted.color(cx),
                     ..Default::default()
                 }],
                 None,
@@ -322,7 +324,7 @@ pub(crate) fn paint_block_chrome(
 
 fn paint_summary_chip(
     summary: &SharedString,
-    color: Hsla,
+    color: Color,
     origin: Point<Pixels>,
     dimensions: &TerminalBounds,
     text_style: &TextStyle,
@@ -330,6 +332,7 @@ fn paint_summary_chip(
     window: &mut Window,
     cx: &mut App,
 ) {
+    let color = color.color(cx);
     let line_height = dimensions.line_height();
     let text = window.text_system().shape_line(
         summary.clone(),

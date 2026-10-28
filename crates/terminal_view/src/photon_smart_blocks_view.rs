@@ -1,7 +1,7 @@
 use editor::Editor;
 use gpui::{
-    Action, Anchor, AnyElement, ClipboardItem, Div, Entity, EntityId, Hsla, Pixels, Point,
-    SharedString, Stateful, actions, anchored, point, rgb,
+    Action, Anchor, AnyElement, ClipboardItem, Div, Entity, EntityId, Pixels, Point, SharedString,
+    Stateful, actions, anchored, point,
 };
 use photon_blocks::{
     Block, BlockId, FileState, Insight, RunDelta, SourceLocation, rerun_failed_command,
@@ -48,11 +48,6 @@ actions!(
         StopBlock,
     ]
 );
-
-const FAILURE: u32 = 0xFF8272;
-const SUCCESS: u32 = 0xB4FA72;
-const ACCENT: u32 = 0x19AAD8;
-const BUTTON_BORDER: u32 = 0x333333;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ToolbarButton {
@@ -140,18 +135,20 @@ fn row_buttons(states: impl Iterator<Item = FileState>) -> Vec<RowButton> {
 pub(crate) fn summary_chip(
     insight: Option<&Insight>,
     local_url: Option<&str>,
-) -> Option<(SharedString, Hsla)> {
+) -> Option<(SharedString, Color)> {
     let (text, color) = match insight {
         Some(Insight::Tests(run)) if run.failed > 0 => (
             format!("{} failed · {} passed", run.failed, run.passed),
-            FAILURE,
+            Color::Error,
         ),
-        Some(Insight::Tests(run)) => (format!("{} passed", run.passed), SUCCESS),
-        Some(Insight::Build { errors }) if errors.len() == 1 => ("1 error".to_string(), FAILURE),
-        Some(Insight::Build { errors }) => (format!("{} errors", errors.len()), FAILURE),
-        _ => (format!("● {}", url_label(local_url?)), ACCENT),
+        Some(Insight::Tests(run)) => (format!("{} passed", run.passed), Color::Success),
+        Some(Insight::Build { errors }) if errors.len() == 1 => {
+            ("1 error".to_string(), Color::Error)
+        }
+        Some(Insight::Build { errors }) => (format!("{} errors", errors.len()), Color::Error),
+        _ => (format!("● {}", url_label(local_url?)), Color::Accent),
     };
-    Some((text.into(), rgb(color).into()))
+    Some((text.into(), color))
 }
 
 pub(crate) fn toolbar_buttons(
@@ -205,7 +202,7 @@ fn running_url<'a>(block: &Block, smart_blocks: &'a SmartBlocks) -> Option<&'a s
 pub(crate) fn block_summary(
     block: &Block,
     smart_blocks: &SmartBlocks,
-) -> Option<(SharedString, Hsla)> {
+) -> Option<(SharedString, Color)> {
     summary_chip(
         smart_blocks.insight(block.id),
         running_url(block, smart_blocks),
@@ -662,7 +659,7 @@ impl TerminalView {
                                 )),
                                 button.label(),
                             )
-                            .style(ButtonStyle::OutlinedCustom(rgb(BUTTON_BORDER).into()))
+                            .style(ButtonStyle::Outlined)
                             .size(ButtonSize::Compact)
                             .label_size(LabelSize::Small)
                             .on_click(move |_, window, cx| {
@@ -792,7 +789,7 @@ impl TerminalView {
                                 SharedString::from(format!("smart-block-{button:?}")),
                                 button.label(local_url.as_deref()),
                             )
-                            .style(ButtonStyle::OutlinedCustom(rgb(BUTTON_BORDER).into()))
+                            .style(ButtonStyle::Outlined)
                             .size(ButtonSize::Compact)
                             .label_size(LabelSize::Small)
                             .on_click(move |_, window, cx| {
@@ -808,7 +805,6 @@ impl TerminalView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::rgb;
     use photon_blocks::{
         FileState, SourceLocation, StatusFile, Table, TestFailure, TestRun, TestTool,
     };
@@ -846,9 +842,7 @@ mod tests {
 
     #[test]
     fn summary_chip_texts() {
-        let red: Hsla = rgb(0xFF8272).into();
-        let green: Hsla = rgb(0xB4FA72).into();
-        let accent: Hsla = rgb(0x19AAD8).into();
+        let (red, green, accent) = (Color::Error, Color::Success, Color::Accent);
         let chip = |insight: Option<&Insight>, url| {
             summary_chip(insight, url).map(|(text, color)| (text.to_string(), color))
         };

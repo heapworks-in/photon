@@ -4047,7 +4047,7 @@ mod tests {
             summaries.last(),
             Some(&Some((
                 SharedString::from("2 failed · 41 passed"),
-                gpui::rgb(0xFF8272).into()
+                ui::Color::Error
             )))
         );
     }
