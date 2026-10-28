@@ -106,6 +106,7 @@ const SIMPLIFIED_LEFT_COMMENT_NOTE: &str =
     "Show whitespace and moved code to comment on removed lines";
 const VIEWED_DISABLED_TOOLTIP: &str = "Switch to the full diff to mark things viewed";
 const HUNK_CONTEXT_LINES: u32 = 3;
+const SAVING_TOOLTIP: &str = "Saving to GitHub…";
 const COMPOSER_MAX_LINES: u32 = 4;
 
 /// The lines a composer shows for `text`.
@@ -1884,6 +1885,9 @@ fn thread_renderer(
                                 )
                                 .style(ButtonStyle::Subtle)
                                 .disabled(state.resolve_pending)
+                                .when(state.resolve_pending, |button| {
+                                    button.tooltip(Tooltip::text(SAVING_TOOLTIP))
+                                })
                                 .on_click(move |_, _, cx| {
                                     resolve_item
                                         .update(cx, |item, cx| {
@@ -6811,9 +6815,10 @@ impl ReviewItem {
             _ => None,
         };
         let disabled = blocked.is_some() || self.merging;
+        let disabled_reason = blocked.or_else(|| self.merging.then(|| "Merging…".into()));
         let button = crate::button("photon-review-merge-button", primary.label())
             .disabled(disabled)
-            .when_some(blocked, |button, reason| {
+            .when_some(disabled_reason.clone(), |button, reason| {
                 button.tooltip(Tooltip::text(reason))
             })
             .on_click(cx.listener(move |this, _, window, cx| this.merge(primary, window, cx)));
@@ -6827,7 +6832,7 @@ impl ReviewItem {
                     IconButton::new("photon-review-merge-methods-trigger", IconName::ChevronDown)
                         .icon_size(IconSize::XSmall)
                         .disabled(disabled),
-                    Tooltip::text("Other ways to merge"),
+                    Tooltip::text(disabled_reason.unwrap_or_else(|| "Other ways to merge".into())),
                 )
                 .anchor(gpui::Anchor::TopRight)
                 .menu(move |window, cx| {
@@ -7026,7 +7031,8 @@ impl ReviewItem {
                     ))
                     .child(
                         Label::new(format!("Checklist · {}", progress.text()))
-                            .size(LabelSize::Small),
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
                     ),
             )
             .children(errors.into_iter().map(|error| {
@@ -7607,7 +7613,7 @@ impl ReviewItem {
                         format!("{count} comments not on a line of this diff")
                     })
                     .size(LabelSize::Small)
-                    .color(Color::Accent),
+                    .color(Color::Muted),
                 )
                 .children(threads.into_iter().enumerate().map(|(index, thread)| {
                     let item = cx.weak_entity();
@@ -7656,6 +7662,9 @@ impl ReviewItem {
                                 crate::button(("photon-review-unplaced-resolve", index), "Resolve")
                                     .style(ButtonStyle::Subtle)
                                     .disabled(pending)
+                                    .when(pending, |button| {
+                                        button.tooltip(Tooltip::text(SAVING_TOOLTIP))
+                                    })
                                     .on_click(move |_, _, cx| {
                                         item.update(cx, |item, cx| {
                                             item.set_thread_resolved(&thread_id, true, cx)
@@ -7692,7 +7701,7 @@ impl ReviewItem {
                         if count == 1 { "" } else { "s" }
                     ))
                     .size(LabelSize::Small)
-                    .color(Color::Warning),
+                    .color(Color::Muted),
                 )
                 .children(outdated.into_iter().map(|(draft, view)| {
                     let local_id = view.local_id;
@@ -8002,6 +8011,12 @@ impl ReviewItem {
                                     crate::button("photon-review-comment", "Comment")
                                         .style(ButtonStyle::Tinted(TintColor::Accent))
                                         .disabled(!has_text || conversation.posting)
+                                        .when(conversation.posting, |button| {
+                                            button.tooltip(Tooltip::text("Posting…"))
+                                        })
+                                        .when(!has_text && !conversation.posting, |button| {
+                                            button.tooltip(Tooltip::text("Write a comment first"))
+                                        })
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.post_comment(cx).detach_and_log_err(cx)
                                         })),
@@ -8361,6 +8376,11 @@ impl Render for SubmitPopover {
                                 crate::button("photon-review-submit-confirm", submit_label)
                                     .style(ButtonStyle::Tinted(TintColor::Accent))
                                     .disabled(!can_submit)
+                                    .when(!can_submit && !item.submitting, |button| {
+                                        button.tooltip(Tooltip::text(
+                                            "Add a comment or a summary first",
+                                        ))
+                                    })
                                     .on_click(
                                         cx.listener(|this, _, window, cx| this.submit(window, cx)),
                                     ),

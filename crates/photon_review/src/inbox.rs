@@ -740,9 +740,7 @@ impl InboxPanel {
                     .gap_2()
                     .flex_wrap()
                     .children(row.badges.iter().map(|badge| {
-                        Label::new(badge.clone())
-                            .color(badge_color(badge))
-                            .size(LabelSize::XSmall)
+                        crate::chip(badge.clone(), badge_color(badge), LabelSize::XSmall, cx)
                     })),
             )
             .child(
