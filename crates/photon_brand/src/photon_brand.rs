@@ -5,14 +5,14 @@ pub const BHUMI: u32 = 0x050505;
 /// Accent (Warp Dark). Maha: the color that stands out.
 pub const MAHA: u32 = 0x19AAD8;
 /// Photon Black's palette is Tokyo Night's, on `BHUMI`.
-pub const FOREGROUND: u32 = 0xC0CAF5;
+pub const FOREGROUND: u32 = 0xFFFFFF;
 
 /// Black, red, green, yellow, blue, magenta, cyan, white.
 pub const ANSI_NORMAL: [u32; 8] = [
     0x15161E, 0xF7768E, 0x9ECE6A, 0xE0AF68, 0x7AA2F7, 0xBB9AF7, 0x7DCFFF, 0xA9B1D6,
 ];
 pub const ANSI_BRIGHT: [u32; 8] = [
-    0x414868, 0xFF899D, 0x9FE044, 0xFABA4A, 0x8DB0FF, 0xC7A9FF, 0xA4DAFF, 0xC0CAF5,
+    0x414868, 0xFF899D, 0x9FE044, 0xFABA4A, 0x8DB0FF, 0xC7A9FF, 0xA4DAFF, 0xFFFFFF,
 ];
 
 /// WCAG 2.x contrast ratio between two opaque `0xRRGGBB` colors.

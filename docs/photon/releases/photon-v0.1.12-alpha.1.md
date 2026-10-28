@@ -27,7 +27,7 @@ Or download `Photon-aarch64.dmg` below (Apple silicon). Alpha builds aren't nota
 
 ### Themes
 
-- **Photon Black is Tokyo Night on black**: purple keywords, blue functions, green strings, off-white text, muted greens and roses in diffs. The old single neon green is gone.
+- **Photon Black has a new palette**: white text as before, with Tokyo Night's colours for code: purple keywords, blue functions, green strings, orange numbers, and calmer greens and roses in diffs. The old single neon green is gone.
 - **Three more, all on black**: Photon Mocha, Photon Rosé and Photon Vesper, offered at onboarding and under ⌘K ⌘T.
 
 ### Call Trails
