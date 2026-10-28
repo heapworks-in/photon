@@ -205,7 +205,7 @@ mod mac {
                 1,
             )?;
             git(&root, &["checkout", "--quiet", "-b", BRANCH], None)?;
-            write_files(&root, &owned(fixture::first_push()))?;
+            write_files(&root, &fixture::first_push())?;
             let first_sha = commit(&root, AUTHOR, "Retry card charges with backoff", 2)?;
             write_files(&root, &owned(fixture::second_push()))?;
             let head_sha = commit(
@@ -1511,6 +1511,16 @@ mod mac {
                 files.push(self.block(load)?);
             }
             let database = self.block(ReviewDb::open_test_db(unique_name("review")));
+            // Files changed since they were viewed were viewed here at the first push.
+            for (path, state) in viewed {
+                if *state == "DISMISSED" {
+                    self.block(database.set_file_viewed_head(
+                        pr_key(),
+                        path.to_string(),
+                        Some(self.repo.first_sha.clone()),
+                    ))?;
+                }
+            }
             let checkout = Checkout {
                 repo_dir: root.clone(),
                 worktree: root.clone(),
@@ -1690,6 +1700,11 @@ mod mac {
             ];
             let (win, item) = self.open_review_sized(&api_changed, WIDTH, HEIGHT)?;
             self.select_step_with(&win, &item, "src/api.rs")?;
+            // The call graph, which the test marks come from, takes the fake server a while.
+            for _ in 0..10 {
+                self.settle();
+            }
+            self.scroll_review(&win, &item, 13.)?;
             self.blur(&win)?;
             self.shoot_crops(&win, None, &[("cu-review-steps", &[whole])])?;
             self.click(&win, "photon-review-view")?;

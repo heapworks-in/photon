@@ -9,7 +9,8 @@ use editor::{
     Anchor, Editor, EditorEvent, ExcerptRange, MultiBuffer, MultiBufferSnapshot, PathKey,
     RowHighlightOptions, SelectionEffects,
     display_map::{
-        BlockContext, BlockPlacement, BlockProperties, BlockStyle, CustomBlockId, RenderBlock,
+        BlockContext, BlockPlacement, BlockProperties, BlockStyle, CustomBlockId, HighlightKey,
+        RenderBlock,
     },
     scroll::Autoscroll,
 };
@@ -17,8 +18,8 @@ use futures::future::{FutureExt as _, Shared, join_all, try_join_all};
 use gpui::{
     Action as _, AnyWindowHandle, App, AsyncApp, AsyncWindowContext, BackgroundExecutor, Context,
     DismissEvent, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Global,
-    MouseButton, Pixels, PromptLevel, Render, ScrollHandle, SharedString, Stateful, Subscription,
-    Task, WeakEntity, Window, actions, px, rgb,
+    HighlightStyle, MouseButton, Pixels, PromptLevel, Render, ScrollHandle, SharedString, Stateful,
+    Subscription, Task, WeakEntity, Window, actions, px, rgb,
 };
 use language::{Buffer, Capability, Point};
 use multi_buffer::{ToPoint as _, build_excerpt_ranges};
@@ -64,6 +65,10 @@ use crate::{
     resolve_request, review_request, review_root, since_review_files, viewed_request,
 };
 use crate::{CheckOutcome, MergeMethod, PrState, Readiness, remove_from_inbox};
+use crate::{
+    Chip, HunkMeaning, SinceViewed, checkout::git_raw, classify_file, file_summary, is_commit_id,
+    is_test_function, mark_since_viewed, rows_changed_since,
+};
 use crate::{Move, ViewFile, is_generated, open_feedback, push_command, simplified_bases};
 use crate::{TimelineEvent, issue_comment_request, parse_timeline, timeline_request};
 use crate::{ViewedMark, diff_fingerprint};
@@ -141,6 +146,7 @@ pub struct ImpactRow {
 }
 
 struct UnchangedContext;
+struct NewSinceViewed;
 struct NoteToast;
 struct AgentReviewToast;
 
@@ -326,6 +332,14 @@ pub struct ReviewItem {
     shown_context: Vec<ContextExcerpt>,
     expanded_context: HashSet<(EntityId, Point)>,
     label_blocks: HashSet<CustomBlockId>,
+    /// What each hunk of the shown files means, worked out once per head when the diff loads.
+    hunk_meanings: Vec<HunkMeaning>,
+    meaning_blocks: HashSet<CustomBlockId>,
+    /// Rename-only hunks opened from their one-line fold, by path and first row.
+    shown_renames: HashSet<(String, u32)>,
+    /// The changed test functions that call each changed function, by function index.
+    test_reach: Vec<Vec<usize>>,
+    _meaning_task: Task<()>,
     /// Each changed function's callers, by function index, worked out once the call data
     /// arrives.
     callers: Vec<Vec<ImpactRow>>,
@@ -899,6 +913,239 @@ fn mark_tag(mark: CallerMark) -> (&'static str, Color) {
         CallerMark::NotUpdated => ("not updated", Color::Error),
         CallerMark::Check => ("check", Color::Warning),
     }
+}
+
+/// The callers popover of the changed function at `function_index`.
+fn callers_menu(
+    item: WeakEntity<ReviewItem>,
+    function_index: usize,
+    title: String,
+) -> impl Fn(&mut Window, &mut App) -> Option<Entity<ui::ContextMenu>> + 'static {
+    move |window, cx| {
+        let rows = item
+            .read_with(cx, |item, _| item.callers(function_index).to_vec())
+            .ok()?;
+        let title = title.clone();
+        Some(ui::ContextMenu::build(window, cx, move |menu, _, _| {
+            let mut menu = menu.header(format!("Callers of {title}"));
+            if rows.is_empty() {
+                return menu.custom_row(|_, _| {
+                    div()
+                        .debug_selector(|| "photon-review-no-callers".into())
+                        .child(
+                            Label::new("No callers found")
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .into_any_element()
+                });
+            }
+            for (index, row) in rows.iter().enumerate() {
+                let (tag, color) = mark_tag(row.mark);
+                let location = row.location.clone();
+                let explanation = mark_explanation(row.mark);
+                menu = menu.custom_row(move |_, _| {
+                    let selector = format!("photon-review-caller-{location}-{tag}");
+                    h_flex()
+                        .id(("photon-review-caller", index))
+                        .debug_selector(move || selector)
+                        .w_full()
+                        .justify_between()
+                        .gap_4()
+                        .tooltip(Tooltip::text(explanation))
+                        .child(Label::new(location.clone()).size(LabelSize::Small))
+                        .child(Label::new(tag).size(LabelSize::XSmall).color(color))
+                        .into_any_element()
+                });
+            }
+            menu
+        }))
+    }
+}
+
+struct MeaningChip {
+    kind: &'static str,
+    label: SharedString,
+    color: Color,
+    tooltip: Option<SharedString>,
+}
+
+enum MeaningAction {
+    Callers {
+        function_index: usize,
+        count: usize,
+        title: String,
+    },
+    Lines {
+        shown: bool,
+    },
+    Reviewed,
+}
+
+/// The row above a hunk that says what it means; a folded rename also gets its one-line summary.
+struct MeaningHeader {
+    /// `path:line`, naming the hunk in selectors.
+    place: String,
+    path: String,
+    first_row: u32,
+    chips: Vec<MeaningChip>,
+    detail: Option<SharedString>,
+    action: Option<MeaningAction>,
+    folded_rename: Option<(String, String, usize)>,
+    faded: bool,
+}
+
+fn meaning_renderer(item: WeakEntity<ReviewItem>, header: MeaningHeader) -> RenderBlock {
+    let header = Arc::new(header);
+    Arc::new(move |block: &mut BlockContext| {
+        let place = header.place.clone();
+        let mut chips = Vec::with_capacity(header.chips.len());
+        for chip in &header.chips {
+            let selector = format!("photon-review-chip-{}-{place}", chip.kind);
+            chips.push(
+                div()
+                    .id(SharedString::from(selector.clone()))
+                    .debug_selector(move || selector)
+                    .child(crate::chip(
+                        chip.label.clone(),
+                        chip.color,
+                        LabelSize::XSmall,
+                        block.app,
+                    ))
+                    .when_some(chip.tooltip.clone(), |this, tooltip| {
+                        this.tooltip(Tooltip::text(tooltip))
+                    }),
+            );
+        }
+        let action = header.action.as_ref().map(|action| match action {
+            MeaningAction::Callers {
+                function_index,
+                count,
+                title,
+            } => {
+                let selector = format!("photon-review-hunk-callers-{place}");
+                let label = if *count == 1 {
+                    "1 caller not updated ›".to_string()
+                } else {
+                    format!("{count} callers not updated ›")
+                };
+                div()
+                    .debug_selector(move || selector)
+                    .child(
+                        ui::PopoverMenu::new(SharedString::from(format!(
+                            "photon-review-hunk-callers-{place}"
+                        )))
+                        .trigger(
+                            Button::new(
+                                SharedString::from(format!(
+                                    "photon-review-hunk-callers-button-{place}"
+                                )),
+                                label,
+                            )
+                            .style(ButtonStyle::Subtle)
+                            .size(ButtonSize::Compact)
+                            .label_size(LabelSize::XSmall)
+                            .color(Color::Accent),
+                        )
+                        .menu(callers_menu(
+                            item.clone(),
+                            *function_index,
+                            title.clone(),
+                        )),
+                    )
+                    .into_any_element()
+            }
+            MeaningAction::Lines { shown } => {
+                let selector = format!("photon-review-hunk-lines-{place}");
+                let item = item.clone();
+                let header = header.clone();
+                div()
+                    .debug_selector(move || selector)
+                    .child(
+                        Button::new(
+                            SharedString::from(format!("photon-review-hunk-lines-{place}")),
+                            if *shown { "hide lines" } else { "show lines" },
+                        )
+                        .style(ButtonStyle::Subtle)
+                        .size(ButtonSize::Compact)
+                        .label_size(LabelSize::XSmall)
+                        .color(Color::Accent)
+                        .on_click(move |_, _, cx| {
+                            item.update(cx, |item, cx| {
+                                item.toggle_rename_lines(&header.path, header.first_row, cx)
+                            })
+                            .log_err();
+                        }),
+                    )
+                    .into_any_element()
+            }
+            MeaningAction::Reviewed => {
+                let selector = format!("photon-review-hunk-reviewed-{place}");
+                div()
+                    .debug_selector(move || selector)
+                    .child(
+                        Label::new("reviewed ✓")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .into_any_element()
+            }
+        });
+        let gutter = block.margins.gutter.full_width();
+        let background = block.app.theme().colors().editor_subheader_background;
+        let row = h_flex()
+            .h(block.line_height)
+            .w_full()
+            .pl(gutter)
+            .pr_2()
+            .gap_1()
+            .children(chips)
+            .children(header.detail.clone().map(|detail| {
+                Label::new(detail)
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted)
+                    .truncate()
+            }))
+            .child(div().flex_1())
+            .children(action);
+        let rename = header.folded_rename.as_ref().map(|(old, new, places)| {
+            let selector = format!("photon-review-rename-fold-{place}");
+            let places = if *places == 1 {
+                "in 1 place".to_string()
+            } else {
+                format!("in {places} places")
+            };
+            let font = block.editor_style.text.font();
+            let font_size = block.editor_style.text.font_size;
+            let code = |text: &str| {
+                div()
+                    .font(font.clone())
+                    .text_size(font_size)
+                    .child(SharedString::from(text.to_string()))
+            };
+            h_flex()
+                .debug_selector(move || selector)
+                .h(block.line_height)
+                .pl(gutter)
+                .gap_2()
+                .child(code(old))
+                .child(Label::new("→").color(Color::Muted))
+                .child(code(new))
+                .child(
+                    Label::new(format!("{places} · nothing else changed"))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+        });
+        v_flex()
+            .id(SharedString::from(format!("photon-review-hunk-{place}")))
+            .w_full()
+            .bg(background)
+            .when(header.faded, |this| this.opacity(0.4))
+            .child(row)
+            .children(rename)
+            .into_any_element()
+    })
 }
 
 fn buffer_for<'a>(files: &'a [LoadedFile], path: &str) -> Option<&'a Entity<Buffer>> {
@@ -1940,6 +2187,11 @@ impl ReviewItem {
             shown_context: Vec::new(),
             expanded_context: HashSet::new(),
             label_blocks: HashSet::new(),
+            hunk_meanings: Vec::new(),
+            meaning_blocks: HashSet::new(),
+            shown_renames: HashSet::new(),
+            test_reach: Vec::new(),
+            _meaning_task: Task::ready(()),
             callers: Vec::new(),
             database,
             commentable,
@@ -4996,8 +5248,11 @@ impl ReviewItem {
             .collect();
         self.contexts = vec![None; self.functions.len()];
         self.callers = Vec::new();
+        self.test_reach = Vec::new();
+        self.hunk_meanings = Vec::new();
         self.analyses = analyses;
         self.rebuild_map(&[], cx);
+        self._meaning_task = self.load_meanings(cx);
     }
 
     fn fetch_contexts(
@@ -5040,6 +5295,13 @@ impl ReviewItem {
         self.contexts = results.into_iter().map(Result::ok).collect();
         let edges = call_edges(&self.functions, &self.contexts, cx);
         self.compute_callers(cx);
+        self.test_reach = vec![Vec::new(); self.functions.len()];
+        for &(caller, callee) in &edges {
+            let caller_is_test = self.functions.get(caller).is_some_and(is_test_function);
+            if caller_is_test && let Some(tests) = self.test_reach.get_mut(callee) {
+                tests.push(caller);
+            }
+        }
         self.rebuild_map(&edges, cx);
     }
 
@@ -5286,6 +5548,7 @@ impl ReviewItem {
         });
         self.shown_context = shown_context;
         self.show_comments(cx);
+        self.show_meanings(cx);
     }
 
     fn compute_callers(&mut self, cx: &App) {
@@ -5336,6 +5599,375 @@ impl ReviewItem {
             .get(function_index)
             .map(Vec::as_slice)
             .unwrap_or_default()
+    }
+
+    /// The older head the user viewed `path` at: marked viewed from here, or a ticked step showing it.
+    fn viewed_head(&self, path: &str) -> Option<String> {
+        let head = &self.checkout.head_sha;
+        let from_step = || {
+            self.steps
+                .iter()
+                .filter(|step| step.files.iter().any(|file| file == path))
+                .find_map(|step| self.viewed_steps.get(&step.key)?.head.clone())
+        };
+        self.viewed_heads
+            .get(path)
+            .cloned()
+            .or_else(from_step)
+            .filter(|viewed| viewed != head && is_commit_id(viewed))
+    }
+
+    /// Classifies every hunk and compares it with the head the user last viewed, off the main
+    /// thread, once the syntax trees are parsed.
+    fn load_meanings(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        let mut inputs = Vec::new();
+        for file in &self.files {
+            let Some((buffer, diff)) = &file.contents else {
+                continue;
+            };
+            let path = file.diff.path.clone();
+            let viewed = self.viewed_head(&path);
+            inputs.push((
+                path,
+                buffer.read(cx).snapshot(),
+                diff.read(cx).snapshot(cx),
+                viewed,
+            ));
+        }
+        let functions: Vec<(usize, ChangedFunction)> =
+            self.functions.iter().cloned().enumerate().collect();
+        let repo = self.checkout.repo_dir.clone();
+        cx.spawn(async move |this, cx| {
+            let meanings = cx
+                .background_spawn(async move {
+                    let texts: Vec<(String, String)> = inputs
+                        .iter()
+                        .map(|(_, buffer, diff, _)| (diff.base_text().text(), buffer.text()))
+                        .collect();
+                    let files: Vec<ViewFile> = inputs
+                        .iter()
+                        .zip(&texts)
+                        .map(|((path, ..), (old, new))| ViewFile {
+                            path,
+                            old: Some(old),
+                            new,
+                        })
+                        .collect();
+                    let moves = simplified_bases(&files, false, true).moves;
+                    let mut meanings = Vec::new();
+                    for ((path, buffer, diff, viewed), (_, head_text)) in inputs.iter().zip(&texts)
+                    {
+                        let mut hunks = classify_file(path, buffer, diff, &functions, &moves);
+                        if let Some(viewed) = viewed {
+                            // Only a commit already in the clone: the user viewed it from here.
+                            match git_raw(&repo, &["show", &format!("{viewed}:{path}")]).await {
+                                Ok(viewed_text) => mark_since_viewed(
+                                    &mut hunks,
+                                    &rows_changed_since(&viewed_text, head_text),
+                                ),
+                                Err(error) => log::debug!("text of {path} as viewed: {error:#}"),
+                            }
+                        }
+                        meanings.extend(hunks);
+                    }
+                    meanings
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.hunk_meanings = meanings;
+                this.show_meanings(cx);
+                cx.notify();
+            })
+            .log_err();
+        })
+    }
+
+    fn toggle_rename_lines(&mut self, path: &str, first_row: u32, cx: &mut Context<Self>) {
+        let key = (path.to_string(), first_row);
+        if !self.shown_renames.remove(&key) {
+            self.shown_renames.insert(key);
+        }
+        self.show_meanings(cx);
+        cx.notify();
+    }
+
+    /// The hunk's changed rows inside changed functions, as (reached by a changed test, not
+    /// reached), with the tests' names; `None` until the call data is in.
+    fn hunk_tests(&self, hunk: &HunkMeaning) -> Option<(usize, usize, Vec<String>)> {
+        if self.test_reach.is_empty() || !hunk.adds {
+            return None;
+        }
+        let (mut reached, mut unreached, mut tests) = (0, 0, Vec::new());
+        for row in hunk.rows.clone() {
+            let function = self
+                .functions
+                .iter()
+                .enumerate()
+                .filter(|(_, function)| {
+                    function.path == hunk.path
+                        && function.range.start.row <= row
+                        && row <= function.range.end.row
+                })
+                .max_by_key(|(_, function)| function.range.start);
+            let Some((index, function)) = function else {
+                continue;
+            };
+            if is_test_function(function) {
+                continue;
+            }
+            let reaching = self.test_reach.get(index).map_or(&[][..], Vec::as_slice);
+            if reaching.is_empty() {
+                unreached += 1;
+                continue;
+            }
+            reached += 1;
+            for &test in reaching {
+                if let Some(test) = self.functions.get(test)
+                    && !tests.contains(&test.name)
+                {
+                    tests.push(test.name.clone());
+                }
+            }
+        }
+        (reached + unreached > 0).then_some((reached, unreached, tests))
+    }
+
+    fn meaning_header(&self, hunk: &HunkMeaning) -> MeaningHeader {
+        let place = format!("{}:{}", hunk.path, hunk.rows.start + 1);
+        let mut chips = Vec::new();
+        let chip = |kind, label: &str, color, tooltip: Option<String>| MeaningChip {
+            kind,
+            label: label.to_string().into(),
+            color,
+            tooltip: tooltip.map(Into::into),
+        };
+        for meaning in &hunk.chips {
+            chips.push(match meaning {
+                Chip::SignatureChanged => chip(
+                    "signature",
+                    "signature changed",
+                    Color::Error,
+                    Some("Its parameters, return type or visibility changed".into()),
+                ),
+                Chip::BehaviourChange => chip(
+                    "behaviour",
+                    "behaviour change",
+                    Color::Warning,
+                    Some("The code changed beyond renames and formatting".into()),
+                ),
+                Chip::RenameOnly { .. } => chip(
+                    "rename",
+                    "rename only",
+                    Color::Muted,
+                    Some("Every change is the same name renamed".into()),
+                ),
+                Chip::Moved { .. } => chip(
+                    "moved",
+                    "moved",
+                    Color::Muted,
+                    Some("The same lines were removed elsewhere".into()),
+                ),
+                Chip::FormattingOnly => chip(
+                    "formatting",
+                    "formatting only",
+                    Color::Muted,
+                    Some("Only whitespace and commas changed".into()),
+                ),
+            });
+        }
+        if matches!(hunk.since_viewed, SinceViewed::New(_)) {
+            chips.push(chip(
+                "new",
+                "new since you viewed",
+                Color::Accent,
+                Some("Changed after the commit you last viewed".into()),
+            ));
+        }
+        // Renames, moves and formatting don't change what a test would check.
+        let changes_behaviour = hunk
+            .chips
+            .iter()
+            .any(|chip| matches!(chip, Chip::BehaviourChange | Chip::SignatureChanged));
+        if let Some((reached, unreached, tests)) =
+            self.hunk_tests(hunk).filter(|_| changes_behaviour)
+        {
+            let names = tests.join(", ");
+            chips.push(if unreached == 0 {
+                chip(
+                    "tested",
+                    "✓ tests cover it",
+                    Color::Success,
+                    Some(format!("Reached by {names}")),
+                )
+            } else {
+                let lines = if unreached == 1 { "line" } else { "lines" };
+                chip(
+                    "untested",
+                    &format!("○ {unreached} {lines} without a test"),
+                    Color::Muted,
+                    Some(if reached == 0 {
+                        "No test changed in this pull request calls this code".to_string()
+                    } else {
+                        format!("The other {reached} reached by {names}")
+                    }),
+                )
+            });
+        }
+        let function = hunk.function.and_then(|index| self.functions.get(index));
+        let moved = hunk.chips.iter().find_map(|chip| match chip {
+            Chip::Moved { from_line, to_line } => Some((*from_line, *to_line)),
+            _ => None,
+        });
+        let location = match moved {
+            Some((from, to)) => format!("from line {from} to {to}"),
+            None => format!("line {}", hunk.rows.start + 1),
+        };
+        let detail = Some(match function {
+            Some(function) => format!("{}() · {location}", function.name).into(),
+            None => location.into(),
+        });
+        let rename = hunk.rename();
+        let shown = self
+            .shown_renames
+            .contains(&(hunk.path.clone(), hunk.rows.start));
+        let not_updated = hunk
+            .function
+            .filter(|_| hunk.chips.contains(&Chip::SignatureChanged))
+            .map(|index| {
+                let count = self
+                    .callers(index)
+                    .iter()
+                    .filter(|row| row.mark == CallerMark::NotUpdated)
+                    .count();
+                (index, count)
+            })
+            .filter(|(_, count)| *count > 0);
+        let action = if let Some((function_index, count)) = not_updated {
+            Some(MeaningAction::Callers {
+                function_index,
+                count,
+                title: function.map_or_else(String::new, |function| format!("{}()", function.name)),
+            })
+        } else if rename.is_some() {
+            Some(MeaningAction::Lines { shown })
+        } else if hunk.since_viewed == SinceViewed::Reviewed {
+            Some(MeaningAction::Reviewed)
+        } else {
+            None
+        };
+        MeaningHeader {
+            place,
+            path: hunk.path.clone(),
+            first_row: hunk.rows.start,
+            chips,
+            detail,
+            action,
+            folded_rename: rename
+                .filter(|_| !shown)
+                .map(|(old, new, places)| (old.to_string(), new.to_string(), places)),
+            faded: hunk.since_viewed == SinceViewed::Reviewed,
+        }
+    }
+
+    /// Puts a header above each shown hunk, folds rename-only hunks, edges rows changed since the
+    /// user viewed them and fades hunks they already reviewed.
+    fn show_meanings(&mut self, cx: &mut Context<Self>) {
+        let snapshot = self.multibuffer.read(cx).snapshot(cx);
+        let item = cx.weak_entity();
+        let mut blocks = Vec::new();
+        let mut new_rows = Vec::new();
+        let mut faded = Vec::new();
+        for hunk in &self.hunk_meanings {
+            let Some((buffer, diff)) = self
+                .files
+                .iter()
+                .find(|file| file.diff.path == hunk.path)
+                .and_then(|file| file.contents.as_ref())
+            else {
+                continue;
+            };
+            let buffer = buffer.read(cx).snapshot();
+            let diff = diff.read(cx).snapshot(cx);
+            let base = diff.base_text();
+            if hunk.rows.start > buffer.max_point().row {
+                continue;
+            }
+            let Some(start) =
+                snapshot.anchor_in_excerpt(buffer.anchor_before(Point::new(hunk.rows.start, 0)))
+            else {
+                continue;
+            };
+            let deletes =
+                !hunk.base_rows.is_empty() && hunk.base_rows.end <= base.max_point().row + 1;
+            let top = if deletes {
+                start.with_diff_base_anchor(base.anchor_before(Point::new(hunk.base_rows.start, 0)))
+            } else {
+                start
+            };
+            let end = if hunk.adds {
+                let last = (hunk.rows.end - 1).min(buffer.max_point().row);
+                snapshot
+                    .anchor_in_excerpt(buffer.anchor_after(Point::new(last, buffer.line_len(last))))
+                    .unwrap_or(start)
+            } else if deletes {
+                let last = hunk.base_rows.end - 1;
+                start
+                    .with_diff_base_anchor(base.anchor_after(Point::new(last, base.line_len(last))))
+            } else {
+                start
+            };
+            if hunk.adds
+                && let SinceViewed::New(rows) = &hunk.since_viewed
+            {
+                for &row in rows {
+                    let row_end = Point::new(row, buffer.line_len(row));
+                    if let (Some(row_start), Some(row_end)) = (
+                        snapshot.anchor_in_excerpt(buffer.anchor_before(Point::new(row, 0))),
+                        snapshot.anchor_in_excerpt(buffer.anchor_after(row_end)),
+                    ) {
+                        new_rows.push(row_start..row_end);
+                    }
+                }
+            }
+            if hunk.since_viewed == SinceViewed::Reviewed {
+                faded.push(top..end);
+            }
+            let header = self.meaning_header(hunk);
+            let folded = header.folded_rename.is_some();
+            blocks.push(BlockProperties {
+                placement: if folded {
+                    BlockPlacement::Replace(top..=end)
+                } else {
+                    BlockPlacement::Above(top)
+                },
+                height: Some(if folded { 2 } else { 1 }),
+                style: BlockStyle::Flex,
+                render: meaning_renderer(item.clone(), header),
+                priority: 0,
+            });
+        }
+        let stale = std::mem::take(&mut self.meaning_blocks);
+        self.meaning_blocks = self.editor.update(cx, |editor, cx| {
+            editor.remove_blocks(stale.into_iter().collect(), None, cx);
+            editor.highlight_gutter::<NewSinceViewed>(
+                new_rows,
+                |cx| cx.theme().colors().text_accent,
+                cx,
+            );
+            editor.clear_highlights(HighlightKey::Editor, cx);
+            if !faded.is_empty() {
+                editor.highlight_text(
+                    HighlightKey::Editor,
+                    faded,
+                    HighlightStyle {
+                        fade_out: Some(0.6),
+                        ..HighlightStyle::default()
+                    },
+                    cx,
+                );
+            }
+            editor.insert_blocks(blocks, None, cx).into_iter().collect()
+        });
     }
 
     /// What's left to review.
@@ -6387,46 +7019,7 @@ impl ReviewItem {
                         .color(Color::Accent),
                     Tooltip::text("Changed in this PR. Click to see its callers"),
                 )
-                .menu(move |window, cx| {
-                    let rows = item
-                        .read_with(cx, |item, _| item.callers(function_index).to_vec())
-                        .ok()?;
-                    let title = title.clone();
-                    Some(ui::ContextMenu::build(window, cx, move |menu, _, _| {
-                        let mut menu = menu.header(format!("Callers of {title}"));
-                        if rows.is_empty() {
-                            return menu.custom_row(|_, _| {
-                                div()
-                                    .debug_selector(|| "photon-review-no-callers".into())
-                                    .child(
-                                        Label::new("No callers found")
-                                            .size(LabelSize::Small)
-                                            .color(Color::Muted),
-                                    )
-                                    .into_any_element()
-                            });
-                        }
-                        for (index, row) in rows.iter().enumerate() {
-                            let (tag, color) = mark_tag(row.mark);
-                            let location = row.location.clone();
-                            let explanation = mark_explanation(row.mark);
-                            menu = menu.custom_row(move |_, _| {
-                                let selector = format!("photon-review-caller-{location}-{tag}");
-                                h_flex()
-                                    .id(("photon-review-caller", index))
-                                    .debug_selector(move || selector)
-                                    .w_full()
-                                    .justify_between()
-                                    .gap_4()
-                                    .tooltip(Tooltip::text(explanation))
-                                    .child(Label::new(location.clone()).size(LabelSize::Small))
-                                    .child(Label::new(tag).size(LabelSize::XSmall).color(color))
-                                    .into_any_element()
-                            });
-                        }
-                        menu
-                    }))
-                })
+                .menu(callers_menu(item, function_index, title))
                 .into_any_element()
         } else {
             Label::new(label)
@@ -6718,6 +7311,20 @@ impl ReviewItem {
                                     .label_size(LabelSize::XSmall)
                                     .tooltip(status_label(&file.diff)),
                                 ),
+                        )
+                        .children(
+                            file_summary(
+                                self.hunk_meanings.iter().filter(|hunk| hunk.path == *path),
+                            )
+                            .map(|summary| {
+                                let selector = format!("photon-review-file-summary-{path}");
+                                div().debug_selector(move || selector).child(
+                                    Label::new(summary)
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted)
+                                        .truncate(),
+                                )
+                            }),
                         )
                         .children(self.file_errors.get(path).map(|error| {
                             Label::new(error.clone())
@@ -7881,6 +8488,33 @@ mod tests {
         database: Option<ReviewDb>,
         detail: PrDetail,
     ) -> (Entity<ReviewItem>, VisualTestContext, Arc<AtomicUsize>) {
+        open_item_with_checkout(
+            cx,
+            tree,
+            files,
+            graph,
+            call_hierarchy,
+            gate,
+            restricted,
+            database,
+            detail,
+            checkout(),
+        )
+        .await
+    }
+
+    async fn open_item_with_checkout(
+        cx: &mut TestAppContext,
+        tree: serde_json::Value,
+        files: Vec<PrFile>,
+        graph: Graph,
+        call_hierarchy: bool,
+        gate: Option<Gate>,
+        restricted: bool,
+        database: Option<ReviewDb>,
+        detail: PrDetail,
+        checkout: Checkout,
+    ) -> (Entity<ReviewItem>, VisualTestContext, Arc<AtomicUsize>) {
         init_test(cx);
         let database = database.unwrap_or_else(|| test_database(cx));
         let fs = FakeFs::new(cx.executor());
@@ -7943,7 +8577,7 @@ mod tests {
                 project.clone(),
                 detail,
                 "alice".into(),
-                checkout(),
+                checkout,
                 loaded,
                 database,
                 window,
@@ -13543,5 +14177,366 @@ fn verify_password(user: &str, password: &str) -> bool {
             item.show_comments(cx);
         });
         assert!(drawn("photon-review-chip-author", &mut cx));
+    }
+
+    const RETRY_BASE: &str = "\
+fn delay(attempt: u32) -> u32 {
+    attempt * 2
+}
+
+fn retry(max_attempts: u32) -> u32 {
+    let total = max_attempts + 1;
+    total * max_attempts
+}
+
+fn tidy() -> u32 {
+    let x = 1;
+    x
+}
+
+fn caller() -> u32 {
+    delay(5)
+}
+
+fn moved_away() -> u32 {
+    let value = 7;
+    value + 1
+}
+";
+    const RETRY_HEAD: &str = "\
+fn delay(attempt: u8) -> u32 {
+    attempt as u32 * 3
+}
+
+fn retry(attempts: u32) -> u32 {
+    let total = attempts + 1;
+    total * attempts
+}
+
+fn tidy() -> u32 {
+    let x=1;
+    x
+}
+
+fn caller() -> u32 {
+    delay(5)
+}
+";
+    const OTHER_BASE: &str = "fn keep() {}\n\nfn anchor() {}\n";
+    const OTHER_HEAD: &str = "\
+fn keep() {}
+
+fn moved_away() -> u32 {
+    let value = 7;
+    value + 1
+}
+
+fn anchor() {}
+
+fn test_delay() {
+    delay(1);
+}
+";
+
+    fn retry_graph() -> Graph {
+        Graph {
+            functions: vec![
+                function("delay", "src/retry.rs", 0, 2),
+                function("retry", "src/retry.rs", 4, 7),
+                function("tidy", "src/retry.rs", 9, 12),
+                function("caller", "src/retry.rs", 14, 16),
+                function("limit", "src/limit.rs", 0, 2),
+                function("moved_away", "src/other.rs", 2, 5),
+                function("test_delay", "src/other.rs", 9, 11),
+            ],
+            calls: vec![call("caller", "delay", 15), call("test_delay", "delay", 10)],
+        }
+    }
+
+    async fn open_retry(
+        cx: &mut TestAppContext,
+        database: Option<ReviewDb>,
+        checkout: Checkout,
+    ) -> (Entity<ReviewItem>, VisualTestContext) {
+        let detail = parse_detail(&key(), DETAIL).expect("detail");
+        let (item, mut cx, _) = open_item_with_checkout(
+            cx,
+            json!({ "src": {
+                "retry.rs": RETRY_HEAD,
+                "other.rs": OTHER_HEAD,
+                "limit.rs": "fn limit() -> u32 {\n    2\n}\n",
+            } }),
+            vec![
+                modified("src/retry.rs", RETRY_BASE),
+                modified("src/other.rs", OTHER_BASE),
+                modified("src/limit.rs", "fn limit() -> u32 {\n    1\n}\n"),
+            ],
+            retry_graph(),
+            true,
+            None,
+            false,
+            database,
+            detail,
+            checkout,
+        )
+        .await;
+        settle(&mut cx);
+        (item, cx)
+    }
+
+    fn meanings(item: &Entity<ReviewItem>, cx: &mut VisualTestContext) -> Vec<(String, Vec<Chip>)> {
+        item.read_with(cx, |item, _| {
+            item.hunk_meanings
+                .iter()
+                .map(|hunk| {
+                    (
+                        format!("{}:{}", hunk.path, hunk.rows.start + 1),
+                        hunk.chips.clone(),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    /// Shows the step whose rows include `path`'s 0-based `row`.
+    fn show_step_with(item: &Entity<ReviewItem>, path: &str, row: u32, cx: &mut VisualTestContext) {
+        let index = item.read_with(cx, |item, _| {
+            item.steps()
+                .iter()
+                .position(|step| {
+                    step.files.iter().any(|file| file == path)
+                        && item
+                            .step_rows(step, path)
+                            .iter()
+                            .any(|rows| rows.contains(&row))
+                })
+                .unwrap_or_else(|| panic!("a step shows {path}:{row}"))
+        });
+        item.update_in(cx, |item, window, cx| item.select_step(index, window, cx));
+        cx.run_until_parked();
+    }
+
+    fn display(item: &Entity<ReviewItem>, cx: &mut VisualTestContext) -> String {
+        item.update(cx, |item, cx| {
+            item.editor()
+                .update(cx, |editor, cx| editor.display_text(cx))
+        })
+    }
+
+    #[gpui::test]
+    async fn each_hunk_says_what_it_means(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_retry(cx, None, checkout()).await;
+        assert_eq!(
+            meanings(&item, &mut cx),
+            vec![
+                (
+                    "src/retry.rs:1".to_string(),
+                    vec![Chip::SignatureChanged, Chip::BehaviourChange]
+                ),
+                (
+                    "src/retry.rs:5".to_string(),
+                    vec![Chip::RenameOnly {
+                        old: "max_attempts".into(),
+                        new: "attempts".into(),
+                        places: 3,
+                    }]
+                ),
+                ("src/retry.rs:11".to_string(), vec![Chip::FormattingOnly]),
+                (
+                    "src/retry.rs:18".to_string(),
+                    vec![Chip::Moved {
+                        from_line: 19,
+                        to_line: 3,
+                    }]
+                ),
+                (
+                    "src/other.rs:3".to_string(),
+                    vec![Chip::Moved {
+                        from_line: 19,
+                        to_line: 3,
+                    }]
+                ),
+                ("src/other.rs:9".to_string(), vec![Chip::BehaviourChange]),
+                ("src/limit.rs:2".to_string(), vec![Chip::BehaviourChange]),
+            ]
+        );
+
+        show_step_with(&item, "src/retry.rs", 0, &mut cx);
+        assert!(drawn(
+            "photon-review-chip-signature-src/retry.rs:1",
+            &mut cx
+        ));
+        assert!(drawn(
+            "photon-review-chip-behaviour-src/retry.rs:1",
+            &mut cx
+        ));
+        assert!(drawn("photon-review-file-summary-src/retry.rs", &mut cx));
+        let summary = item.read_with(&cx, |item, _| {
+            file_summary(
+                item.hunk_meanings
+                    .iter()
+                    .filter(|hunk| hunk.path == "src/retry.rs"),
+            )
+        });
+        assert_eq!(
+            summary.as_deref(),
+            Some("4 hunks: 1 behaviour change, 1 rename, 1 moved, 1 formatting only")
+        );
+        show_step_with(&item, "src/retry.rs", 10, &mut cx);
+        assert!(drawn(
+            "photon-review-chip-formatting-src/retry.rs:11",
+            &mut cx
+        ));
+        show_step_with(&item, "src/other.rs", 2, &mut cx);
+        assert!(drawn("photon-review-chip-moved-src/other.rs:3", &mut cx));
+    }
+
+    #[gpui::test]
+    async fn a_rename_folds_to_one_line_until_shown(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_retry(cx, None, checkout()).await;
+        show_step_with(&item, "src/retry.rs", 4, &mut cx);
+        assert!(drawn("photon-review-chip-rename-src/retry.rs:5", &mut cx));
+        assert!(drawn("photon-review-rename-fold-src/retry.rs:5", &mut cx));
+        let folded = display(&item, &mut cx);
+        assert!(!folded.contains("total * attempts"), "{folded}");
+        assert!(!folded.contains("total * max_attempts"), "{folded}");
+
+        click("photon-review-hunk-lines-src/retry.rs:5", &mut cx);
+        assert!(!drawn("photon-review-rename-fold-src/retry.rs:5", &mut cx));
+        let shown = display(&item, &mut cx);
+        assert!(shown.contains("total * attempts"), "{shown}");
+        assert!(shown.contains("total * max_attempts"), "{shown}");
+    }
+
+    #[gpui::test]
+    async fn changed_rows_are_marked_by_the_tests_that_reach_them(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_retry(cx, None, checkout()).await;
+        show_step_with(&item, "src/retry.rs", 0, &mut cx);
+        assert!(drawn("photon-review-chip-tested-src/retry.rs:1", &mut cx));
+        assert!(!drawn(
+            "photon-review-chip-untested-src/retry.rs:1",
+            &mut cx
+        ));
+        let tests = item.read_with(&cx, |item, _| {
+            item.hunk_meanings
+                .iter()
+                .map(|hunk| item.hunk_tests(hunk))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(tests[0], Some((2, 0, vec!["test_delay".to_string()])));
+        assert_eq!(tests[1], Some((0, 3, Vec::new())));
+        show_step_with(&item, "src/retry.rs", 4, &mut cx);
+        assert!(
+            !drawn("photon-review-chip-untested-src/retry.rs:5", &mut cx),
+            "a rename needs no test"
+        );
+        show_step_with(&item, "src/limit.rs", 1, &mut cx);
+        assert!(drawn("photon-review-chip-untested-src/limit.rs:2", &mut cx));
+    }
+
+    #[gpui::test]
+    async fn a_changed_signature_links_its_callers_not_updated(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_retry(cx, None, checkout()).await;
+        show_step_with(&item, "src/retry.rs", 0, &mut cx);
+        click("photon-review-hunk-callers-src/retry.rs:1", &mut cx);
+        assert!(drawn(
+            "photon-review-caller-src/retry.rs:16-not updated",
+            &mut cx
+        ));
+    }
+
+    #[gpui::test]
+    async fn a_second_head_marks_whats_new_since_you_viewed(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().canonicalize().expect("canonical");
+        run(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(repo.join("src")).expect("src");
+        let viewed = RETRY_HEAD.replace("attempt as u32 * 3", "attempt as u32 * 2");
+        std::fs::write(repo.join("src/retry.rs"), viewed).expect("write");
+        run(&repo, &["add", "."]);
+        run(&repo, &["commit", "-q", "-m", "viewed"]);
+        let viewed_sha = run(&repo, &["rev-parse", "HEAD"]);
+
+        let database = test_database(cx);
+        database
+            .set_file_viewed_head(key(), "src/retry.rs".into(), Some(viewed_sha))
+            .await
+            .expect("viewed head");
+        let checkout = Checkout {
+            repo_dir: repo.clone(),
+            ..checkout()
+        };
+        let (item, mut cx) = open_retry(cx, Some(database), checkout).await;
+        // The viewed text comes from a real process, outside the test clock.
+        for _ in 0..200 {
+            let marked = item.read_with(&cx, |item, _| {
+                item.hunk_meanings
+                    .iter()
+                    .any(|hunk| hunk.since_viewed != SinceViewed::NotViewed)
+            });
+            if marked {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            cx.run_until_parked();
+        }
+        let states = item.read_with(&cx, |item, _| {
+            item.hunk_meanings
+                .iter()
+                .map(|hunk| hunk.since_viewed.clone())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(states[0], SinceViewed::New(vec![1]));
+        assert_eq!(states[1], SinceViewed::Reviewed);
+        assert_eq!(states[4], SinceViewed::NotViewed, "other.rs wasn't viewed");
+
+        show_step_with(&item, "src/retry.rs", 0, &mut cx);
+        assert!(drawn("photon-review-chip-new-src/retry.rs:1", &mut cx));
+        let edged = item.update_in(&mut cx, |item, window, cx| {
+            item.editor().update(cx, |editor, cx| {
+                let snapshot = editor.snapshot(window, cx);
+                editor
+                    .gutter_highlights_in_range(
+                        Anchor::Min..Anchor::Max,
+                        &snapshot.display_snapshot,
+                        cx,
+                    )
+                    .len()
+            })
+        });
+        assert_eq!(edged, 1);
+        show_step_with(&item, "src/retry.rs", 10, &mut cx);
+        assert!(drawn(
+            "photon-review-hunk-reviewed-src/retry.rs:11",
+            &mut cx
+        ));
+        assert!(!drawn("photon-review-chip-new-src/retry.rs:11", &mut cx));
+        let faded = item.read_with(&cx, |item, cx| {
+            item.editor()
+                .read(cx)
+                .text_highlights(HighlightKey::Editor, cx)
+                .map_or(0, |(_, ranges)| ranges.len())
+        });
+        assert!(faded > 0);
+    }
+
+    #[gpui::test]
+    async fn a_first_review_shows_nothing_new_or_reviewed(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_retry(cx, None, checkout()).await;
+        let all_plain = item.read_with(&cx, |item, _| {
+            item.hunk_meanings
+                .iter()
+                .all(|hunk| hunk.since_viewed == SinceViewed::NotViewed)
+        });
+        assert!(all_plain);
+        show_step_with(&item, "src/retry.rs", 10, &mut cx);
+        assert!(!drawn(
+            "photon-review-hunk-reviewed-src/retry.rs:11",
+            &mut cx
+        ));
     }
 }
