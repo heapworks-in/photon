@@ -18,7 +18,7 @@ use project::{
 use util::{ResultExt as _, paths::PathMatcher};
 use workspace::{Toast, Workspace};
 
-pub use java_setup::JavaSetup;
+pub use java_setup::{Detect, JavaScan, JavaSetup};
 pub use set_up_language_server::SetUpLanguageServer;
 
 gpui::actions!(

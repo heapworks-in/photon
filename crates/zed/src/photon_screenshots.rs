@@ -2313,6 +2313,15 @@ mod mac {
         photon_review::init(cx);
         photon_plan_review::init(cx);
         photon_navigation::init(cx);
+        // Scenes look the same on every Mac, and never write the real settings file.
+        cx.set_global(photon_navigation::JavaSetup::new(std::rc::Rc::new(
+            |_, _| {
+                gpui::Task::ready(photon_navigation::JavaScan {
+                    current: Some(21),
+                    ..Default::default()
+                })
+            },
+        )));
         agent_settings::AgentSettings::override_global(
             agent_settings::AgentSettings {
                 notify_when_agent_waiting: settings::NotifyWhenAgentWaiting::Never,
