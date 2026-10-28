@@ -198,7 +198,7 @@ impl ChipPicker {
             terminal,
             workspace,
             ChipSource::Branches { info },
-            "Switch branch…",
+            "Switch or create a branch…",
             window,
             cx,
         )
@@ -304,13 +304,8 @@ impl ChipPickerDelegate {
                         }),
                 );
                 let name = query.trim();
-                if name.is_empty() {
-                    items.push(ChipItem {
-                        label: "New branch… (type a name)".into(),
-                        highlighted: false,
-                        action: ChipAction::Run(String::new()),
-                    });
-                } else if !info.branches.iter().any(|branch| branch == name)
+                if !name.is_empty()
+                    && !info.branches.iter().any(|branch| branch == name)
                     // A fetched branch of that name is listed above; a new one would hide it.
                     && !info
                         .remote_branches
@@ -453,6 +448,34 @@ mod tests {
             track_command("origin/feat x"),
             "git switch --track 'origin/feat x'"
         );
+    }
+
+    #[test]
+    fn every_branch_item_does_something() {
+        let delegate = ChipPickerDelegate {
+            picker: WeakEntity::new_invalid(),
+            terminal: WeakEntity::new_invalid(),
+            workspace: WeakEntity::new_invalid(),
+            source: ChipSource::Branches {
+                info: GitInfo {
+                    branch: "main".into(),
+                    changed: 0,
+                    branches: vec!["main".into()],
+                    remote_branches: Vec::new(),
+                },
+            },
+            placeholder: "",
+            items: Vec::new(),
+            selected_index: 0,
+        };
+        for query in ["", "new-thing"] {
+            assert!(
+                delegate.items_for(query).iter().all(
+                    |item| !matches!(&item.action, ChipAction::Run(command) if command.is_empty())
+                ),
+                "query {query:?}"
+            );
+        }
     }
 
     #[test]

@@ -623,6 +623,8 @@ impl TerminalView {
             .is_some_and(|terminal_panel| terminal_panel.read(cx).assistant_enabled());
         let test_delta = self.selected_block_delta(cx); // photon: the selected test run's changes
         let smart_buttons = self.selected_block_buttons(cx); // photon: test and build actions
+        // photon: a re-run is only typed while the shell waits for a command.
+        let at_prompt = self.terminal.read(cx).input_target() == terminal::InputTarget::BlockInput;
         let context_menu = ContextMenu::build(window, cx, |menu, _, _| {
             menu.context(self.focus_handle.clone())
                 .when(self.shows_workspace_actions(), |menu| {
@@ -646,7 +648,7 @@ impl TerminalView {
                 // photon: the selected block's actions.
                 .when(self.selected_block.is_some(), |menu| {
                     photon_smart_blocks_view::smart_block_menu_items(
-                        photon_blocks_view::block_menu_items(menu, test_delta),
+                        photon_blocks_view::block_menu_items(menu, test_delta, at_prompt),
                         smart_buttons,
                     )
                 })
@@ -5506,7 +5508,7 @@ mod tests {
         let ids = block_ids(&terminal, &mut cx);
         assert_eq!(selected(&terminal_view, &mut cx), Some(ids[ids.len() - 2]));
         let labels = menu_labels(&terminal_view, &mut cx);
-        for expected in ["Stage all", "Open in Git panel"] {
+        for expected in ["Stage All", "Open in Git Panel"] {
             assert!(
                 labels.iter().any(|label| label == expected),
                 "{expected}: {labels:?}"
@@ -5601,7 +5603,7 @@ mod tests {
         assert!(!has_rerun(buttons(&mut cx)));
         let labels = menu_labels(&terminal_view, &mut cx);
         assert!(
-            labels.iter().all(|label| label != "Re-run failed"),
+            labels.iter().all(|label| label != "Re-run Failed"),
             "{labels:?}"
         );
     }

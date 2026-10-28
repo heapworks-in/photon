@@ -379,14 +379,19 @@ pub(crate) fn register_block_actions(
         .map(|element| crate::photon_smart_blocks_view::register_smart_block_actions(element, cx))
 }
 
-/// The selected block's actions in the terminal's right-click menu.
-pub(crate) fn block_menu_items(menu: ContextMenu, test_delta: Option<String>) -> ContextMenu {
+/// The selected block's actions in the terminal's right-click menu. `at_prompt`: a re-run is
+/// only typed while the shell waits for a command, never into a running program.
+pub(crate) fn block_menu_items(
+    menu: ContextMenu,
+    test_delta: Option<String>,
+    at_prompt: bool,
+) -> ContextMenu {
     menu.separator()
         .when_some(test_delta, |menu, delta| menu.label(delta))
         .action("Copy Command", Box::new(CopyBlockCommand))
         .action("Copy Output", Box::new(CopyBlockOutput))
         .action("Copy Command and Output", Box::new(CopyBlock))
-        .action("Re-run Command", Box::new(RerunBlock))
+        .action_disabled_when(!at_prompt, "Re-run Command", Box::new(RerunBlock))
 }
 
 impl TerminalView {

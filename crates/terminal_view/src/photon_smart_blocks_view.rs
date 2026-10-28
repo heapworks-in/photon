@@ -70,12 +70,12 @@ pub(crate) enum ToolbarButton {
 impl ToolbarButton {
     pub(crate) fn label(self, local_url: Option<&str>) -> String {
         match self {
-            Self::RerunFailed => "Re-run failed".to_string(),
-            Self::OpenErrors => "Open errors".to_string(),
-            Self::StageAll => "Stage all".to_string(),
-            Self::OpenInGitPanel => "Open in Git panel".to_string(),
+            Self::RerunFailed => "Re-run Failed".to_string(),
+            Self::OpenErrors => "Open Errors".to_string(),
+            Self::StageAll => "Stage All".to_string(),
+            Self::OpenInGitPanel => "Open in Git Panel".to_string(),
             Self::OpenAsJson => "Open as JSON".to_string(),
-            Self::OpenAsTable => "Open as table".to_string(),
+            Self::OpenAsTable => "Open as Table".to_string(),
             Self::CopyAsCsv => "Copy as CSV".to_string(),
             Self::OpenUrl => format!("Open {}", local_url.map(url_label).unwrap_or_default()),
             Self::Stop => "Stop".to_string(),
@@ -331,6 +331,11 @@ pub(crate) fn smart_block_menu_items(
     menu: ContextMenu,
     buttons: Vec<(ToolbarButton, String)>,
 ) -> ContextMenu {
+    let menu = if buttons.is_empty() {
+        menu
+    } else {
+        menu.separator()
+    };
     buttons.into_iter().fold(menu, |menu, (button, label)| {
         menu.action(label, button.action())
     })
@@ -959,6 +964,6 @@ mod tests {
         assert_eq!(toolbar_buttons(None, false, url, true), [OpenUrl, Stop]);
         assert_eq!(toolbar_buttons(None, false, url, false), []);
         assert_eq!(ToolbarButton::OpenUrl.label(url), "Open localhost:3000");
-        assert_eq!(ToolbarButton::RerunFailed.label(None), "Re-run failed");
+        assert_eq!(ToolbarButton::RerunFailed.label(None), "Re-run Failed");
     }
 }
