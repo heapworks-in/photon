@@ -1753,7 +1753,7 @@ impl CallHierarchyPanel {
         let rows = start_points.iter().enumerate().map(|(ix, start_point)| {
             let selector = format!("{id}-{}", start_point.name);
             let clicked = start_point.clone();
-            div().debug_selector(move || selector.clone()).child(
+            div().debug_selector(move || selector).child(
                 ListItem::new((id, ix))
                     .height(row_height())
                     .start_slot(glyph(start_point.tag, cx))
