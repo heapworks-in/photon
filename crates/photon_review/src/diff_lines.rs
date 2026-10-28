@@ -1,13 +1,23 @@
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use buffer_diff::DiffHunkStatusKind;
 use editor::GutterColumns;
 use gpui::{AnyElement, App, IntoElement, ParentElement, Pixels, Styled, TextStyle, Window, div};
+use language::BufferId;
 use language::Point;
 use multi_buffer::{MultiBufferSnapshot, RowInfo};
+use parking_lot::RwLock;
 use ui::{ActiveTheme, FluentBuilder, h_flex, v_flex};
 use util::ResultExt;
 
 /// The review diff's gutter, GitHub-style: old and new line numbers, then `+` or `−`.
-pub struct DiffLineNumbers;
+#[derive(Default)]
+pub struct DiffLineNumbers {
+    /// Head rows of folded renames. A replacing block's first row reports the first row it
+    /// replaces, and the fold's header there must not show that row's numbers.
+    pub folded_rows: Arc<RwLock<HashSet<(BufferId, u32)>>>,
+}
 
 const MIN_DIGITS: u32 = 3;
 const ROW_TINT: f32 = 0.14;
@@ -95,6 +105,7 @@ impl GutterColumns for DiffLineNumbers {
             .unwrap_or_default();
         let digits = digits(buffer);
         let colors = cx.theme().colors();
+        let folded_rows = self.folded_rows.read();
         let number = |line: Option<u32>| {
             div()
                 .w(ch * digits as f32)
@@ -108,7 +119,19 @@ impl GutterColumns for DiffLineNumbers {
             .text_size(font_size)
             .line_height(line_height)
             .children(rows.iter().map(|row| {
-                let line = diff_line(row, buffer);
+                let folded = row
+                    .buffer_id
+                    .zip(row.buffer_row)
+                    .is_some_and(|row| folded_rows.contains(&row));
+                let line = if folded {
+                    DiffLine {
+                        old: None,
+                        new: None,
+                        kind: None,
+                    }
+                } else {
+                    diff_line(row, buffer)
+                };
                 let (tint, marker) = match line.kind {
                     Some(DiffHunkStatusKind::Added) => (Some(colors.version_control_added), "+"),
                     Some(DiffHunkStatusKind::Deleted) => {
@@ -195,7 +218,7 @@ mod tests {
 
     impl GutterColumns for Recording {
         fn width(&self, buffer: &MultiBufferSnapshot, ch_advance: Pixels, cx: &App) -> Pixels {
-            DiffLineNumbers.width(buffer, ch_advance, cx)
+            DiffLineNumbers::default().width(buffer, ch_advance, cx)
         }
 
         fn render(
@@ -208,7 +231,7 @@ mod tests {
             cx: &mut App,
         ) -> AnyElement {
             *self.0.lock() = rows.iter().map(|row| diff_line(row, buffer)).collect();
-            DiffLineNumbers.render(rows, buffer, text_style, line_height, window, cx)
+            DiffLineNumbers::default().render(rows, buffer, text_style, line_height, window, cx)
         }
     }
 
