@@ -4205,7 +4205,28 @@ impl ReviewItem {
     /// A step is viewed when ticked here, or when GitHub has all its files viewed. A tick from an
     /// older head counts as changed once the step's diff differs or GitHub says a file changed.
     fn step_state(&self, step: &Step) -> ViewedState {
-        let file = |path: &String| self.detail.files.iter().find(|file| file.path == *path);
+        self.step_state_in(step, &self.files_by_path())
+    }
+
+    /// The PR's files by path, so a render looks each one up once instead of scanning the list.
+    fn files_by_path(&self) -> HashMap<&str, &crate::PrFile> {
+        self.detail
+            .files
+            .iter()
+            .map(|file| (file.path.as_str(), file))
+            .collect()
+    }
+
+    fn step_states(&self) -> Vec<ViewedState> {
+        let files = self.files_by_path();
+        self.steps
+            .iter()
+            .map(|step| self.step_state_in(step, &files))
+            .collect()
+    }
+
+    fn step_state_in(&self, step: &Step, files: &HashMap<&str, &crate::PrFile>) -> ViewedState {
+        let file = |path: &String| files.get(path.as_str()).copied();
         if let Some(mark) = self.viewed_steps.get(&step.key) {
             let ticked_at_head = mark.head.as_deref() == Some(self.checkout.head_sha.as_str());
             let changed = !ticked_at_head
@@ -6073,21 +6094,20 @@ impl ReviewItem {
         });
     }
 
-    /// What's left to review.
     /// The first step after the selected one, wrapping around, that isn't viewed yet.
-    fn next_unviewed(&self) -> Option<usize> {
-        let count = self.steps.len();
+    fn next_unviewed(&self, states: &[ViewedState]) -> Option<usize> {
+        let count = states.len();
         (1..count)
             .map(|offset| (self.selected + offset) % count)
-            .find(|index| self.step_state(&self.steps[*index]) != ViewedState::Viewed)
+            .find(|index| states[*index] != ViewedState::Viewed)
     }
 
+    /// What's left to review.
     fn progress_text(&self) -> String {
-        let states: Vec<ViewedState> = self
-            .steps
-            .iter()
-            .map(|step| self.step_state(step))
-            .collect();
+        Self::progress_text_for(&self.step_states())
+    }
+
+    fn progress_text_for(states: &[ViewedState]) -> String {
         let left = states
             .iter()
             .filter(|state| **state != ViewedState::Viewed)
@@ -7265,6 +7285,7 @@ impl ReviewItem {
         if self.comments_view {
             return map.children(self.render_comments_view(cx));
         }
+        let states = self.step_states();
         let mut map = map
             .child(
                 h_flex()
@@ -7275,12 +7296,12 @@ impl ReviewItem {
                             .min_w_0()
                             .debug_selector(|| "photon-review-progress".into())
                             .child(
-                                Label::new(self.progress_text())
+                                Label::new(Self::progress_text_for(&states))
                                     .size(LabelSize::Small)
                                     .color(Color::Muted),
                             ),
                     )
-                    .children(self.next_unviewed().map(|index| {
+                    .children(self.next_unviewed(&states).map(|index| {
                         div()
                             .debug_selector(|| "photon-review-next-unviewed".into())
                             .child(
@@ -7344,7 +7365,7 @@ impl ReviewItem {
         );
         for (index, step) in self.steps.iter().enumerate() {
             let selected = index == self.selected && !self.conversation_open;
-            let state = self.step_state(step);
+            let state = states[index];
             let viewed = state == ViewedState::Viewed;
             map = map.child(
                 h_flex()
@@ -7508,7 +7529,9 @@ impl ReviewItem {
                         )))
                         .pl_6()
                         .gap_1p5()
-                        .tooltip(Tooltip::text("Unchanged code that calls or is called by this change"))
+                        .tooltip(Tooltip::text(
+                            "Unchanged code that calls or is called by this change",
+                        ))
                         .child(
                             div()
                                 .size_1p5()
@@ -13847,6 +13870,16 @@ fn verify_password(user: &str, password: &str) -> bool {
         .await;
         settle(&mut cx);
         (item, cx)
+    }
+
+    #[gpui::test]
+    async fn brackets_move_between_steps_from_the_diff(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_reformatted(cx).await;
+        assert_eq!(item.read_with(&cx, |item, _| item.selected), 0);
+        press_in_diff(&item, "]", &mut cx);
+        assert_eq!(item.read_with(&cx, |item, _| item.selected), 1);
+        press_in_diff(&item, "[", &mut cx);
+        assert_eq!(item.read_with(&cx, |item, _| item.selected), 0);
     }
 
     /// The review's keys from the default macOS keymap, with the diff focused.

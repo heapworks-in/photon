@@ -1934,6 +1934,8 @@
       "p": "photon_review::PreviousComment",
       "r": "photon_review::ReplyToComment",
       "shift-r": "photon_review::ResolveComment",
+      "]": "photon_review::NextStep",
+      "[": "photon_review::PreviousStep",
     },
   },
 ]
