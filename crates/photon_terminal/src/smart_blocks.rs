@@ -213,7 +213,7 @@ impl SmartBlocks {
         self.run_git_action(
             id,
             vec![path.clone()],
-            vec!["add".into(), "--".into(), path.clone()],
+            vec!["add".into(), "--".into(), path],
             RowMark::Staged,
             cx,
         );
