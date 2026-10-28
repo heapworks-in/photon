@@ -67,7 +67,7 @@ use crate::{
 use crate::{CheckOutcome, MergeMethod, PrState, Readiness, remove_from_inbox};
 use crate::{
     Chip, HunkMeaning, SinceViewed, checkout::git_raw, classify_file, file_summary, is_commit_id,
-    mark_since_viewed, rows_changed_since,
+    is_test_function, mark_since_viewed, rows_changed_since,
 };
 use crate::{Move, ViewFile, is_generated, open_feedback, push_command, simplified_bases};
 use crate::{TimelineEvent, issue_comment_request, parse_timeline, timeline_request};
@@ -337,6 +337,8 @@ pub struct ReviewItem {
     meaning_blocks: HashSet<CustomBlockId>,
     /// Rename-only hunks opened from their one-line fold, by path and first row.
     shown_renames: HashSet<(String, u32)>,
+    /// The changed test functions that call each changed function, by function index.
+    test_reach: Vec<Vec<usize>>,
     _meaning_task: Task<()>,
     /// Each changed function's callers, by function index, worked out once the call data
     /// arrives.
@@ -913,6 +915,54 @@ fn mark_tag(mark: CallerMark) -> (&'static str, Color) {
     }
 }
 
+/// The callers popover of the changed function at `function_index`.
+fn callers_menu(
+    item: WeakEntity<ReviewItem>,
+    function_index: usize,
+    title: String,
+) -> impl Fn(&mut Window, &mut App) -> Option<Entity<ui::ContextMenu>> + 'static {
+    move |window, cx| {
+        let rows = item
+            .read_with(cx, |item, _| item.callers(function_index).to_vec())
+            .ok()?;
+        let title = title.clone();
+        Some(ui::ContextMenu::build(window, cx, move |menu, _, _| {
+            let mut menu = menu.header(format!("Callers of {title}"));
+            if rows.is_empty() {
+                return menu.custom_row(|_, _| {
+                    div()
+                        .debug_selector(|| "photon-review-no-callers".into())
+                        .child(
+                            Label::new("No callers found")
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .into_any_element()
+                });
+            }
+            for (index, row) in rows.iter().enumerate() {
+                let (tag, color) = mark_tag(row.mark);
+                let location = row.location.clone();
+                let explanation = mark_explanation(row.mark);
+                menu = menu.custom_row(move |_, _| {
+                    let selector = format!("photon-review-caller-{location}-{tag}");
+                    h_flex()
+                        .id(("photon-review-caller", index))
+                        .debug_selector(move || selector)
+                        .w_full()
+                        .justify_between()
+                        .gap_4()
+                        .tooltip(Tooltip::text(explanation))
+                        .child(Label::new(location.clone()).size(LabelSize::Small))
+                        .child(Label::new(tag).size(LabelSize::XSmall).color(color))
+                        .into_any_element()
+                });
+            }
+            menu
+        }))
+    }
+}
+
 struct MeaningChip {
     kind: &'static str,
     label: SharedString,
@@ -921,7 +971,14 @@ struct MeaningChip {
 }
 
 enum MeaningAction {
-    Lines { shown: bool },
+    Callers {
+        function_index: usize,
+        count: usize,
+        title: String,
+    },
+    Lines {
+        shown: bool,
+    },
     Reviewed,
 }
 
@@ -961,6 +1018,43 @@ fn meaning_renderer(item: WeakEntity<ReviewItem>, header: MeaningHeader) -> Rend
             );
         }
         let action = header.action.as_ref().map(|action| match action {
+            MeaningAction::Callers {
+                function_index,
+                count,
+                title,
+            } => {
+                let selector = format!("photon-review-hunk-callers-{place}");
+                let label = if *count == 1 {
+                    "1 caller not updated ›".to_string()
+                } else {
+                    format!("{count} callers not updated ›")
+                };
+                div()
+                    .debug_selector(move || selector)
+                    .child(
+                        ui::PopoverMenu::new(SharedString::from(format!(
+                            "photon-review-hunk-callers-{place}"
+                        )))
+                        .trigger(
+                            Button::new(
+                                SharedString::from(format!(
+                                    "photon-review-hunk-callers-button-{place}"
+                                )),
+                                label,
+                            )
+                            .style(ButtonStyle::Subtle)
+                            .size(ButtonSize::Compact)
+                            .label_size(LabelSize::XSmall)
+                            .color(Color::Accent),
+                        )
+                        .menu(callers_menu(
+                            item.clone(),
+                            *function_index,
+                            title.clone(),
+                        )),
+                    )
+                    .into_any_element()
+            }
             MeaningAction::Lines { shown } => {
                 let selector = format!("photon-review-hunk-lines-{place}");
                 let item = item.clone();
@@ -2093,6 +2187,7 @@ impl ReviewItem {
             hunk_meanings: Vec::new(),
             meaning_blocks: HashSet::new(),
             shown_renames: HashSet::new(),
+            test_reach: Vec::new(),
             _meaning_task: Task::ready(()),
             callers: Vec::new(),
             database,
@@ -5150,6 +5245,7 @@ impl ReviewItem {
             .collect();
         self.contexts = vec![None; self.functions.len()];
         self.callers = Vec::new();
+        self.test_reach = Vec::new();
         self.hunk_meanings = Vec::new();
         self.analyses = analyses;
         self.rebuild_map(&[], cx);
@@ -5196,6 +5292,13 @@ impl ReviewItem {
         self.contexts = results.into_iter().map(Result::ok).collect();
         let edges = call_edges(&self.functions, &self.contexts, cx);
         self.compute_callers(cx);
+        self.test_reach = vec![Vec::new(); self.functions.len()];
+        for &(caller, callee) in &edges {
+            let caller_is_test = self.functions.get(caller).is_some_and(is_test_function);
+            if caller_is_test && let Some(tests) = self.test_reach.get_mut(callee) {
+                tests.push(caller);
+            }
+        }
         self.rebuild_map(&edges, cx);
     }
 
@@ -5585,6 +5688,47 @@ impl ReviewItem {
         cx.notify();
     }
 
+    /// The hunk's changed rows inside changed functions, as (reached by a changed test, not
+    /// reached), with the tests' names; `None` until the call data is in.
+    fn hunk_tests(&self, hunk: &HunkMeaning) -> Option<(usize, usize, Vec<String>)> {
+        if self.test_reach.is_empty() || !hunk.adds {
+            return None;
+        }
+        let (mut reached, mut unreached, mut tests) = (0, 0, Vec::new());
+        for row in hunk.rows.clone() {
+            let function = self
+                .functions
+                .iter()
+                .enumerate()
+                .filter(|(_, function)| {
+                    function.path == hunk.path
+                        && function.range.start.row <= row
+                        && row <= function.range.end.row
+                })
+                .max_by_key(|(_, function)| function.range.start);
+            let Some((index, function)) = function else {
+                continue;
+            };
+            if is_test_function(function) {
+                continue;
+            }
+            let reaching = self.test_reach.get(index).map_or(&[][..], Vec::as_slice);
+            if reaching.is_empty() {
+                unreached += 1;
+                continue;
+            }
+            reached += 1;
+            for &test in reaching {
+                if let Some(test) = self.functions.get(test)
+                    && !tests.contains(&test.name)
+                {
+                    tests.push(test.name.clone());
+                }
+            }
+        }
+        (reached + unreached > 0).then_some((reached, unreached, tests))
+    }
+
     fn meaning_header(&self, hunk: &HunkMeaning) -> MeaningHeader {
         let place = format!("{}:{}", hunk.path, hunk.rows.start + 1);
         let mut chips = Vec::new();
@@ -5636,6 +5780,36 @@ impl ReviewItem {
                 Some("Changed after the commit you last viewed".into()),
             ));
         }
+        // Renames, moves and formatting don't change what a test would check.
+        let changes_behaviour = hunk
+            .chips
+            .iter()
+            .any(|chip| matches!(chip, Chip::BehaviourChange | Chip::SignatureChanged));
+        if let Some((reached, unreached, tests)) =
+            self.hunk_tests(hunk).filter(|_| changes_behaviour)
+        {
+            let names = tests.join(", ");
+            chips.push(if unreached == 0 {
+                chip(
+                    "tested",
+                    "✓ tests cover it",
+                    Color::Success,
+                    Some(format!("Reached by {names}")),
+                )
+            } else {
+                let lines = if unreached == 1 { "line" } else { "lines" };
+                chip(
+                    "untested",
+                    &format!("○ {unreached} {lines} without a test"),
+                    Color::Muted,
+                    Some(if reached == 0 {
+                        "No test changed in this pull request calls this code".to_string()
+                    } else {
+                        format!("The other {reached} reached by {names}")
+                    }),
+                )
+            });
+        }
         let function = hunk.function.and_then(|index| self.functions.get(index));
         let moved = hunk.chips.iter().find_map(|chip| match chip {
             Chip::Moved { from_line, to_line } => Some((*from_line, *to_line)),
@@ -5653,7 +5827,25 @@ impl ReviewItem {
         let shown = self
             .shown_renames
             .contains(&(hunk.path.clone(), hunk.rows.start));
-        let action = if rename.is_some() {
+        let not_updated = hunk
+            .function
+            .filter(|_| hunk.chips.contains(&Chip::SignatureChanged))
+            .map(|index| {
+                let count = self
+                    .callers(index)
+                    .iter()
+                    .filter(|row| row.mark == CallerMark::NotUpdated)
+                    .count();
+                (index, count)
+            })
+            .filter(|(_, count)| *count > 0);
+        let action = if let Some((function_index, count)) = not_updated {
+            Some(MeaningAction::Callers {
+                function_index,
+                count,
+                title: function.map_or_else(String::new, |function| format!("{}()", function.name)),
+            })
+        } else if rename.is_some() {
             Some(MeaningAction::Lines { shown })
         } else if hunk.since_viewed == SinceViewed::Reviewed {
             Some(MeaningAction::Reviewed)
@@ -6824,46 +7016,7 @@ impl ReviewItem {
                         .color(Color::Accent),
                     Tooltip::text("Changed in this PR. Click to see its callers"),
                 )
-                .menu(move |window, cx| {
-                    let rows = item
-                        .read_with(cx, |item, _| item.callers(function_index).to_vec())
-                        .ok()?;
-                    let title = title.clone();
-                    Some(ui::ContextMenu::build(window, cx, move |menu, _, _| {
-                        let mut menu = menu.header(format!("Callers of {title}"));
-                        if rows.is_empty() {
-                            return menu.custom_row(|_, _| {
-                                div()
-                                    .debug_selector(|| "photon-review-no-callers".into())
-                                    .child(
-                                        Label::new("No callers found")
-                                            .size(LabelSize::Small)
-                                            .color(Color::Muted),
-                                    )
-                                    .into_any_element()
-                            });
-                        }
-                        for (index, row) in rows.iter().enumerate() {
-                            let (tag, color) = mark_tag(row.mark);
-                            let location = row.location.clone();
-                            let explanation = mark_explanation(row.mark);
-                            menu = menu.custom_row(move |_, _| {
-                                let selector = format!("photon-review-caller-{location}-{tag}");
-                                h_flex()
-                                    .id(("photon-review-caller", index))
-                                    .debug_selector(move || selector)
-                                    .w_full()
-                                    .justify_between()
-                                    .gap_4()
-                                    .tooltip(Tooltip::text(explanation))
-                                    .child(Label::new(location.clone()).size(LabelSize::Small))
-                                    .child(Label::new(tag).size(LabelSize::XSmall).color(color))
-                                    .into_any_element()
-                            });
-                        }
-                        menu
-                    }))
-                })
+                .menu(callers_menu(item, function_index, title))
                 .into_any_element()
         } else {
             Label::new(label)
@@ -14250,6 +14403,43 @@ fn test_delay() {
         let shown = display(&item, &mut cx);
         assert!(shown.contains("total * attempts"), "{shown}");
         assert!(shown.contains("total * max_attempts"), "{shown}");
+    }
+
+    #[gpui::test]
+    async fn changed_rows_are_marked_by_the_tests_that_reach_them(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_retry(cx, None, checkout()).await;
+        show_step_with(&item, "src/retry.rs", 0, &mut cx);
+        assert!(drawn("photon-review-chip-tested-src/retry.rs:1", &mut cx));
+        assert!(!drawn(
+            "photon-review-chip-untested-src/retry.rs:1",
+            &mut cx
+        ));
+        let tests = item.read_with(&cx, |item, _| {
+            item.hunk_meanings
+                .iter()
+                .map(|hunk| item.hunk_tests(hunk))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(tests[0], Some((2, 0, vec!["test_delay".to_string()])));
+        assert_eq!(tests[1], Some((0, 3, Vec::new())));
+        show_step_with(&item, "src/retry.rs", 4, &mut cx);
+        assert!(
+            !drawn("photon-review-chip-untested-src/retry.rs:5", &mut cx),
+            "a rename needs no test"
+        );
+        show_step_with(&item, "src/limit.rs", 1, &mut cx);
+        assert!(drawn("photon-review-chip-untested-src/limit.rs:2", &mut cx));
+    }
+
+    #[gpui::test]
+    async fn a_changed_signature_links_its_callers_not_updated(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_retry(cx, None, checkout()).await;
+        show_step_with(&item, "src/retry.rs", 0, &mut cx);
+        click("photon-review-hunk-callers-src/retry.rs:1", &mut cx);
+        assert!(drawn(
+            "photon-review-caller-src/retry.rs:16-not updated",
+            &mut cx
+        ));
     }
 
     #[gpui::test]

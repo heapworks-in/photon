@@ -360,6 +360,20 @@ pub fn mark_since_viewed(hunks: &mut [HunkMeaning], changed: &HashSet<u32>) {
     }
 }
 
+/// A test function, by name or by the module or file it sits in.
+pub fn is_test_function(function: &ChangedFunction) -> bool {
+    let name = function.name.to_lowercase();
+    name.starts_with("test")
+        || name.ends_with("_test")
+        || function
+            .outline_path
+            .iter()
+            .rev()
+            .skip(1)
+            .any(|segment| matches!(segment.as_str(), "tests" | "test"))
+        || crate::classify_path(&function.path) == crate::FileKind::Test
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
