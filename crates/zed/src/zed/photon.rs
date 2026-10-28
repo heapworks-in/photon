@@ -465,6 +465,14 @@ mod tests {
     }
 
     #[test]
+    fn new_file_shortcut_makes_a_file_from_a_terminal_too() {
+        let macos = include_str!("../../../../assets/keymaps/default-macos.json");
+        let windows = include_str!("../../../../assets/keymaps/default-windows.json");
+        assert!(!macos.contains("\"cmd-n\": \"workspace::NewTerminal\""));
+        assert!(!windows.contains("\"ctrl-n\": \"workspace::NewTerminal\""));
+    }
+
+    #[test]
     fn photon_tab_shortcuts_are_unique_in_their_keymap_block() {
         fn normalize(keystrokes: &str) -> String {
             keystrokes

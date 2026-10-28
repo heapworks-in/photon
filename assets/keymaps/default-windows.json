@@ -1345,7 +1345,7 @@
       "alt-f": ["terminal::SendText", "\u001bf"],
       "alt-.": ["terminal::SendText", "\u001b."],
       "ctrl-delete": ["terminal::SendText", "\u001bd"],
-      "ctrl-n": "workspace::NewTerminal",
+      "ctrl-n": "workspace::NewFile", // photon: terminals live in the center, so ctrl-n still makes a file
       // Overrides for conflicting keybindings
       "alt-f4": "workspace::CloseWindow",
       "ctrl-b": ["terminal::SendKeystroke", "ctrl-b"],

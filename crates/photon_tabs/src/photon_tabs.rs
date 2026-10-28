@@ -913,6 +913,19 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn closing_an_empty_pane_closes_only_its_tab(cx: &mut TestAppContext) {
+        let (multi_workspace, _tabs, mut cx) = window_with_projects(&["/a", "/b"], cx).await;
+        let pane =
+            multi_workspace.read_with(&cx, |mw, cx| mw.workspace().read(cx).active_pane().clone());
+        pane.update_in(&mut cx, |pane, window, cx| {
+            pane.close_active_item(&Default::default(), window, cx)
+                .detach_and_log_err(cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(labels(&multi_workspace, &mut cx), ["a"]);
+    }
+
+    #[gpui::test]
     async fn close_tab_with_unsaved_changes_can_be_cancelled(cx: &mut TestAppContext) {
         let (multi_workspace, _tabs, mut cx) = window_with_projects(&["/a", "/b"], cx).await;
         let workspace_b = multi_workspace.read_with(&cx, |mw, _| mw.workspace().clone());

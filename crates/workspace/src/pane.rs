@@ -1620,7 +1620,11 @@ impl Pane {
                 .when_closing_with_no_tabs
                 .should_close()
             {
-                window.dispatch_action(Box::new(CloseWindow), cx);
+                // photon: close only this project tab; the last tab still closes the window.
+                let action = cx
+                    .build_action("photon_tabs::CloseTab", None)
+                    .unwrap_or_else(|_| Box::new(CloseWindow));
+                window.dispatch_action(action, cx);
             }
 
             return Task::ready(Ok(()));
