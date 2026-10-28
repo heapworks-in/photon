@@ -629,7 +629,7 @@ impl Render for ProjectTabs {
                 multi_workspace.workspace().clone(),
             )
         };
-        if workspaces.len() < 2 {
+        if workspaces.is_empty() {
             return h_flex().into_any_element();
         }
 
@@ -688,6 +688,7 @@ impl Render for ProjectTabs {
                 h_flex()
                     .h_full()
                     .px(DynamicSpacing::Base06.rems(cx))
+                    .debug_selector(|| "photon-new-tab".into())
                     .border_t_1()
                     .border_l_1()
                     .border_color(cx.theme().colors().border)
@@ -733,7 +734,6 @@ impl Render for DraggedProjectTab {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs::FakeFs;
     use gpui::{Focusable as _, Modifiers, TestAppContext, VisualTestContext};
     use serde_json::json;
     use settings::SettingsStore;
@@ -748,10 +748,13 @@ mod tests {
         });
     }
 
-    static NEW_TAB_INITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    // Per thread: each GPUI test runs on its own thread, and other tests open tabs too.
+    thread_local! {
+        static NEW_TAB_INITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
 
     fn count_new_tab(_: &mut Workspace, _: &mut Window, _: &mut Context<Workspace>) {
-        NEW_TAB_INITS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        NEW_TAB_INITS.set(NEW_TAB_INITS.get() + 1);
     }
 
     fn dispatch(action: impl gpui::Action, cx: &mut VisualTestContext) {
@@ -863,18 +866,14 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn strip_hidden_with_one_project(cx: &mut TestAppContext) {
+    async fn one_project_still_shows_its_tab_and_the_new_tab_button(cx: &mut TestAppContext) {
         let (multi_workspace, tabs, mut cx) = window_with_projects(&["/a"], cx).await;
-        assert!(cx.debug_bounds("photon-project-tab-0").is_none());
-
-        let fs = FakeFs::new(cx.executor());
-        fs.insert_tree("/b", json!({ "file.txt": "" })).await;
-        let project = Project::test(fs, ["/b".as_ref()], &mut cx).await;
-        multi_workspace.update_in(&mut cx, |mw, window, cx| {
-            mw.test_add_workspace(project, window, cx);
-        });
-        show_tabs(&multi_workspace, &tabs, &mut cx);
         assert!(cx.debug_bounds("photon-project-tab-0").is_some());
+
+        click_tab("photon-new-tab", &mut cx);
+        show_tabs(&multi_workspace, &tabs, &mut cx);
+        assert_eq!(labels(&multi_workspace, &mut cx), ["a", "empty project"]);
+        assert!(cx.debug_bounds("photon-project-tab-1").is_some());
     }
 
     #[gpui::test]
@@ -983,7 +982,7 @@ mod tests {
     #[gpui::test]
     async fn new_tab_adds_empty_project_and_runs_init(cx: &mut TestAppContext) {
         let (multi_workspace, _tabs, mut cx) = window_with_projects(&["/a", "/b"], cx).await;
-        let inits = NEW_TAB_INITS.load(std::sync::atomic::Ordering::SeqCst);
+        let inits = NEW_TAB_INITS.get();
 
         dispatch(NewTab, &mut cx);
         assert_eq!(
@@ -991,10 +990,7 @@ mod tests {
             ["a", "b", "empty project"]
         );
         assert_eq!(active_label(&multi_workspace, &mut cx), "empty project");
-        assert_eq!(
-            NEW_TAB_INITS.load(std::sync::atomic::Ordering::SeqCst),
-            inits + 1
-        );
+        assert_eq!(NEW_TAB_INITS.get(), inits + 1);
     }
 
     #[gpui::test]
