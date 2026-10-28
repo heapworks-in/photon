@@ -213,7 +213,7 @@ impl SmartBlocks {
         self.run_git_action(
             id,
             vec![path.clone()],
-            ["add", "--", &path],
+            vec!["add".into(), "--".into(), path.clone()],
             RowMark::Staged,
             cx,
         );
@@ -223,8 +223,13 @@ impl SmartBlocks {
         let Some(Insight::GitStatus { files }) = self.insight(id) else {
             return;
         };
-        let paths = files.iter().map(|file| file.path.clone()).collect();
-        self.run_git_action(id, paths, ["add", "-A"], RowMark::Staged, cx);
+        let paths: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
+        let args = ["add", "-A", "--"]
+            .into_iter()
+            .map(str::to_string)
+            .chain(paths.iter().cloned())
+            .collect();
+        self.run_git_action(id, paths, args, RowMark::Staged, cx);
     }
 
     /// Asks first: `git restore` throws the changes away for good.
@@ -254,7 +259,7 @@ impl SmartBlocks {
                 this.run_git_action(
                     id,
                     vec![path.clone()],
-                    ["restore", "--", &path],
+                    vec!["restore".into(), "--".into(), path.clone()],
                     RowMark::Discarded,
                     cx,
                 )
@@ -380,11 +385,11 @@ impl SmartBlocks {
         })
     }
 
-    fn run_git_action<const N: usize>(
+    fn run_git_action(
         &mut self,
         id: BlockId,
         paths: Vec<String>,
-        args: [&str; N],
+        args: Vec<String>,
         mark: RowMark,
         cx: &mut Context<Self>,
     ) {
@@ -392,9 +397,8 @@ impl SmartBlocks {
             self.show_error("This block has no working directory".to_string(), cx);
             return;
         };
-        let args = args.map(str::to_string);
         cx.spawn(async move |this, cx| {
-            let args = args.each_ref().map(String::as_str);
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
             let result = match block_paths.directory().await {
                 Ok(directory) => run_git(&directory, &args, true).await,
                 Err(error) => Err(error),
@@ -1660,6 +1664,27 @@ mod tests {
             assert_eq!(
                 git_stdout(path, &["diff", "--cached", "--name-only"]).await,
                 "a.txt\n"
+            );
+        }
+
+        #[gpui::test]
+        async fn stage_all_stages_only_the_listed_files(cx: &mut TestAppContext) {
+            cx.executor().allow_parking();
+            let Some(directory) = repository().await else {
+                return;
+            };
+            let path = directory.path();
+            let (terminal, smart, _workspace, mut cx) = setup_with_workspace(cx).await;
+            feed(&terminal, &status_block(path, " M a.txt\r\n"), &mut cx);
+            let id = block_ids(&terminal, &mut cx)[0];
+            smart.update(&mut cx, |smart, cx| smart.stage_all(id, cx));
+            wait_until(&mut cx, |cx| {
+                smart.read_with(cx, |smart, _| smart.row_mark(id, "a.txt").is_some())
+            });
+            assert_eq!(
+                git_stdout(path, &["diff", "--cached", "--name-only"]).await,
+                "a.txt\n",
+                "a b.txt is modified too, but the block didn't list it"
             );
         }
 
