@@ -249,7 +249,7 @@ pub struct TerminalSettingsContent {
     ///
     /// Default: true
     pub smart_blocks: Option<bool>,
-    // photon: smart blocks.
+    // photon: notify when long commands finish.
     /// Seconds a command must have run before its finish notifies while Photon is in the
     /// background. 0 turns notifications off.
     ///

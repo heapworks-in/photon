@@ -77,6 +77,7 @@ pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
         debugger_page(),
         terminal_page(),
         version_control_page(),
+        crate::photon_pages::pull_requests_page(), // photon: PR review settings
         collaboration_page(),
         ai_page(cx),
         network_page(),
@@ -8125,6 +8126,7 @@ fn terminal_page() -> SettingsPage {
             advanced_settings_section(),
             toolbar_section(),
             scrollbar_section(),
+            crate::photon_pages::command_blocks_section(), // photon: command blocks
         ],
     }
 }
