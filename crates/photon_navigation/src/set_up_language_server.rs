@@ -467,7 +467,7 @@ impl Render for SetUpLanguageServer {
             ),
             Problem::Missing { .. } => (
                 "No language server",
-                "Set up",
+                "Set Up",
                 "Set up a language server",
                 Color::Muted,
             ),
@@ -482,7 +482,7 @@ impl Render for SetUpLanguageServer {
             }
             Problem::NeedsJava { .. } => (
                 "Needs Java 21",
-                "Set up",
+                "Set Up",
                 "Set up Java for Java code intelligence",
                 Color::Warning,
             ),

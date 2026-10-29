@@ -147,9 +147,9 @@ pub fn row_meta(summary: &PrSummary, has_drafts: bool) -> RowMeta {
         meta: format!("#{} · {} · {repository}", key.number, summary.author),
         badges,
         primary_action: if summary.last_review_commit.is_some() || has_drafts {
-            "Continue review"
+            "Continue Review"
         } else {
-            "Start review"
+            "Start Review"
         },
     }
 }
@@ -815,7 +815,7 @@ impl Render for InboxPanel {
                         "Load the open pull requests for this window's repositories.".into(),
                         Color::Muted,
                     )),
-                    Some("Load pull requests"),
+                    Some("Load Pull Requests"),
                     None,
                 ))
             }
@@ -868,7 +868,7 @@ impl Render for InboxPanel {
                     IconName::Warning,
                     "Couldn't load pull requests",
                     Some((error.to_string().into(), Color::Error)),
-                    fix.is_none().then_some("Try again"),
+                    fix.is_none().then_some("Try Again"),
                     Some(extra),
                 ))
             }
@@ -1806,7 +1806,7 @@ mod tests {
         assert_eq!(meta.title, "Add retry");
         assert_eq!(meta.meta, "#482 · alice · acme/web");
         assert!(meta.badges.is_empty());
-        assert_eq!(meta.primary_action, "Start review");
+        assert_eq!(meta.primary_action, "Start Review");
 
         row.key.host = "ghe.corp".into();
         assert_eq!(
@@ -1857,9 +1857,9 @@ mod tests {
         row.since_review = SinceReview::UpToDate;
         assert_eq!(row_meta(&row, false).badges.len(), 2);
 
-        assert_eq!(row_meta(&row, true).primary_action, "Continue review");
+        assert_eq!(row_meta(&row, true).primary_action, "Continue Review");
         row.last_review_commit = Some("a0".into());
-        assert_eq!(row_meta(&row, false).primary_action, "Continue review");
+        assert_eq!(row_meta(&row, false).primary_action, "Continue Review");
     }
 
     #[test]
@@ -1906,7 +1906,7 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("MENU_ITEM-Run Locally").is_some());
-        assert!(cx.debug_bounds("MENU_ITEM-Start review").is_some());
+        assert!(cx.debug_bounds("MENU_ITEM-Start Review").is_some());
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
 
@@ -1937,7 +1937,7 @@ mod tests {
             (summary.key.clone(), panel.row(&summary).primary_action)
         };
         let (key, action) = panel.read_with(&cx, |panel, _| first_row(panel));
-        assert_eq!(action, "Start review");
+        assert_eq!(action, "Start Review");
 
         let database = cx.update(|_, cx| ReviewDb::global(cx));
         database
@@ -1963,7 +1963,7 @@ mod tests {
         panel.update(&mut cx, |panel, cx| panel.refresh(cx));
         cx.run_until_parked();
         let (_, action) = panel.read_with(&cx, |panel, _| first_row(panel));
-        assert_eq!(action, "Continue review");
+        assert_eq!(action, "Continue Review");
     }
 
     #[gpui::test]

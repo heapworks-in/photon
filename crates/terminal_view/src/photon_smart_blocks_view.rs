@@ -102,9 +102,9 @@ pub(crate) enum RowButton {
 impl RowButton {
     fn label(self) -> &'static str {
         match self {
-            Self::Stage => "stage",
-            Self::Diff => "diff",
-            Self::Discard => "discard",
+            Self::Stage => "Stage",
+            Self::Diff => "Diff",
+            Self::Discard => "Discard",
         }
     }
 }

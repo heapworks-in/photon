@@ -169,6 +169,13 @@ impl DismissReason {
         }
     }
 
+    pub fn title(self) -> &'static str {
+        match self {
+            DismissReason::NotWorthIt => "Not Worth It",
+            reason => reason.label(),
+        }
+    }
+
     fn from_label(label: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|reason| reason.label() == label)
     }

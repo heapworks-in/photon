@@ -1032,9 +1032,9 @@ fn meaning_renderer(item: WeakEntity<ReviewItem>, header: MeaningHeader) -> Rend
             } => {
                 let selector = format!("photon-review-hunk-callers-{place}");
                 let label = if *count == 1 {
-                    "1 caller not updated ›".to_string()
+                    "1 Caller Not Updated ›".to_string()
                 } else {
-                    format!("{count} callers not updated ›")
+                    format!("{count} Callers Not Updated ›")
                 };
                 div()
                     .debug_selector(move || selector)
@@ -1071,7 +1071,7 @@ fn meaning_renderer(item: WeakEntity<ReviewItem>, header: MeaningHeader) -> Rend
                     .child(
                         Button::new(
                             SharedString::from(format!("photon-review-hunk-lines-{place}")),
-                            if *shown { "hide lines" } else { "show lines" },
+                            if *shown { "Hide Lines" } else { "Show Lines" },
                         )
                         .style(ButtonStyle::Subtle)
                         .size(ButtonSize::Compact)
@@ -1403,7 +1403,7 @@ fn dismiss_menu(
                     menu.header("Dismiss because"),
                     |menu, reason| {
                         let item = item.clone();
-                        menu.entry(reason.label(), None, move |_, cx| {
+                        menu.entry(reason.title(), None, move |_, cx| {
                             item.update(cx, |item, cx| {
                                 item.dismiss_agent_draft(local_id, reason, cx)
                             })
@@ -1546,7 +1546,7 @@ fn draft_renderer(
                                 .color(Color::Warning),
                         )
                         .child(
-                            crate::button("include", "Include again")
+                            crate::button("include", "Include Again")
                                 .style(ButtonStyle::Outlined)
                                 .on_click(move |_, _, cx| {
                                     include_item
@@ -1565,7 +1565,7 @@ fn draft_renderer(
                             .color(Color::Error),
                     )
                     .child(
-                        crate::button("retry", "Try again")
+                        crate::button("retry", "Try Again")
                             .style(ButtonStyle::Outlined)
                             .on_click(move |_, _, cx| {
                                 retry_item
@@ -1579,7 +1579,7 @@ fn draft_renderer(
                     h_flex()
                         .gap_1()
                         .child(
-                            crate::button("add", "Add to review")
+                            crate::button("add", "Add to Review")
                                 .style(ButtonStyle::Tinted(TintColor::Accent))
                                 .on_click(move |_, _, cx| {
                                     add_item
@@ -1589,7 +1589,7 @@ fn draft_renderer(
                         )
                         .when(can_suggest, |this| {
                             this.child(
-                                crate::button("suggest", "Suggest change")
+                                crate::button("suggest", "Suggest Change")
                                     .style(ButtonStyle::Subtle)
                                     .tooltip(Tooltip::text(
                                         "Adds the lines as a suggestion the author can commit",
@@ -1797,7 +1797,7 @@ fn thread_renderer(
                     .when(has_suggestion, |this| {
                         this.child(
                             h_flex().pt_1().child(
-                                crate::button(("commit-suggestion", index), "Commit suggestion")
+                                crate::button(("commit-suggestion", index), "Commit Suggestion")
                                     .style(ButtonStyle::Tinted(TintColor::Accent))
                                     .disabled(suggestion.committing)
                                     .tooltip(Tooltip::text(
@@ -2077,7 +2077,7 @@ impl ReviewItem {
                 let focus = editor.focus_handle(cx);
                 Some(ui::ContextMenu::build(window, cx, move |menu, _, _| {
                     menu.context(focus)
-                        .action("Add comment", AddComment.boxed_clone())
+                        .action("Add Comment", AddComment.boxed_clone())
                         .separator()
                         .action("Copy", editor::actions::Copy.boxed_clone())
                 }))
@@ -3474,7 +3474,7 @@ impl ReviewItem {
                 "Your agent reads these from the checkout and may follow them:\n\n{}\n\nRead them before letting the agent work here.",
                 config_files.join("\n")
             )),
-            &["Start anyway", "Cancel"],
+            &["Start Anyway", "Cancel"],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
@@ -5046,7 +5046,7 @@ impl ReviewItem {
                         div()
                             .debug_selector(|| "photon-review-new-commits-retry".into())
                             .child(
-                                Button::new("photon-review-new-commits-retry", "Try again")
+                                Button::new("photon-review-new-commits-retry", "Try Again")
                                     .label_size(LabelSize::Small)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.retry_new_commits(window, cx)
@@ -6435,7 +6435,7 @@ impl ReviewItem {
                         };
                         menu.when(allows_no, |menu| {
                             menu.toggleable_entry(
-                                "No, add a note",
+                                "No, Add a Note",
                                 answer == Some(Answer::No),
                                 IconPosition::Start,
                                 None,
@@ -6444,7 +6444,7 @@ impl ReviewItem {
                         })
                         .when(allows_not_applicable, |menu| {
                             menu.toggleable_entry(
-                                "Doesn't apply",
+                                "Doesn't Apply",
                                 answer == Some(Answer::NotApplicable),
                                 IconPosition::Start,
                                 None,
@@ -6452,7 +6452,7 @@ impl ReviewItem {
                             )
                         })
                         .when(answer.is_some(), |menu| {
-                            menu.separator().entry("Clear answer", None, set(None))
+                            menu.separator().entry("Clear Answer", None, set(None))
                         })
                     }))
                 });
@@ -6525,13 +6525,13 @@ impl ReviewItem {
             .filter(|hidden| *hidden)
             .count();
         let label = if self.showing_changes_since_review() {
-            "View · since review".to_string()
+            "View · Since Review".to_string()
         } else if unreviewed_on {
-            "View · not reviewed".to_string()
+            "View · Not Reviewed".to_string()
         } else {
             match hidden {
                 0 => "View".to_string(),
-                count => format!("View · {count} hidden"),
+                count => format!("View · {count} Hidden"),
             }
         };
         let point_out_since = since_offered && !self.view_menu_seen;
@@ -6567,21 +6567,21 @@ impl ReviewItem {
                     };
                     menu.header("Hide in diff")
                         .toggleable_entry(
-                            "Whitespace changes",
+                            "Whitespace Changes",
                             hide_whitespace,
                             IconPosition::Start,
                             None,
                             toggle(true),
                         )
                         .toggleable_entry(
-                            "Moved code",
+                            "Moved Code",
                             hide_moves,
                             IconPosition::Start,
                             None,
                             toggle(false),
                         )
                         .toggleable_entry(
-                            "Generated and lock files",
+                            "Generated and Lock Files",
                             hide_generated,
                             IconPosition::Start,
                             None,
@@ -6599,7 +6599,7 @@ impl ReviewItem {
                         .when(unreviewed_offered, |menu| {
                             let item = item.clone();
                             menu.toggleable_entry(
-                                "Only what you haven't reviewed",
+                                "Only What You Haven't Reviewed",
                                 unreviewed_on,
                                 IconPosition::Start,
                                 None,
@@ -6612,7 +6612,7 @@ impl ReviewItem {
                         .when(since_offered, |menu| {
                             let item = item.clone();
                             menu.toggleable_entry(
-                                "Only changes since your review",
+                                "Only Changes Since Your Review",
                                 since_on,
                                 IconPosition::Start,
                                 Some(ToggleChangesSinceReview.boxed_clone()),
@@ -6631,7 +6631,7 @@ impl ReviewItem {
                         .when(anything_hidden, |menu| {
                             let item = item.clone();
                             menu.separator().toggleable_entry(
-                                "Show what's hidden",
+                                "Show What's Hidden",
                                 show_hidden,
                                 IconPosition::Start,
                                 None,
@@ -6667,9 +6667,9 @@ impl ReviewItem {
         let item = cx.weak_entity();
         let agent_offered = review_agent(cx).is_some() && !self.is_own_pr();
         let agent_label = if self.agent_reviewing {
-            "Cancel agent pre-review"
+            "Cancel Agent Pre-review"
         } else {
-            "Pre-review with agent"
+            "Pre-review with Agent"
         };
         let url = self.detail.summary.url.clone();
         let menu = ui::PopoverMenu::new("photon-review-more")
@@ -6691,7 +6691,7 @@ impl ReviewItem {
                                 .log_err();
                         })
                     })
-                    .entry("Run locally", None, {
+                    .entry("Run Locally", None, {
                         let item = item.clone();
                         move |window, cx| {
                             item.update(cx, |item, cx| item.run_locally(window, cx))
@@ -6699,7 +6699,7 @@ impl ReviewItem {
                         }
                     })
                     .entry(
-                        "Add your own checklist…",
+                        "Add Your Own Checklist…",
                         Some(zed_actions::OpenSettingsFile.boxed_clone()),
                         |window, cx| {
                             window.dispatch_action(zed_actions::OpenSettingsFile.boxed_clone(), cx)
@@ -6875,7 +6875,7 @@ impl ReviewItem {
         let push = self.is_own_pr() && self.push_command().is_some();
         let submit = ui::PopoverMenu::new("photon-review-submit")
             .trigger(
-                crate::button("photon-review-submit-trigger", "Submit review").style(if push {
+                crate::button("photon-review-submit-trigger", "Submit Review").style(if push {
                     ButtonStyle::Outlined
                 } else {
                     ButtonStyle::Tinted(TintColor::Accent)
@@ -6896,7 +6896,7 @@ impl ReviewItem {
             .when(push, |this| {
                 this.child(
                     div().debug_selector(|| "photon-review-push".into()).child(
-                        crate::button("photon-review-push-button", "Push changes…")
+                        crate::button("photon-review-push-button", "Push Changes…")
                             .style(ButtonStyle::Tinted(TintColor::Accent))
                             .tooltip(Tooltip::text(
                                 "Opens a terminal with git add, commit and push typed in, for you to run",
@@ -7311,7 +7311,7 @@ impl ReviewItem {
                         div()
                             .debug_selector(|| "photon-review-next-unviewed".into())
                             .child(
-                                Button::new("photon-review-next-unviewed", "Next unviewed")
+                                Button::new("photon-review-next-unviewed", "Next Unviewed")
                                     .style(ButtonStyle::Subtle)
                                     .size(ButtonSize::Compact)
                                     .label_size(LabelSize::XSmall)
@@ -7565,10 +7565,10 @@ impl ReviewItem {
                             Button::new(
                                 "photon-review-step-checklist",
                                 if checklist_items == 1 {
-                                    "1 checklist item applies to these files".to_string()
+                                    "1 Checklist Item Applies to These Files".to_string()
                                 } else {
                                     format!(
-                                        "{checklist_items} checklist items apply to these files"
+                                        "{checklist_items} Checklist Items Apply to These Files"
                                     )
                                 },
                             )
@@ -7725,7 +7725,7 @@ impl ReviewItem {
                                 let include = item.clone();
                                 let general_item = item.clone();
                                 let delete = item.clone();
-                                menu.entry("Place on the selected lines", None, move |_, cx| {
+                                menu.entry("Place on the Selected Lines", None, move |_, cx| {
                                     replace
                                         .update(cx, |item, cx| item.replace_draft(local_id, cx))
                                         .log_err();
@@ -7733,14 +7733,14 @@ impl ReviewItem {
                                 // A draft that may already be posted is included again before
                                 // anything else can send it.
                                 .when(may_be_posted, |menu| {
-                                    menu.entry("Include again", None, move |_, cx| {
+                                    menu.entry("Include Again", None, move |_, cx| {
                                         include
                                             .update(cx, |item, cx| item.include_again(local_id, cx))
                                             .log_err();
                                     })
                                 })
                                 .when(!may_be_posted && !general, |menu| {
-                                    menu.entry("Post as a general comment", None, move |_, cx| {
+                                    menu.entry("Post as a General Comment", None, move |_, cx| {
                                         general_item
                                             .update(cx, |item, cx| {
                                                 item.post_as_general(local_id, cx)
@@ -7750,7 +7750,7 @@ impl ReviewItem {
                                 })
                                 .separator()
                                 .entry(
-                                    "Delete draft",
+                                    "Delete Draft",
                                     None,
                                     move |window, cx| {
                                         delete
@@ -7830,7 +7830,7 @@ impl ReviewItem {
                     )
                     .when(reason.as_ref() == TRUST_REASON, |this| {
                         this.child(
-                            crate::button("photon-review-trust", "Trust worktree…")
+                            crate::button("photon-review-trust", "Trust Worktree…")
                                 .style(ButtonStyle::Tinted(TintColor::Accent))
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(ToggleWorktreeSecurity.boxed_clone(), cx)
@@ -8273,7 +8273,7 @@ impl Render for SubmitPopover {
                 (ReviewEvent::Approve, "Approve", "Lets the author merge"),
                 (
                     ReviewEvent::RequestChanges,
-                    "Request changes",
+                    "Request Changes",
                     "Blocks merging until you approve",
                 ),
             ]
@@ -8281,7 +8281,7 @@ impl Render for SubmitPopover {
         let submit_label = match verdict {
             ReviewEvent::Comment => "Comment",
             ReviewEvent::Approve => "Approve",
-            ReviewEvent::RequestChanges => "Request changes",
+            ReviewEvent::RequestChanges => "Request Changes",
         };
         let can_submit =
             !item.submitting && (verdict != ReviewEvent::Comment || item.can_comment(cx));
@@ -10584,26 +10584,26 @@ fn verify_password(user: &str, password: &str) -> bool {
         assert!(!drawn("photon-review-hidden", &mut cx));
 
         click("photon-review-view", &mut cx);
-        click("MENU_ITEM-Whitespace changes", &mut cx);
+        click("MENU_ITEM-Whitespace Changes", &mut cx);
         settle(&mut cx);
         item.read_with(&cx, |item, _| assert!(item.hide_whitespace));
         assert_eq!(step_files(&item, &mut cx), ["src/b.rs"]);
         assert!(!drawn("photon-review-hidden", &mut cx));
         click("photon-review-view", &mut cx);
-        click("MENU_ITEM-Show what's hidden", &mut cx);
+        click("MENU_ITEM-Show What's Hidden", &mut cx);
         assert!(drawn("photon-review-hidden", &mut cx));
 
         click("photon-review-view", &mut cx);
-        click("MENU_ITEM-Whitespace changes", &mut cx);
+        click("MENU_ITEM-Whitespace Changes", &mut cx);
         settle(&mut cx);
         assert_eq!(step_files(&item, &mut cx), ["src/b.rs", "src/c.rs"]);
         assert!(!drawn("photon-review-hidden", &mut cx));
 
         click("photon-review-view", &mut cx);
-        click("MENU_ITEM-Moved code", &mut cx);
+        click("MENU_ITEM-Moved Code", &mut cx);
         item.read_with(&cx, |item, _| assert!(item.hide_moves));
         click("photon-review-view", &mut cx);
-        click("MENU_ITEM-Generated and lock files", &mut cx);
+        click("MENU_ITEM-Generated and Lock Files", &mut cx);
         item.read_with(&cx, |item, _| assert!(item.hide_generated));
     }
 
@@ -10611,12 +10611,12 @@ fn verify_password(user: &str, password: &str) -> bool {
     async fn show_whats_hidden_is_offered_only_while_something_is_hidden(cx: &mut TestAppContext) {
         let (_item, mut cx) = open_reformatted(cx).await;
         click("photon-review-view", &mut cx);
-        assert!(drawn("MENU_ITEM-Whitespace changes", &mut cx));
-        assert!(!drawn("MENU_ITEM-Show what's hidden", &mut cx));
-        click("MENU_ITEM-Whitespace changes", &mut cx);
+        assert!(drawn("MENU_ITEM-Whitespace Changes", &mut cx));
+        assert!(!drawn("MENU_ITEM-Show What's Hidden", &mut cx));
+        click("MENU_ITEM-Whitespace Changes", &mut cx);
         settle(&mut cx);
         click("photon-review-view", &mut cx);
-        assert!(drawn("MENU_ITEM-Show what's hidden", &mut cx));
+        assert!(drawn("MENU_ITEM-Show What's Hidden", &mut cx));
     }
 
     #[gpui::test]
@@ -10640,7 +10640,7 @@ fn verify_password(user: &str, password: &str) -> bool {
             cx.on_action(move |_: &zed_actions::OpenSettingsFile, _| opened.set(opened.get() + 1));
         });
         click("photon-review-more", &mut cx);
-        click("MENU_ITEM-Add your own checklist…", &mut cx);
+        click("MENU_ITEM-Add Your Own Checklist…", &mut cx);
         assert_eq!(opened.get(), 1);
     }
 
@@ -12023,7 +12023,7 @@ fn verify_password(user: &str, password: &str) -> bool {
             item.workspace = Some(WeakEntity::new_invalid())
         });
         click("photon-review-more", cx);
-        click("MENU_ITEM-Pre-review with agent", cx);
+        click("MENU_ITEM-Pre-review with Agent", cx);
     }
 
     #[gpui::test]
@@ -12150,7 +12150,7 @@ fn verify_password(user: &str, password: &str) -> bool {
         hover("photon-review-draft-delete-0", &mut cx);
         click("photon-review-draft-delete-0", &mut cx);
         assert!(drawn("MENU_ITEM-Intentional", &mut cx));
-        assert!(drawn("MENU_ITEM-Not worth it", &mut cx));
+        assert!(drawn("MENU_ITEM-Not Worth It", &mut cx));
         click("MENU_ITEM-Wrong", &mut cx);
         item.read_with(&cx, |item, _| assert!(item.drafts().is_empty()));
         assert!(bodies(&database).is_empty());
@@ -13066,9 +13066,9 @@ fn verify_password(user: &str, password: &str) -> bool {
         let database = test_database(cx);
         let (_item, mut nothing_viewed) = open_reformatted_with(cx, database, Vec::new()).await;
         click("photon-review-view", &mut nothing_viewed);
-        assert!(drawn("MENU_ITEM-Whitespace changes", &mut nothing_viewed));
+        assert!(drawn("MENU_ITEM-Whitespace Changes", &mut nothing_viewed));
         assert!(!drawn(
-            "MENU_ITEM-Only what you haven't reviewed",
+            "MENU_ITEM-Only What You Haven't Reviewed",
             &mut nothing_viewed
         ));
 
@@ -13095,7 +13095,7 @@ fn verify_password(user: &str, password: &str) -> bool {
             );
         });
         click("photon-review-view", &mut cx);
-        click("MENU_ITEM-Only what you haven't reviewed", &mut cx);
+        click("MENU_ITEM-Only What You Haven't Reviewed", &mut cx);
         settle(&mut cx);
         assert_eq!(step_files(&item, &mut cx), ["src/c.rs"]);
         item.read_with(&cx, |item, _| {
@@ -13111,7 +13111,7 @@ fn verify_password(user: &str, password: &str) -> bool {
         });
 
         click("photon-review-view", &mut cx);
-        click("MENU_ITEM-Only what you haven't reviewed", &mut cx);
+        click("MENU_ITEM-Only What You Haven't Reviewed", &mut cx);
         settle(&mut cx);
         assert_eq!(step_files(&item, &mut cx), ["src/b.rs", "src/c.rs"]);
         item.read_with(&cx, |item, _| assert!(!item.showing_unreviewed()));
@@ -13137,7 +13137,7 @@ fn verify_password(user: &str, password: &str) -> bool {
         )
         .await;
         click("photon-review-view", &mut cx);
-        click("MENU_ITEM-Only what you haven't reviewed", &mut cx);
+        click("MENU_ITEM-Only What You Haven't Reviewed", &mut cx);
         settle(&mut cx);
         assert_eq!(step_files(&item, &mut cx), ["src/c.rs"]);
         item.read_with(&cx, |item, _| {
@@ -13198,9 +13198,9 @@ fn verify_password(user: &str, password: &str) -> bool {
         });
         assert!(!drawn("photon-review-view-dot", &mut not_offered));
         click("photon-review-view", &mut not_offered);
-        assert!(drawn("MENU_ITEM-Whitespace changes", &mut not_offered));
+        assert!(drawn("MENU_ITEM-Whitespace Changes", &mut not_offered));
         assert!(!drawn(
-            "MENU_ITEM-Only changes since your review",
+            "MENU_ITEM-Only Changes Since Your Review",
             &mut not_offered
         ));
 
@@ -13221,7 +13221,7 @@ fn verify_password(user: &str, password: &str) -> bool {
         assert!(drawn("photon-review-view-dot", &mut cx));
         click("photon-review-view", &mut cx);
         assert!(!drawn("photon-review-view-dot", &mut cx));
-        click("MENU_ITEM-Only changes since your review", &mut cx);
+        click("MENU_ITEM-Only Changes Since Your Review", &mut cx);
         item.read_with(&cx, |item, _| {
             assert!(!item.loading_since_review);
             assert!(
@@ -13243,9 +13243,9 @@ fn verify_password(user: &str, password: &str) -> bool {
         });
         install_agent(Ok("Nothing:\n```json\n[]\n```".into()), &mut cx);
         click("photon-review-more", &mut cx);
-        assert!(drawn("MENU_ITEM-Run locally", &mut cx));
-        assert!(drawn("MENU_ITEM-Add your own checklist…", &mut cx));
-        click("MENU_ITEM-Pre-review with agent", &mut cx);
+        assert!(drawn("MENU_ITEM-Run Locally", &mut cx));
+        assert!(drawn("MENU_ITEM-Add Your Own Checklist…", &mut cx));
+        click("MENU_ITEM-Pre-review with Agent", &mut cx);
         item.read_with(&cx, |item, _| {
             assert!(!item.agent_reviewing);
             assert!(
@@ -13265,8 +13265,8 @@ fn verify_password(user: &str, password: &str) -> bool {
 
         set_login(&item, true, &mut cx);
         click("photon-review-more", &mut cx);
-        assert!(drawn("MENU_ITEM-Run locally", &mut cx));
-        assert!(!drawn("MENU_ITEM-Pre-review with agent", &mut cx));
+        assert!(drawn("MENU_ITEM-Run Locally", &mut cx));
+        assert!(!drawn("MENU_ITEM-Pre-review with Agent", &mut cx));
     }
 
     #[gpui::test]
@@ -13303,15 +13303,15 @@ fn verify_password(user: &str, password: &str) -> bool {
         assert_eq!(answer(&mut cx), None);
 
         click("photon-check-menu-settings:Login:Audited", &mut cx);
-        assert!(!drawn("MENU_ITEM-Clear answer", &mut cx));
-        click("MENU_ITEM-No, add a note", &mut cx);
+        assert!(!drawn("MENU_ITEM-Clear Answer", &mut cx));
+        click("MENU_ITEM-No, Add a Note", &mut cx);
         assert_eq!(answer(&mut cx), Some(Answer::No));
         item.read_with(&cx, |item, _| assert!(item.note_editors.contains_key(key)));
         click("photon-check-menu-settings:Login:Audited", &mut cx);
-        click("MENU_ITEM-Doesn't apply", &mut cx);
+        click("MENU_ITEM-Doesn't Apply", &mut cx);
         assert_eq!(answer(&mut cx), Some(Answer::NotApplicable));
         click("photon-check-menu-settings:Login:Audited", &mut cx);
-        click("MENU_ITEM-Clear answer", &mut cx);
+        click("MENU_ITEM-Clear Answer", &mut cx);
         assert_eq!(answer(&mut cx), None);
 
         // Against a failed auto check, the reviewer can only say it doesn't apply.
@@ -13321,8 +13321,8 @@ fn verify_password(user: &str, password: &str) -> bool {
             assert_eq!(item.checklist_answer(auto_key), None)
         });
         click("photon-check-menu-auto:tests_changed", &mut cx);
-        assert!(!drawn("MENU_ITEM-No, add a note", &mut cx));
-        click("MENU_ITEM-Doesn't apply", &mut cx);
+        assert!(!drawn("MENU_ITEM-No, Add a Note", &mut cx));
+        click("MENU_ITEM-Doesn't Apply", &mut cx);
         item.read_with(&cx, |item, _| {
             assert_eq!(item.checklist_answer(auto_key), Some(Answer::NotApplicable))
         });
@@ -13422,9 +13422,9 @@ fn verify_password(user: &str, password: &str) -> bool {
             cx.notify();
         });
         click("photon-review-outdated-menu-0", &mut cx);
-        assert!(drawn("MENU_ITEM-Place on the selected lines", &mut cx));
-        assert!(drawn("MENU_ITEM-Delete draft", &mut cx));
-        click("MENU_ITEM-Post as a general comment", &mut cx);
+        assert!(drawn("MENU_ITEM-Place on the Selected Lines", &mut cx));
+        assert!(drawn("MENU_ITEM-Delete Draft", &mut cx));
+        click("MENU_ITEM-Post as a General Comment", &mut cx);
         item.read_with(&cx, |item, _| assert!(item.drafts[0].general));
     }
 
@@ -13437,7 +13437,7 @@ fn verify_password(user: &str, password: &str) -> bool {
         fake.respond(is_detail, Ok(DETAIL.into()));
         click("photon-review-submit", &mut cx);
         assert!(drawn("photon-review-verdict-Comment", &mut cx));
-        assert!(drawn("photon-review-verdict-Request changes", &mut cx));
+        assert!(drawn("photon-review-verdict-Request Changes", &mut cx));
         click("photon-review-verdict-Approve", &mut cx);
         item.read_with(&cx, |item, _| {
             assert_eq!(item.verdict(), ReviewEvent::Approve)
@@ -13553,7 +13553,7 @@ fn verify_password(user: &str, password: &str) -> bool {
         fake.respond(is_merge, Ok(MERGED.into()));
         fake.respond(is_detail, Ok(merged_detail()));
         click("photon-review-merge", &mut cx);
-        cx.simulate_prompt_answer("Squash and merge");
+        cx.simulate_prompt_answer("Squash and Merge");
         cx.run_until_parked();
         let merges: Vec<_> = fake.requests().into_iter().filter(is_merge).collect();
         assert_eq!(merges.len(), 1);
@@ -13576,8 +13576,8 @@ fn verify_password(user: &str, password: &str) -> bool {
         let fake = install_fake(&mut cx);
         click("photon-review-merge-methods", &mut cx);
         assert!(drawn("MENU_ITEM-Merge", &mut cx));
-        assert!(!drawn("MENU_ITEM-Squash and merge", &mut cx));
-        assert!(!drawn("MENU_ITEM-Rebase and merge", &mut cx));
+        assert!(!drawn("MENU_ITEM-Squash and Merge", &mut cx));
+        assert!(!drawn("MENU_ITEM-Rebase and Merge", &mut cx));
         fake.respond(is_merge, Ok(MERGED.into()));
         fake.respond(is_detail, Ok(merged_detail()));
         click("MENU_ITEM-Merge", &mut cx);
@@ -13601,7 +13601,7 @@ fn verify_password(user: &str, password: &str) -> bool {
             Ok(r#"{"data":null,"errors":[{"message":"Head branch was modified. Review and try the merge again."}]}"#.into()),
         );
         click("photon-review-merge", &mut cx);
-        cx.simulate_prompt_answer("Squash and merge");
+        cx.simulate_prompt_answer("Squash and Merge");
         cx.run_until_parked();
         assert!(drawn("photon-review-merge-error", &mut cx));
         item.read_with(&cx, |item, _| {
@@ -14095,7 +14095,7 @@ fn verify_password(user: &str, password: &str) -> bool {
 
         // This file follows the cursor.
         click("photon-review-show-comments", &mut cx);
-        click("photon-review-filter-This file", &mut cx);
+        click("photon-review-filter-This File", &mut cx);
         assert!(drawn(row("T_a3"), &mut cx));
         assert!(!drawn(row("T_b2"), &mut cx));
     }

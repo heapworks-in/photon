@@ -1622,7 +1622,7 @@ impl CallHierarchyPanel {
             .when(can_explain, |this| {
                 this.child(
                     div().debug_selector(|| "call-trail-explain".into()).child(
-                        Button::new("call-trail-explain", "Explain this trail…")
+                        Button::new("call-trail-explain", "Explain This Trail…")
                             .label_size(LabelSize::XSmall)
                             .color(Color::Muted)
                             .disabled(self.selected.is_none())
@@ -1666,7 +1666,7 @@ impl CallHierarchyPanel {
                     .debug_selector(|| "call-trail-set-up-server".into())
                     .mt_2()
                     .child(
-                        Button::new("call-trail-set-up-server", "Set up language server")
+                        Button::new("call-trail-set-up-server", "Set Up Language Server")
                             .style(ButtonStyle::Outlined)
                             .label_size(LabelSize::Small)
                             .on_click(cx.listener(|this, _, window, cx| {

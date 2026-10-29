@@ -50,7 +50,7 @@ impl CommentFilter {
             Self::Resolved => "Resolved",
             Self::Mine => "Mine",
             Self::Ai => "AI",
-            Self::ThisFile => "This file",
+            Self::ThisFile => "This File",
         }
     }
 }

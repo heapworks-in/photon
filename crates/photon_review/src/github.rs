@@ -149,8 +149,8 @@ impl MergeMethod {
     pub fn label(self) -> &'static str {
         match self {
             MergeMethod::Merge => "Merge",
-            MergeMethod::Squash => "Squash and merge",
-            MergeMethod::Rebase => "Rebase and merge",
+            MergeMethod::Squash => "Squash and Merge",
+            MergeMethod::Rebase => "Rebase and Merge",
         }
     }
 

@@ -202,8 +202,8 @@ pub enum Verdict {
 impl Verdict {
     fn title(self) -> &'static str {
         match self {
-            Verdict::Approve => "Approve plan",
-            Verdict::RequestChanges => "Request changes",
+            Verdict::Approve => "Approve Plan",
+            Verdict::RequestChanges => "Request Changes",
         }
     }
 
@@ -1385,7 +1385,7 @@ impl PlanReviewItem {
                 let source = source.clone();
                 let spec = spec.clone();
                 Some(ui::ContextMenu::build(window, cx, move |menu, _, _| {
-                    menu.entry("Open source", None, {
+                    menu.entry("Open Source", None, {
                         let item = item.clone();
                         move |window, cx| {
                             item.update(cx, |item, cx| item.open_path(source.clone(), window, cx))
@@ -1394,14 +1394,14 @@ impl PlanReviewItem {
                     })
                     .when_some(spec, |menu, spec| {
                         let item = item.clone();
-                        menu.entry("Open the spec", None, move |window, cx| {
+                        menu.entry("Open the Spec", None, move |window, cx| {
                             item.update(cx, |item, cx| item.open_path(spec.clone(), window, cx))
                                 .log_err();
                         })
                     })
                     .when(agent, |menu| {
                         let item = item.clone();
-                        menu.entry("Send to agent", None, move |window, cx| {
+                        menu.entry("Send to Agent", None, move |window, cx| {
                             item.update(cx, |item, cx| item.send_comments_to_agent(window, cx))
                                 .log_err();
                         })
@@ -1880,7 +1880,7 @@ impl PlanReviewItem {
                         div()
                             .debug_selector(move || format!("plan-finding-dismiss-{position}"))
                             .child(
-                                Button::new(("plan-finding-dismiss", position), "Not a problem")
+                                Button::new(("plan-finding-dismiss", position), "Not a Problem")
                                     .style(ButtonStyle::Subtle)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.dismiss_finding(key.clone(), cx)
@@ -1891,7 +1891,7 @@ impl PlanReviewItem {
                         div()
                             .debug_selector(move || format!("plan-finding-add-{position}"))
                             .child(
-                                Button::new(("plan-finding-add", position), "Add to review")
+                                Button::new(("plan-finding-add", position), "Add to Review")
                                     .style(ButtonStyle::Outlined)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.add_finding_to_review(&added, paragraph, cx)
