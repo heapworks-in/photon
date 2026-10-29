@@ -14,7 +14,7 @@ use gpui::{
 };
 use settings::{Settings as _, SettingsStore};
 use task::{SpawnInTerminal, TaskId};
-use ui::{Tab, TintColor, Tooltip, prelude::*};
+use ui::{ContextMenu, Tab, TintColor, Tooltip, prelude::*, right_click_menu};
 use util::ResultExt as _;
 use workspace::{
     Workspace,
@@ -718,18 +718,60 @@ impl InboxPanel {
         let row = self.row(summary);
         let key = &summary.key;
         let id = format!("{}/{}/{}#{}", key.host, key.owner, key.repo, key.number);
-        let primary_summary = summary.clone();
-        let workspace = self.workspace.clone();
-        let local_summary = summary.clone();
-        let local_workspace = workspace.clone();
-        v_flex()
+        let group = SharedString::from(format!("{id}-row"));
+        let open = {
+            let summary = summary.clone();
+            let workspace = self.workspace.clone();
+            move |window: &mut Window, cx: &mut App| {
+                workspace
+                    .update(cx, |workspace, cx| {
+                        open_review(summary.clone(), workspace, window, cx).detach_and_log_err(cx)
+                    })
+                    .log_err();
+            }
+        };
+        let run = {
+            let summary = summary.clone();
+            let workspace = self.workspace.clone();
+            move |window: &mut Window, cx: &mut App| {
+                workspace
+                    .update(cx, |workspace, cx| {
+                        run_locally(summary.clone(), workspace, window, cx).detach_and_log_err(cx)
+                    })
+                    .log_err();
+            }
+        };
+        let colors = cx.theme().colors();
+        let element = v_flex()
             .id(SharedString::from(id.clone()))
+            .debug_selector({
+                let id = id.clone();
+                move || format!("photon-review-inbox-row-{id}")
+            })
+            .group(group.clone())
             .gap_1()
             .px_2()
             .py_1p5()
             .border_b_1()
-            .border_color(cx.theme().colors().border_variant)
-            .child(Label::new(row.title))
+            .border_color(colors.border_variant)
+            .cursor_pointer()
+            .hover(|style| style.bg(colors.element_hover))
+            .on_click({
+                let open = open.clone();
+                move |_, window, cx| open(window, cx)
+            })
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_1().min_w_0().child(Label::new(row.title)))
+                    .child(
+                        div().visible_on_hover(group).child(
+                            Label::new(row.primary_action)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Accent),
+                        ),
+                    ),
+            )
             .child(
                 Label::new(row.meta)
                     .color(Color::Muted)
@@ -742,38 +784,18 @@ impl InboxPanel {
                     .children(row.badges.iter().map(|badge| {
                         crate::chip(badge.clone(), badge_color(badge), LabelSize::XSmall, cx)
                     })),
-            )
-            .child(
-                h_flex()
-                    .gap_1p5()
-                    .child(
-                        crate::button(SharedString::from(format!("{id}-run")), "Run locally")
-                            .style(ButtonStyle::Outlined)
-                            .on_click(move |_, window, cx| {
-                                local_workspace
-                                    .update(cx, |workspace, cx| {
-                                        run_locally(local_summary.clone(), workspace, window, cx)
-                                            .detach_and_log_err(cx)
-                                    })
-                                    .log_err();
-                            }),
-                    )
-                    .child(
-                        crate::button(
-                            SharedString::from(format!("{id}-review")),
-                            row.primary_action,
-                        )
-                        .style(ButtonStyle::Tinted(TintColor::Accent))
-                        .on_click(move |_, window, cx| {
-                            workspace
-                                .update(cx, |workspace, cx| {
-                                    open_review(primary_summary.clone(), workspace, window, cx)
-                                        .detach_and_log_err(cx)
-                                })
-                                .log_err();
-                        }),
-                    ),
-            )
+            );
+        let primary_action = row.primary_action;
+        right_click_menu(SharedString::from(format!("{id}-menu")))
+            .trigger(move |_, _, _| element)
+            .menu(move |window, cx| {
+                let open = open.clone();
+                let run = run.clone();
+                ContextMenu::build(window, cx, move |menu, _, _| {
+                    menu.entry(primary_action, None, move |window, cx| open(window, cx))
+                        .entry("Run Locally", None, move |window, cx| run(window, cx))
+                })
+            })
     }
 }
 
@@ -1844,6 +1866,58 @@ mod tests {
     fn section_labels_and_copy() {
         assert_eq!(section_label("Review requested", 3), "Review requested · 3");
         assert_eq!(EMPTY_INBOX_TEXT, "No open pull requests");
+    }
+
+    #[gpui::test]
+    async fn a_row_opens_on_click_and_runs_locally_from_its_menu(cx: &mut TestAppContext) {
+        let fake = FakeGh::new();
+        init_test(cx, &fake);
+        respond_auth(&fake, AUTH_ONE_HOST);
+        respond_inbox(&fake, "github.com");
+        let (workspace, panel, mut cx) = add_panel(cx, &[ORIGIN]).await;
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.focus_panel::<InboxPanel>(window, cx);
+        });
+        set_active(&panel, true, &mut cx);
+        let row = panel.read_with(&cx, |panel, _| {
+            let InboxState::Loaded(hosts) = panel.state() else {
+                panic!("expected Loaded");
+            };
+            let key = &hosts[0].result.as_ref().expect("inbox").sections[0].1[0].key;
+            format!(
+                "photon-review-inbox-row-{}/{}/{}#{}",
+                key.host, key.owner, key.repo, key.number
+            )
+        });
+        let row: &'static str = row.leak();
+        let bounds = cx.debug_bounds(row).expect("row drawn");
+        cx.simulate_event(gpui::MouseDownEvent {
+            button: gpui::MouseButton::Right,
+            position: bounds.center(),
+            modifiers: gpui::Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            button: gpui::MouseButton::Right,
+            position: bounds.center(),
+            modifiers: gpui::Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("MENU_ITEM-Run Locally").is_some());
+        assert!(cx.debug_bounds("MENU_ITEM-Start review").is_some());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        let before = fake.requests().len();
+        let bounds = cx.debug_bounds(row).expect("row drawn");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            fake.requests().len() > before,
+            "clicking the row starts the review"
+        );
     }
 
     #[gpui::test]
