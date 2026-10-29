@@ -890,6 +890,30 @@ pub(crate) async fn finish_review(
     })
 }
 
+/// A right-click outside the selected lines puts the cursor where the click was, as Zed's own
+/// menu does, so Add Comment comments on the clicked line.
+fn move_cursor_for_menu(
+    editor: &mut Editor,
+    point: editor::DisplayPoint,
+    window: &mut Window,
+    cx: &mut Context<Editor>,
+) {
+    let display_map = editor.display_snapshot(cx);
+    let on_selection = editor
+        .selections
+        .display_ranges(&display_map)
+        .iter()
+        .any(|range| {
+            let (start, end) = (range.start.min(range.end), range.start.max(range.end));
+            (start.row()..=end.row()).contains(&point.row())
+        });
+    if !on_selection {
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_display_ranges([point..point])
+        });
+    }
+}
+
 fn status_label(diff: &FileDiff) -> &'static str {
     if diff.submodule {
         return "submodule";
@@ -2081,7 +2105,8 @@ impl ReviewItem {
                 ..Default::default()
             });
             // Commenting with the mouse: select lines, then right-click.
-            editor.set_custom_context_menu(|editor, _, window, cx| {
+            editor.set_custom_context_menu(|editor, point, window, cx| {
+                move_cursor_for_menu(editor, point, window, cx);
                 let focus = editor.focus_handle(cx);
                 Some(ui::ContextMenu::build(window, cx, move |menu, _, _| {
                     menu.context(focus)
@@ -13898,6 +13923,47 @@ fn verify_password(user: &str, password: &str) -> bool {
         .await;
         settle(&mut cx);
         (item, cx)
+    }
+
+    #[gpui::test]
+    async fn right_clicking_another_line_comments_on_that_line(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_reformatted(cx).await;
+        let clicked = text(&item, &mut cx).find("fn callee").expect("text shown");
+        select_text(&item, "let b = 2;", &mut cx);
+        let point_of = |offset: usize, cx: &mut VisualTestContext| {
+            item.update_in(cx, |item, window, cx| {
+                item.editor().update(cx, |editor, cx| {
+                    let display_map = editor.display_snapshot(cx);
+                    let point = {
+                        let buffer = display_map.buffer_snapshot();
+                        let offset = MultiBufferOffset(offset).to_point(buffer);
+                        display_map.point_to_display_point(offset, language::Bias::Left)
+                    };
+                    move_cursor_for_menu(editor, point, window, cx);
+                })
+            })
+        };
+        // A click inside the selected line keeps the selection.
+        let on_selection = text(&item, &mut cx).find("let b = 2;").expect("text") + 2;
+        point_of(on_selection, &mut cx);
+        cx.dispatch_action(AddComment);
+        cx.run_until_parked();
+        let line_of_last = |cx: &mut VisualTestContext| {
+            item.read_with(cx, |item, _| {
+                item.drafts().last().expect("a draft").start_line
+            })
+        };
+        let selected_line = line_of_last(&mut cx);
+
+        point_of(clicked, &mut cx);
+        cx.dispatch_action(AddComment);
+        cx.run_until_parked();
+        assert_eq!(
+            line_of_last(&mut cx),
+            1,
+            "the clicked line, not the old selection"
+        );
+        assert_ne!(selected_line, 1);
     }
 
     #[gpui::test]
