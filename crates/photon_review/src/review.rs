@@ -106,6 +106,8 @@ const SIMPLIFIED_LEFT_COMMENT_NOTE: &str =
     "Show whitespace and moved code to comment on removed lines";
 const VIEWED_DISABLED_TOOLTIP: &str = "Switch to the full diff to mark things viewed";
 const HUNK_CONTEXT_LINES: u32 = 3;
+const REVIEW_FONT_FAMILY: &str = "JetBrains Mono";
+const REVIEW_LINE_HEIGHT: f32 = 1.55;
 const SAVING_TOOLTIP: &str = "Saving to GitHub…";
 const COMPOSER_MAX_LINES: u32 = 4;
 
@@ -2072,6 +2074,12 @@ impl ReviewItem {
             editor.set_show_line_numbers(false, cx);
             editor.set_show_git_diff_gutter(false, cx);
             editor.set_gutter_columns(Some(line_numbers.clone()), cx);
+            // A roomier reading font than the editor's, so a diff reads like the PR on GitHub.
+            editor.set_text_style_refinement(gpui::TextStyleRefinement {
+                font_family: Some(REVIEW_FONT_FAMILY.into()),
+                line_height: Some(gpui::relative(REVIEW_LINE_HEIGHT)),
+                ..Default::default()
+            });
             // Commenting with the mouse: select lines, then right-click.
             editor.set_custom_context_menu(|editor, _, window, cx| {
                 let focus = editor.focus_handle(cx);
@@ -13890,6 +13898,22 @@ fn verify_password(user: &str, password: &str) -> bool {
         .await;
         settle(&mut cx);
         (item, cx)
+    }
+
+    #[gpui::test]
+    async fn the_diff_reads_in_the_review_font(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_reformatted(cx).await;
+        let (family, line_height) = item.update(&mut cx, |item, cx| {
+            item.editor().update(cx, |editor, cx| {
+                let text = &editor.style(cx).text;
+                (text.font_family.clone(), text.line_height)
+            })
+        });
+        assert_eq!(family.as_ref(), REVIEW_FONT_FAMILY);
+        assert_eq!(line_height, gpui::relative(REVIEW_LINE_HEIGHT));
+        let theme = include_str!("../../../assets/themes/photon/photon.json");
+        assert!(theme.contains("\"version_control.added\": \"#3fb950\""));
+        assert!(theme.contains("\"version_control.deleted\": \"#f85149\""));
     }
 
     #[gpui::test]
