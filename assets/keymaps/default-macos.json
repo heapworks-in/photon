@@ -171,17 +171,17 @@
     },
   },
   {
-    // photon: ⌥-letters type characters on macOS, so these only apply to a selection.
+    // photon: agent keys for a selection. ⌃⌥, because ⌥-letters type characters on macOS.
     "context": "Editor && mode == full && has_selection",
     "bindings": {
       // A new agent thread about the selection. The second ToggleFocus returns to the editor so the
       // selection is read from it.
-      "alt-t": [
+      "ctrl-alt-t": [
         "action::Sequence",
         ["agent::ToggleFocus", "agent::NewThread", "agent::ToggleFocus", "agent::AddSelectionToThread"],
       ],
       // Queue an edit for the agent; Apply All sends the queued edits together.
-      "alt-e": "photon_agent::QueueEditRequest",
+      "ctrl-alt-e": "photon_agent::QueueEditRequest",
     },
   },
   {
@@ -1480,7 +1480,7 @@
     "bindings": {
       "cmd-enter": "plan::NextTask",
       "cmd-shift-enter": "plan::PreviousTask",
-      "alt-t": "plan::AskAgent",
+      "ctrl-alt-t": "plan::AskAgent",
     },
   },
   {
@@ -1930,6 +1930,7 @@
     // focused, not while typing in a reply or draft inside it.
     "context": "PhotonReview && diff_focused",
     "bindings": {
+      "c": "photon_review::AddComment",
       "n": "photon_review::NextComment",
       "p": "photon_review::PreviousComment",
       "r": "photon_review::ReplyToComment",

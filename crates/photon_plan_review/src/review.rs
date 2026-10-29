@@ -1991,7 +1991,7 @@ impl PlanReviewItem {
             .border_color(cx.theme().colors().border)
             .child(key_hint("cmd-enter", "next task"))
             .child(key_hint("c", "comment on paragraph"))
-            .child(key_hint("alt-t", "ask the agent about this task"))
+            .child(key_hint("ctrl-alt-t", "ask the agent about this task"))
             .child(div().flex_1())
             .children(self.note.clone().map(|note| {
                 Label::new(note)
@@ -2395,7 +2395,7 @@ mod tests {
             crate::init(cx);
             cx.bind_keys([
                 gpui::KeyBinding::new("cmd-enter", NextTask, Some("PlanReview")),
-                gpui::KeyBinding::new("alt-t", AskAgent, Some("PlanReview")),
+                gpui::KeyBinding::new("ctrl-alt-t", AskAgent, Some("PlanReview")),
             ]);
         });
         let fs = FakeFs::new(cx.executor());
@@ -2804,7 +2804,7 @@ mod tests {
             .cx
             .simulate_keystrokes("cmd-enter cmd-enter cmd-enter");
         assert_eq!(item.read_with(&setup.cx, |item, _| item.selected()), 3);
-        setup.cx.simulate_keystrokes("alt-t");
+        setup.cx.simulate_keystrokes("ctrl-alt-t");
         let sent = sent.borrow();
         assert_eq!(sent.len(), 1);
         assert!(!sent[0].send, "the question is the user's to type");

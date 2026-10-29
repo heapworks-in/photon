@@ -13893,6 +13893,17 @@ fn verify_password(user: &str, password: &str) -> bool {
     }
 
     #[gpui::test]
+    async fn c_comments_on_the_selected_lines_like_plan_review(cx: &mut TestAppContext) {
+        let (item, mut cx) = open_reformatted(cx).await;
+        select_text(&item, "let b = 2;", &mut cx);
+        press_in_diff(&item, "c", &mut cx);
+        item.read_with(&cx, |item, _| {
+            let draft = item.drafts().last().expect("a draft");
+            assert_eq!(draft.path, "src/b.rs");
+        });
+    }
+
+    #[gpui::test]
     async fn brackets_move_between_steps_from_the_diff(cx: &mut TestAppContext) {
         let (item, mut cx) = open_reformatted(cx).await;
         assert_eq!(item.read_with(&cx, |item, _| item.selected), 0);

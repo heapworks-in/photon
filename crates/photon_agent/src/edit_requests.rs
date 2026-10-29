@@ -1,4 +1,4 @@
-//! ⌥E edit requests: a short instruction typed under a selection, queued in the editor, and sent
+//! ⌃⌥E edit requests: a short instruction typed under a selection, queued in the editor, and sent
 //! to the agent together by Apply All.
 
 use std::collections::HashSet;
