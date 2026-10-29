@@ -901,12 +901,9 @@ fn move_cursor_for_menu(
     let display_map = editor.display_snapshot(cx);
     let on_selection = editor
         .selections
-        .display_ranges(&display_map)
+        .all_display(&display_map)
         .iter()
-        .any(|range| {
-            let (start, end) = (range.start.min(range.end), range.start.max(range.end));
-            (start.row()..=end.row()).contains(&point.row())
-        });
+        .any(|selection| (selection.start.row()..=selection.end.row()).contains(&point.row()));
     if !on_selection {
         editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
             selections.select_display_ranges([point..point])
