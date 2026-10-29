@@ -2374,6 +2374,8 @@
     "smart_blocks": true,
     // photon: notify when a command that ran at least this long finishes while Photon is in the background; 0 turns it off.
     "notify_after_seconds": 10,
+    // photon: where terminals open: "center", as tabs beside your files, or "panel", in the bottom panel like VS Code.
+    "layout": "center",
   },
   "code_actions_on_format": {},
   // Settings related to running tasks.

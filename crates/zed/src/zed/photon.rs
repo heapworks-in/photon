@@ -1,7 +1,10 @@
 use command_palette_hooks::CommandPaletteFilter;
 use editor::Editor;
 use gpui::{App, Context, Focusable as _, Window};
-use terminal_view::TerminalView;
+use terminal_view::{
+    TerminalView,
+    terminal_panel::{TerminalPanel, terminals_in_panel},
+};
 use ui::{IconButton, IconName, IconSize, Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::{
@@ -283,7 +286,12 @@ pub fn ensure_center_terminal(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    if should_open_center_terminal(workspace, cx) {
+    if !should_open_center_terminal(workspace, cx) {
+        return;
+    }
+    if terminals_in_panel(cx) {
+        workspace.focus_panel::<TerminalPanel>(window, cx);
+    } else {
         TerminalView::deploy(workspace, &center_terminal_action(), window, cx);
     }
 }
@@ -375,6 +383,10 @@ pub fn toggle_terminal_editor_focus(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
+    if terminals_in_panel(cx) {
+        workspace.toggle_panel_focus::<TerminalPanel>(window, cx);
+        return;
+    }
     let active_pane = workspace.active_pane().clone();
     if !active_pane.focus_handle(cx).contains_focused(window, cx) {
         return;
@@ -819,6 +831,58 @@ mod tests {
                 .count()
         });
         assert_eq!(center_terminals, 1);
+    }
+
+    #[gpui::test]
+    async fn the_panel_layout_keeps_terminals_in_the_bottom_panel(cx: &mut TestAppContext) {
+        // Opening a terminal starts a real shell process.
+        cx.executor().allow_parking();
+        use project::Project;
+        use serde_json::json;
+        use settings::SettingsStore;
+        use util::path;
+        use workspace::MultiWorkspace;
+
+        let app_state = super::super::tests::init_test(cx);
+        cx.update(terminal_view::init);
+        cx.update_global(|store: &mut SettingsStore, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.terminal.get_or_insert_default().layout =
+                    Some(settings::TerminalLayout::Panel);
+            });
+        });
+        app_state
+            .fs
+            .as_fake()
+            .insert_tree(path!("/root"), json!({ "notes.txt": "hello" }))
+            .await;
+        let project = Project::test(app_state.fs.clone(), [path!("/root").as_ref()], cx).await;
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .unwrap();
+        let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            ensure_center_terminal(workspace, window, cx)
+        });
+        cx.run_until_parked();
+
+        let (center_terminals, panel_open) = workspace.read_with(cx, |workspace, cx| {
+            (
+                workspace
+                    .active_pane()
+                    .read(cx)
+                    .items_of_type::<TerminalView>()
+                    .count(),
+                workspace.bottom_dock().read(cx).is_open(),
+            )
+        });
+        assert_eq!(
+            center_terminals, 0,
+            "a new window's terminal goes in the panel"
+        );
+        assert!(panel_open);
     }
 
     #[test]

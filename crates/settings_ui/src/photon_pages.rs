@@ -7,9 +7,23 @@ use gpui::Action as _;
 
 use crate::{ActionLink, PROJECT, SettingField, SettingItem, SettingsPage, SettingsPageItem, USER};
 
-pub(crate) fn command_blocks_section() -> [SettingsPageItem; 4] {
+pub(crate) fn command_blocks_section() -> [SettingsPageItem; 5] {
     [
-        SettingsPageItem::SectionHeader("Command Blocks"),
+        SettingsPageItem::SectionHeader("Layout and Blocks"),
+        SettingsPageItem::SettingItem(SettingItem {
+            title: "Layout",
+            description: "Where terminals open: in the center beside your files, or in the bottom panel like VS Code.",
+            field: Box::new(SettingField {
+                organization_override: None,
+                json_path: Some("terminal.layout"),
+                pick: |settings_content| settings_content.terminal.as_ref()?.layout.as_ref(),
+                write: |settings_content, value, _| {
+                    settings_content.terminal.get_or_insert_default().layout = value;
+                },
+            }),
+            metadata: None,
+            files: USER,
+        }),
         SettingsPageItem::SettingItem(SettingItem {
             title: "Blocks",
             description: "Whether new zsh terminals show each command and its output as a block.",
@@ -166,7 +180,8 @@ mod tests {
             };
             let terminal = titles("Terminal");
             for expected in [
-                "SectionHeader(Command Blocks)",
+                "SectionHeader(Layout and Blocks)",
+                "SettingItem(Layout)",
                 "SettingItem(Blocks)",
                 "SettingItem(Smart Blocks)",
                 "SettingItem(Notify After Seconds)",

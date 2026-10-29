@@ -255,6 +255,36 @@ pub struct TerminalSettingsContent {
     ///
     /// Default: 10
     pub notify_after_seconds: Option<u64>,
+    // photon: where terminals open.
+    /// Where terminals open: "center", as tabs beside your files, or "panel", in the bottom
+    /// panel like VS Code. Both are the same block terminal.
+    ///
+    /// Default: center
+    pub layout: Option<TerminalLayout>,
+}
+
+// photon: where terminals open.
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalLayout {
+    /// Terminals open as tabs in the center, beside your files.
+    #[default]
+    Center,
+    /// Terminals open in the bottom panel.
+    Panel,
 }
 
 crate::fallible_options::flattened_deserialize!(TerminalSettingsContent {
@@ -267,6 +297,7 @@ crate::fallible_options::flattened_deserialize!(TerminalSettingsContent {
         scrollbar, minimum_contrast, show_count_badge, bell,
         blocks, // photon: command blocks
         smart_blocks, notify_after_seconds, // photon: smart blocks
+        layout, // photon: where terminals open
     },
     defaults: {},
 });

@@ -683,6 +683,7 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::AudioOutputDeviceName>(render_output_audio_device_dropdown)
         .add_basic_renderer::<settings::TerminalBell>(render_dropdown)
         .add_basic_renderer::<settings::ReviewThoroughness>(render_dropdown) // photon: agent pre-review
+        .add_basic_renderer::<settings::TerminalLayout>(render_dropdown) // photon: where terminals open
         // please semicolon stay on next line
         ;
 }

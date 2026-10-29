@@ -746,8 +746,8 @@ impl TerminalPanel {
             .active_item()
             .is_some_and(|item| item.downcast::<TerminalView>().is_some());
 
-        // photon: terminals always open in the center, never in the bottom panel
-        if true || center_pane_has_focus && active_center_item_is_terminal {
+        // photon: terminals open in the center unless the layout puts them in the bottom panel
+        if !terminals_in_panel(cx) || center_pane_has_focus && active_center_item_is_terminal {
             let working_directory = default_working_directory(workspace, cx);
             let local = action.local;
             Self::add_center_terminal(workspace, window, cx, move |project, cx| {
@@ -1788,9 +1788,9 @@ impl Panel for TerminalPanel {
     }
 
     fn icon(&self, _window: &Window, cx: &App) -> Option<IconName> {
-        if (self.is_enabled(cx) || !self.has_no_terminals(cx))
-            && TerminalSettings::get_global(cx).button
-        {
+        // photon: with terminals in the bottom panel, the panel's button is how you reach them.
+        let button = TerminalSettings::get_global(cx).button || terminals_in_panel(cx);
+        if (self.is_enabled(cx) || !self.has_no_terminals(cx)) && button {
             Some(IconName::TerminalAlt)
         } else {
             None
@@ -1871,6 +1871,12 @@ impl RenderOnce for InlineAssistTabBarButton {
                 Tooltip::for_action_in("Inline Assist", &InlineAssist::default(), &focus_handle, cx)
             })
     }
+}
+
+/// photon: the `terminal.layout` setting puts terminals in the bottom panel, as in VS Code,
+/// instead of the center.
+pub fn terminals_in_panel(cx: &App) -> bool {
+    TerminalSettings::get_global(cx).layout == settings::TerminalLayout::Panel
 }
 
 #[cfg(test)]
@@ -2942,11 +2948,23 @@ mod tests {
             .expect("Failed to read configured terminal panel starts_open");
     }
 
+    /// photon: terminals open in the bottom panel, as they do in Zed.
+    fn use_panel_layout(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.terminal.get_or_insert_default().layout =
+                        Some(settings::TerminalLayout::Panel);
+                });
+            });
+        });
+    }
+
     #[gpui::test]
-    #[ignore = "photon: new terminals always open in the center"]
     async fn test_new_terminal_opens_in_panel_by_default(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         init_test(cx);
+        use_panel_layout(cx); // photon: the panel layout keeps Zed's behaviour
 
         let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
 
@@ -3095,10 +3113,10 @@ mod tests {
     }
 
     #[gpui::test]
-    #[ignore = "photon: new terminals always open in the center"]
     async fn test_new_terminal_opens_in_panel_when_panel_focused(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         init_test(cx);
+        use_panel_layout(cx); // photon: the panel layout keeps Zed's behaviour
 
         let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
 
@@ -3263,12 +3281,12 @@ mod tests {
     }
 
     #[gpui::test]
-    #[ignore = "photon: new terminals always open in the center"]
     async fn test_new_terminal_opens_in_panel_when_panel_focused_and_center_has_terminal(
         cx: &mut TestAppContext,
     ) {
         cx.executor().allow_parking();
         init_test(cx);
+        use_panel_layout(cx); // photon: the panel layout keeps Zed's behaviour
 
         let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
 

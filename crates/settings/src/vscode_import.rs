@@ -979,6 +979,7 @@ impl VsCodeSettings {
             blocks: None,               // photon: command blocks
             smart_blocks: None,         // photon: smart blocks
             notify_after_seconds: None, // photon: smart blocks
+            layout: None,               // photon: where terminals open
             minimum_contrast: None,
             option_as_meta: self.read_bool("terminal.integrated.macOptionIsMeta"),
             project: self.project_terminal_settings_content(),
