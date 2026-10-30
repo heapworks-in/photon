@@ -76,6 +76,21 @@ pub fn init(cx: &mut App) {
     .detach();
 }
 
+/// What to say when the language server finds no function at the cursor. Errors in the file usually
+/// mean the server isn't reading the project's sources, so they're the likely reason.
+fn not_found_note(language: &str, errors: usize) -> (SharedString, SharedString) {
+    let body = match errors {
+        0 => "Put the cursor on a function's name.".to_string(),
+        1 => format!(
+            "{language} reports 1 error in this file, so it may not see this project's sources."
+        ),
+        errors => format!(
+            "{language} reports {errors} errors in this file, so it may not see this project's sources."
+        ),
+    };
+    ("No function at the cursor".into(), body.into())
+}
+
 fn show_in_panel(
     workspace: &mut Workspace,
     _: &ShowInPanel,
@@ -128,6 +143,8 @@ pub struct CallHierarchyPanel {
     context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
     /// The active editor's buffer, whose language server the panel reports on.
     active_buffer: Option<WeakEntity<Buffer>>,
+    /// Why the last trace found nothing, shown above the start screen until the next trace.
+    not_found: Option<(SharedString, SharedString)>,
     server_problem: Option<ServerProblem>,
     /// Servers that are downloading, starting or failed, project-wide.
     server_statuses: HashMap<LanguageServerName, ServerStatus>,
@@ -366,6 +383,7 @@ impl CallHierarchyPanel {
             mode: CallHierarchyMode::Incoming,
             view: TrailView::List,
             content: Content::Empty,
+            not_found: None,
             root_header: RootHeader::default(),
             selected: None,
             rows: Vec::new(),
@@ -606,17 +624,42 @@ impl CallHierarchyPanel {
         });
         self.start_loading_root(cx);
         let project = self.project.clone();
+        let (language, errors) = buffer.read_with(cx, |buffer, _| {
+            let snapshot = buffer.snapshot();
+            let errors = snapshot
+                .diagnostics_in_range::<usize, usize>(0..snapshot.len(), false)
+                .filter(|entry| entry.diagnostic.severity == lsp::DiagnosticSeverity::ERROR)
+                .count();
+            let language = buffer.language().map_or_else(
+                || "The language server".to_string(),
+                |language| language.name().to_string(),
+            );
+            (language, errors)
+        });
         self.root_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let item = match prepare.await {
-                Ok(items) => items.unwrap_or_default().into_iter().next(),
+            let note = match prepare.await {
+                Ok(items) => match items.unwrap_or_default().into_iter().next() {
+                    Some(item) => Err(item),
+                    None => Ok(not_found_note(&language, errors)),
+                },
                 Err(error) => {
                     log::error!("failed to prepare call hierarchy: {error:#}");
-                    None
+                    Ok((
+                        format!("{language} couldn't trace this function").into(),
+                        format!("{error:#}").into(),
+                    ))
                 }
             };
-            let Some(item) = item else {
-                this.update(cx, |this, cx| this.show_empty(cx)).ok();
-                return;
+            let item = match note {
+                Err(item) => item,
+                Ok(note) => {
+                    this.update(cx, |this, cx| {
+                        this.show_empty(cx);
+                        this.not_found = Some(note);
+                    })
+                    .ok();
+                    return;
+                }
             };
             let root = call_hierarchy::call_for_item(item, &project, cx).await;
             this.update_in(cx, |this, window, cx| this.show_root(root, window, cx))
@@ -711,6 +754,7 @@ impl CallHierarchyPanel {
     }
 
     fn start_loading_root(&mut self, cx: &mut Context<Self>) {
+        self.not_found = None;
         self.child_tasks.clear();
         self.selected = None;
         self.content = Content::LoadingRoot;
@@ -1725,6 +1769,22 @@ impl CallHierarchyPanel {
                     .pt_8()
                     .pb_4()
                     .gap_1()
+                    .children(self.not_found.as_ref().map(|(title, body)| {
+                        v_flex()
+                            .debug_selector(|| "call-trail-not-found".into())
+                            .items_center()
+                            .pb_4()
+                            .gap_1()
+                            .child(Icon::new(IconName::Warning).color(Color::Warning))
+                            .child(Label::new(title.clone()).weight(FontWeight::SEMIBOLD))
+                            .child(
+                                div().text_center().child(
+                                    Label::new(body.clone())
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                ),
+                            )
+                    }))
                     .child(trail_picture(cx))
                     .child(
                         Label::new("Who calls this, and what does it call?")
@@ -2694,6 +2754,15 @@ mod tests {
                 .read_with(self.cx, |panel, _| matches!(panel.content, Content::Empty))
         }
 
+        fn not_found(&mut self) -> Option<(String, String)> {
+            self.panel.read_with(self.cx, |panel, _| {
+                panel
+                    .not_found
+                    .as_ref()
+                    .map(|(title, body)| (title.to_string(), body.to_string()))
+            })
+        }
+
         /// The message the empty panel shows instead of where to start, if any.
         fn problem(&mut self) -> Option<(String, String)> {
             self.panel.read_with(self.cx, |panel, _| {
@@ -3398,6 +3467,17 @@ mod tests {
         assert_eq!(setup.problem(), None);
         assert_eq!(setup.root(), None);
         assert!(setup.cx.debug_bounds("call-trail-start").is_some());
+        assert_eq!(
+            setup.not_found(),
+            Some((
+                "No function at the cursor".to_string(),
+                "Put the cursor on a function's name.".to_string()
+            ))
+        );
+        assert!(setup.cx.debug_bounds("call-trail-not-found").is_some());
+
+        setup.show_in_panel(1);
+        assert_eq!(setup.not_found(), None, "a trace clears the note");
     }
 
     #[gpui::test]
