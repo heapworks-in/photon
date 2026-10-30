@@ -1729,10 +1729,7 @@ impl CallHierarchyPanel {
         let mut editor_context = KeyContext::default();
         editor_context.add("Editor");
         let key_binding = window
-            .highest_precedence_binding_for_action_in_context(
-                &call_hierarchy::ShowIncomingCalls,
-                editor_context,
-            )
+            .highest_precedence_binding_for_action_in_context(&ShowInPanel, editor_context)
             .map(|binding| {
                 KeyBinding::from_keystrokes(
                     binding.keystrokes().into(),
@@ -3457,6 +3454,18 @@ mod tests {
         setup.cx.run_until_parked();
         assert_eq!(setup.take_requests(), ["calls of main"]);
         assert_eq!(setup.tree(), ["helper ×2"]);
+    }
+
+    #[gpui::test]
+    async fn the_key_works_while_the_panel_has_focus(cx: &mut TestAppContext) {
+        let mut setup = setup(true, cx).await;
+        setup.move_cursor(1, 4);
+        setup.panel.update_in(setup.cx, |panel, window, cx| {
+            window.focus(&panel.focus_handle(cx), cx)
+        });
+        setup.cx.dispatch_action(ShowInPanel);
+        setup.cx.run_until_parked();
+        assert_eq!(setup.root().as_deref(), Some("helper"));
     }
 
     #[gpui::test]

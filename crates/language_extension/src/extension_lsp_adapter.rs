@@ -22,6 +22,33 @@ use util::{ResultExt, maybe, rel_path::RelPath};
 
 use crate::{LanguageServerRegistryProxy, LspAccess};
 
+// photon: lets the app add to an extension language server's options, from the folder it runs in
+// (Photon tells the Java server where an IntelliJ project's sources are). `initialization` is true
+// for initialization options and false for workspace configuration.
+pub type PhotonOptionsHook = fn(
+    server: &str,
+    worktree_root: &Path,
+    options: Option<Value>,
+    initialization: bool,
+) -> Option<Value>;
+static PHOTON_OPTIONS_HOOK: std::sync::OnceLock<PhotonOptionsHook> = std::sync::OnceLock::new();
+
+pub fn set_photon_options_hook(hook: PhotonOptionsHook) {
+    PHOTON_OPTIONS_HOOK.set(hook).ok();
+}
+
+fn photon_options(
+    server: &LanguageServerName,
+    worktree_root: &Path,
+    options: Option<Value>,
+    initialization: bool,
+) -> Option<Value> {
+    match PHOTON_OPTIONS_HOOK.get() {
+        Some(hook) => hook(&server.0, worktree_root, options, initialization),
+        None => options,
+    }
+}
+
 /// An adapter that allows an [`LspAdapterDelegate`] to be used as a [`WorktreeDelegate`].
 struct WorktreeDelegateAdapter(pub Arc<dyn LspAdapterDelegate>);
 
@@ -309,6 +336,7 @@ impl LspAdapter for ExtensionLspAdapter {
         _: &mut AsyncApp,
     ) -> Result<Option<serde_json::Value>> {
         let language_server_status_source = delegate.status_source_id();
+        let worktree_root = delegate.worktree_root_path().to_path_buf(); // photon: options hook
         let delegate = Arc::new(WorktreeDelegateAdapter(delegate.clone())) as _;
         let json_options = self
             .extension
@@ -319,13 +347,20 @@ impl LspAdapter for ExtensionLspAdapter {
                 language_server_status_source,
             )
             .await?;
-        Ok(if let Some(json_options) = json_options {
+        let options = if let Some(json_options) = json_options {
             serde_json::from_str(&json_options).with_context(|| {
                 format!("failed to parse initialization_options from extension: {json_options}")
             })?
         } else {
             None
-        })
+        };
+        // photon: options hook
+        Ok(photon_options(
+            &self.language_server_id,
+            &worktree_root,
+            options,
+            true,
+        ))
     }
 
     async fn workspace_configuration(
@@ -336,6 +371,7 @@ impl LspAdapter for ExtensionLspAdapter {
         _cx: &mut AsyncApp,
     ) -> Result<Value> {
         let language_server_status_source = delegate.status_source_id();
+        let worktree_root = delegate.worktree_root_path().to_path_buf(); // photon: options hook
         let delegate = Arc::new(WorktreeDelegateAdapter(delegate.clone())) as _;
         let json_options: Option<String> = self
             .extension
@@ -345,13 +381,21 @@ impl LspAdapter for ExtensionLspAdapter {
                 language_server_status_source,
             )
             .await?;
-        Ok(if let Some(json_options) = json_options {
+        let configuration = if let Some(json_options) = json_options {
             serde_json::from_str(&json_options).with_context(|| {
                 format!("failed to parse workspace_configuration from extension: {json_options}")
             })?
         } else {
             serde_json::json!({})
-        })
+        };
+        // photon: options hook
+        Ok(photon_options(
+            &self.language_server_id,
+            &worktree_root,
+            Some(configuration),
+            false,
+        )
+        .unwrap_or_else(|| serde_json::json!({})))
     }
 
     async fn initialization_options_schema(

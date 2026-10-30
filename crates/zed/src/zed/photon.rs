@@ -296,6 +296,20 @@ pub fn ensure_center_terminal(
     }
 }
 
+/// The Java server reads a project's layout from Maven, Gradle or Eclipse files. An IntelliJ-only
+/// project has none, so Photon passes the source folders its `.iml` declares.
+pub fn register_language_server_options() {
+    language_extension::set_photon_options_hook(
+        |server, worktree_root, options, initialization| {
+            if server != "jdtls" {
+                return options;
+            }
+            let paths = photon_navigation::intellij_source_paths(worktree_root);
+            photon_navigation::with_java_source_paths(options, &paths, initialization)
+        },
+    );
+}
+
 /// [`ensure_center_terminal`] for a window opened asynchronously (e.g. a remote/SSH project).
 pub fn ensure_center_terminal_in(
     window: gpui::WindowHandle<workspace::MultiWorkspace>,
@@ -481,6 +495,19 @@ mod tests {
             "https://github.com/heapworks-in/photon/releases"
         );
         assert!(super::super::DOCS_URL.starts_with("https://heapworks-in.github.io/photon"));
+    }
+
+    #[test]
+    fn the_call_hierarchy_key_opens_the_panel_wherever_focus_is() {
+        let macos = include_str!("../../../../assets/keymaps/default-macos.json");
+        assert!(!macos.contains("\"cmd-k cmd-h\": \"call_hierarchy::ShowIncomingCalls\""));
+        assert_eq!(
+            macos
+                .matches("\"cmd-k cmd-h\": \"photon_call_trails::ShowInPanel\"")
+                .count(),
+            2,
+            "from the editor and from anywhere else in the window"
+        );
     }
 
     #[test]

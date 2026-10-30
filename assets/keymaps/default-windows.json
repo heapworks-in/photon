@@ -570,7 +570,7 @@
       "alt-f12": "editor::GoToDefinitionSplit",
       "ctrl-f12": "editor::GoToImplementation",
       "shift-alt-f12": "editor::FindAllReferences",
-      "ctrl-k ctrl-h": "call_hierarchy::ShowIncomingCalls",
+      "ctrl-k ctrl-h": "photon_call_trails::ShowInPanel", // photon: one call hierarchy, in its panel
       "ctrl-shift-\\": "editor::MoveToEnclosingBracket",
       "ctrl-shift-[": "editor::Fold",
       "ctrl-shift-]": "editor::UnfoldLines",

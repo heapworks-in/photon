@@ -677,6 +677,91 @@ impl PickerDelegate for JavaPickerDelegate {
     }
 }
 
+/// Files the Java server imports a project's layout from. With none of them it makes an "invisible
+/// project" and guesses the source folder, which goes wrong for IntelliJ-only projects.
+const JAVA_BUILD_FILES: [&str; 6] = [
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+    ".project",
+];
+
+/// The source folders an IntelliJ project at `root` declares, when it has no build file the Java
+/// server reads. Paths are relative to `root`, as `java.project.sourcePaths` expects.
+/// shortcut: reads only `.iml` files at the root, not nested modules; add those if multi-module
+/// IntelliJ projects come up.
+pub fn intellij_source_paths(root: &Path) -> Vec<String> {
+    if JAVA_BUILD_FILES.iter().any(|file| root.join(file).exists()) {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|extension| extension == "iml")
+            && let Ok(contents) = std::fs::read_to_string(&path)
+        {
+            for folder in iml_source_folders(&contents) {
+                if !paths.contains(&folder) {
+                    paths.push(folder);
+                }
+            }
+        }
+    }
+    paths
+}
+
+fn iml_source_folders(iml: &str) -> Vec<String> {
+    const PREFIX: &str = "file://$MODULE_DIR$/";
+    iml.split("<sourceFolder")
+        .skip(1)
+        .filter_map(|tag| {
+            let tag = tag.split('>').next()?;
+            let url = tag.split("url=\"").nth(1)?.split('"').next()?;
+            let folder = url.strip_prefix(PREFIX)?.trim_end_matches('/');
+            (!folder.is_empty() && !folder.contains("..")).then(|| folder.to_string())
+        })
+        .collect()
+}
+
+/// `options` with `java.project.sourcePaths` set to `paths` under `settings` (the Java server's
+/// initialization options nest its settings there) or at the top (its workspace configuration).
+/// A value the user or the extension already set is kept.
+pub fn with_java_source_paths(
+    options: Option<serde_json::Value>,
+    paths: &[String],
+    under_settings: bool,
+) -> Option<serde_json::Value> {
+    if paths.is_empty() {
+        return options;
+    }
+    let mut options = options.unwrap_or_else(|| serde_json::json!({}));
+    let mut target = &mut options;
+    let keys: &[&str] = if under_settings {
+        &["settings", "java", "project"]
+    } else {
+        &["java", "project"]
+    };
+    for key in keys {
+        let Some(object) = target.as_object_mut() else {
+            return Some(options);
+        };
+        target = object
+            .entry(key.to_string())
+            .or_insert_with(|| serde_json::json!({}));
+    }
+    if let Some(project) = target.as_object_mut() {
+        project
+            .entry("sourcePaths")
+            .or_insert_with(|| serde_json::json!(paths));
+    }
+    Some(options)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -813,5 +898,55 @@ mod tests {
         assert_eq!(java_home(&settings), Some("/jdk21".into()));
         set_java_home(&mut settings, "/jdk27", true);
         assert_eq!(java_home(&settings), Some("/jdk27".into()));
+    }
+    #[test]
+    fn intellij_projects_tell_the_java_server_their_sources() {
+        let iml = r#"<module type="JAVA_MODULE" version="4">
+  <component name="NewModuleRootManager" inherit-compiler-output="true">
+    <content url="file://$MODULE_DIR$">
+      <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/test/" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../outside" isTestSource="false" />
+      <sourceFolder url="jar://elsewhere" />
+    </content>
+  </component>
+</module>"#;
+        assert_eq!(iml_source_folders(iml), ["src", "test"]);
+
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("App.iml"), iml).expect("write");
+        assert_eq!(intellij_source_paths(root.path()), ["src", "test"]);
+        std::fs::write(root.path().join("pom.xml"), "<project/>").expect("write");
+        assert!(
+            intellij_source_paths(root.path()).is_empty(),
+            "Maven describes the project itself"
+        );
+    }
+
+    #[test]
+    fn source_paths_join_the_java_settings_without_overriding_them() {
+        let paths = ["src".to_string()];
+        assert_eq!(
+            with_java_source_paths(None, &paths, true),
+            Some(
+                serde_json::json!({ "settings": { "java": { "project": { "sourcePaths": ["src"] } } } })
+            )
+        );
+        assert_eq!(
+            with_java_source_paths(
+                Some(serde_json::json!({ "java": { "format": { "enabled": true } } })),
+                &paths,
+                false
+            ),
+            Some(serde_json::json!({
+                "java": { "format": { "enabled": true }, "project": { "sourcePaths": ["src"] } }
+            }))
+        );
+        let chosen = serde_json::json!({ "java": { "project": { "sourcePaths": ["app"] } } });
+        assert_eq!(
+            with_java_source_paths(Some(chosen.clone()), &paths, false),
+            Some(chosen)
+        );
+        assert_eq!(with_java_source_paths(None, &[], false), None);
     }
 }

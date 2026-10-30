@@ -569,6 +569,7 @@ fn main() {
         let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
         let workspace_store = cx.new(|cx| WorkspaceStore::new(client.clone(), cx));
 
+        zed::photon::register_language_server_options(); // photon: Java sources for IntelliJ projects
         language_extension::init(
             language_extension::LspAccess::ViaWorkspaces({
                 let workspace_store = workspace_store.clone();

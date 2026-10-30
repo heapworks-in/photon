@@ -1,4 +1,5 @@
 mod extension_lsp_adapter;
+pub use extension_lsp_adapter::set_photon_options_hook; // photon: options hook
 
 use std::path::PathBuf;
 use std::sync::Arc;

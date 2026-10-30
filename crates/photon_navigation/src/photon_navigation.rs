@@ -18,7 +18,7 @@ use project::{
 use util::{ResultExt as _, paths::PathMatcher};
 use workspace::{Toast, Workspace};
 
-pub use java_setup::{Detect, JavaScan, JavaSetup};
+pub use java_setup::{Detect, JavaScan, JavaSetup, intellij_source_paths, with_java_source_paths};
 pub use language_server_fixes::known_fix;
 pub use set_up_language_server::SetUpLanguageServer;
 

@@ -625,7 +625,7 @@
       "shift-f12": "editor::GoToImplementation",
       "alt-cmd-f12": "editor::GoToTypeDefinitionSplit",
       "alt-shift-f12": "editor::FindAllReferences",
-      "cmd-k cmd-h": "call_hierarchy::ShowIncomingCalls",
+      "cmd-k cmd-h": "photon_call_trails::ShowInPanel", // photon: one call hierarchy, in its panel
       "cmd-|": "editor::MoveToEnclosingBracket",
       "ctrl-m": "editor::MoveToEnclosingBracket", // From Jetbrains
       "alt-cmd-[": "editor::Fold",
@@ -743,6 +743,7 @@
       "ctrl-shift-t": "photon_tabs::NewTab",
       "ctrl-shift-w": "photon_tabs::CloseTab",
       "ctrl-`": "photon::ToggleTerminalEditorFocus", // photon: terminals live in the center
+      "cmd-k cmd-h": "photon_call_trails::ShowInPanel", // photon: works with the panel focused too
       "cmd-1": ["workspace::ActivatePane", 0],
       "cmd-2": ["workspace::ActivatePane", 1],
       "cmd-3": ["workspace::ActivatePane", 2],
