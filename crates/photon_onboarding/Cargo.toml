@@ -1,0 +1,28 @@
+[package]
+name = "photon_onboarding"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/photon_onboarding.rs"
+doctest = false
+
+[dependencies]
+extension_host.workspace = true
+fs.workspace = true
+gpui.workspace = true
+log.workspace = true
+project.workspace = true
+settings.workspace = true
+theme_settings.workspace = true
+ui.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }
+theme = { workspace = true, features = ["test-support"] }

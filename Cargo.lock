@@ -12347,6 +12347,7 @@ dependencies = [
  "gpui",
  "menu",
  "notifications",
+ "photon_onboarding",
  "picker",
  "project",
  "schemars 1.0.4",
@@ -13825,6 +13826,21 @@ dependencies = [
  "util",
  "workspace",
  "zed_actions",
+]
+
+[[package]]
+name = "photon_onboarding"
+version = "0.1.0"
+dependencies = [
+ "extension_host",
+ "fs",
+ "gpui",
+ "log",
+ "project",
+ "settings",
+ "theme",
+ "theme_settings",
+ "ui",
 ]
 
 [[package]]

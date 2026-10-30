@@ -212,6 +212,7 @@ struct Onboarding {
     scroll_handle: ScrollHandle,
     _settings_subscription: Subscription,
     _registry_subscription: Option<Subscription>, // photon: agent cards fill in once fetched
+    _languages_subscription: Option<Subscription>, // photon: language cards follow installs
 }
 
 impl Onboarding {
@@ -271,6 +272,7 @@ impl Onboarding {
 
             Self {
                 _registry_subscription,
+                _languages_subscription: photon_onboarding::observe_languages(cx), // photon
                 workspace: workspace.weak_handle(),
                 focus_handle: cx.focus_handle(),
                 scroll_handle: ScrollHandle::new(),
@@ -439,6 +441,7 @@ impl Item for Onboarding {
                 _registry_subscription:
                     project::AgentRegistryStore::try_global(cx) // photon: as in `new`
                         .map(|store| cx.observe(&store, |_, _, cx| cx.notify())),
+                _languages_subscription: photon_onboarding::observe_languages(cx), // photon
             }
         })))
     }
