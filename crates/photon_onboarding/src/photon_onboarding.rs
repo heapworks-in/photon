@@ -243,7 +243,7 @@ pub fn render_terminal_section(tab_index: &mut isize, cx: &mut App) -> AnyElemen
 fn side_row(
     id: &'static str,
     label: &'static str,
-    side: DockSide,
+    side: Option<DockSide>,
     tab_index: &mut isize,
     update: fn(&mut SettingsContent, DockSide),
 ) -> AnyElement {
@@ -264,9 +264,11 @@ fn side_row(
                     )
                 }),
             )
-            .selected_index(match side {
-                DockSide::Left => 0,
-                DockSide::Right => 1,
+            .when_some(side, |group, side| {
+                group.selected_index(match side {
+                    DockSide::Left => 0,
+                    DockSide::Right => 1,
+                })
             })
             .size(ToggleButtonGroupSize::Medium)
             .style(ToggleButtonGroupStyle::Outlined)
@@ -283,16 +285,18 @@ pub fn render_panels_section(tab_index: &mut isize, cx: &mut App) -> AnyElement 
         .as_ref()
         .and_then(|panel| panel.dock)
         .unwrap_or(DockSide::Left);
+    // An agent panel docked at the bottom is neither side, so neither is selected.
     let agent_side = match merged.agent.as_ref().and_then(|agent| agent.dock) {
-        Some(DockPosition::Left) => DockSide::Left,
-        _ => DockSide::Right,
+        Some(DockPosition::Left) => Some(DockSide::Left),
+        Some(DockPosition::Right) | None => Some(DockSide::Right),
+        Some(DockPosition::Bottom) => None,
     };
     let ai = !DisableAiSettings::get_global(cx).disable_ai;
     section("Panels")
         .child(side_row(
             "onboarding-file-panel",
             "File Panel",
-            file_side,
+            Some(file_side),
             tab_index,
             set_file_panel,
         ))
@@ -309,7 +313,7 @@ pub fn render_panels_section(tab_index: &mut isize, cx: &mut App) -> AnyElement 
 }
 
 /// The font style for code, the terminal and menus, each option set in its own font.
-pub fn render_font_section(_tab_index: &mut isize, cx: &mut App) -> AnyElement {
+pub fn render_font_section(tab_index: &mut isize, cx: &mut App) -> AnyElement {
     let buffer_font = ThemeSettings::get_global(cx).buffer_font.family.clone();
     let selected = selected_font_style(buffer_font.as_ref());
     let colors = cx.theme().colors();
@@ -335,8 +339,14 @@ pub fn render_font_section(_tab_index: &mut isize, cx: &mut App) -> AnyElement {
                             })
                             .bg(colors.editor_background)
                             .cursor_pointer()
-                            .on_click(move |_, _, cx| match cx.build_action(action, None) {
-                                Ok(action) => cx.dispatch_action(action.as_ref()),
+                            .tab_index({
+                                *tab_index += 1;
+                                *tab_index - 1
+                            })
+                            // The window the click came from: `App::dispatch_action` would update
+                            // that window again while the click is still updating it, and fail.
+                            .on_click(move |_, window, cx| match cx.build_action(action, None) {
+                                Ok(action) => window.dispatch_action(action, cx),
                                 Err(error) => log::error!("font style {action}: {error}"),
                             })
                             .child(
@@ -358,7 +368,7 @@ pub fn render_font_section(_tab_index: &mut isize, cx: &mut App) -> AnyElement {
 
 /// Language extensions to install up front, so a project in that language works when it opens.
 /// Nothing is downloaded until Install is clicked.
-pub fn render_languages_section(cx: &mut App) -> Option<AnyElement> {
+pub fn render_languages_section(tab_index: &mut isize, cx: &mut App) -> Option<AnyElement> {
     let store = ExtensionStore::try_global(cx)?;
     let store = store.read(cx);
     let installed = store.installed_extensions();
@@ -384,6 +394,10 @@ pub fn render_languages_section(cx: &mut App) -> Option<AnyElement> {
                 CardState::Install => {
                     Button::new(SharedString::from(format!("install-{id}")), "Install")
                         .style(ButtonStyle::Outlined)
+                        .tab_index({
+                            *tab_index += 1;
+                            *tab_index - 1
+                        })
                         .on_click(move |_, _, cx| {
                             if let Some(store) = ExtensionStore::try_global(cx) {
                                 store.update(cx, |store, cx| {
@@ -430,7 +444,10 @@ mod tests {
         }
     }
 
-    fn drawn(user_settings: &str, selector: &'static str, cx: &mut TestAppContext) -> bool {
+    fn open<'a>(
+        user_settings: &str,
+        cx: &'a mut TestAppContext,
+    ) -> &'a mut gpui::VisualTestContext {
         cx.update(|cx| {
             let store = SettingsStore::test(cx);
             cx.set_global(store);
@@ -443,7 +460,11 @@ mod tests {
         });
         let (_, cx) = cx.add_window_view(|_, _| Sections);
         cx.run_until_parked();
-        cx.debug_bounds(selector).is_some()
+        cx
+    }
+
+    fn drawn(user_settings: &str, selector: &'static str, cx: &mut TestAppContext) -> bool {
+        open(user_settings, cx).debug_bounds(selector).is_some()
     }
 
     #[gpui::test]
@@ -457,6 +478,25 @@ mod tests {
         ] {
             assert!(drawn("{}", selector, cx), "{selector}");
         }
+    }
+
+    gpui::actions!(photon, [UseHackFontStyle]);
+
+    #[gpui::test]
+    fn clicking_a_font_tile_applies_that_style(cx: &mut TestAppContext) {
+        let applied = std::rc::Rc::new(std::cell::Cell::new(0));
+        cx.update(|cx| {
+            let applied = applied.clone();
+            cx.on_action(move |_: &UseHackFontStyle, _| applied.set(applied.get() + 1));
+        });
+        let cx = open("{}", cx);
+        // As in the app: the clicked window is the active one.
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let tile = cx.debug_bounds("onboarding-font-hack").expect("Hack tile");
+        cx.simulate_click(tile.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(applied.get(), 1);
     }
 
     #[gpui::test]

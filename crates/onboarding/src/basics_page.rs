@@ -758,7 +758,10 @@ pub(crate) fn render_basics_page(user_store: &Entity<UserStore>, cx: &mut App) -
         .child(photon_onboarding::render_font_section(&mut tab_index, cx))
         .child(render_base_keymap_section(&mut tab_index, cx))
         .child(render_ai_section(user_store, cx))
-        .children(photon_onboarding::render_languages_section(cx)) // photon: language extensions
+        .children(photon_onboarding::render_languages_section(
+            &mut tab_index,
+            cx,
+        )) // photon: language extensions
         .child(render_import_settings_section(&mut tab_index, cx))
         .child(render_vim_mode_switch(&mut tab_index, cx))
         .child(render_worktree_auto_trust_switch(&mut tab_index, cx))
