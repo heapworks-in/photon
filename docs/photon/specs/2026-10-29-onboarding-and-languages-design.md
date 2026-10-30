@@ -71,7 +71,7 @@ none is selected for any other font. *(My call.)*
 - The section always shows; nothing is fetched until the user clicks Install, so it needs no gate on
   `suggest_extensions`. An extension installed here never gets the "install this extension?"
   suggestion later, because that suggestion already checks installed state. *(My call.)*
-- **Java** (see the open question below): once the extension is installed, the card runs the
+- **Java**: once the extension is installed, the card runs the
   existing Java scan (`JavaSetup`) right away instead of waiting for the first `.java` file. If a
   usable Java 21 is found, it's used silently, as today. If not, the card shows **Install Java 21**,
   which runs the existing install (a click, never automatic). Progress shows on the card, not in the
@@ -85,8 +85,9 @@ Java language server (jdtls) itself, the first time it starts. Separately, the f
 file is active, Photon scans once for Java 21 and, if none is usable, shows a notice whose button
 installs it (`brew install openjdk@21` in a terminal, or a download link).
 
-**Open:** which part felt slow to the user decides what changes here (see the question in chat).
-Until that's known this section changes nothing beyond the Languages card above.
+**Decided:** the slow part was the call trace itself, not installing Java, so the install flow stays
+as it is. The call trace's wait is handled in the Call Hierarchy panel instead: it now names the
+Java server's current work while it loads ("Loading… Java: Building workspace · 45%").
 
 ## Not in this design: call hierarchy that never loads
 

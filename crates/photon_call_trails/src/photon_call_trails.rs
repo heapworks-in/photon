@@ -78,6 +78,24 @@ pub fn init(cx: &mut App) {
 
 /// What to say when the language server finds no function at the cursor. Errors in the file usually
 /// mean the server isn't reading the project's sources, so they're the likely reason.
+/// One line for a language server's work in progress, shown while a trace waits on it.
+fn progress_line(language: &str, progress: &project::LanguageServerProgress) -> String {
+    let mut parts: Vec<String> = [&progress.title, &progress.message]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.trim().is_empty())
+        .cloned()
+        .collect();
+    if let Some(percentage) = progress.percentage {
+        parts.push(format!("{percentage}%"));
+    }
+    if parts.is_empty() {
+        format!("{language} is busy")
+    } else {
+        format!("{language}: {}", parts.join(" · "))
+    }
+}
+
 fn not_found_note(language: &str, errors: usize) -> (SharedString, SharedString) {
     let body = match errors {
         0 => "Put the cursor on a function's name.".to_string(),
@@ -152,6 +170,8 @@ pub struct CallHierarchyPanel {
     server_errors: HashMap<LanguageServerName, String>,
     /// The function the user asked for while its language server wasn't ready; traced once it is.
     pending_trace: Option<(WeakEntity<Buffer>, language::Anchor)>,
+    /// The language of the trace being loaded, whose server's progress the loading line shows.
+    loading_language: Option<language::LanguageName>,
     /// Most recent first.
     recent: Vec<StartPoint>,
     /// `None` until first looked up.
@@ -395,6 +415,7 @@ impl CallHierarchyPanel {
             server_statuses: HashMap::default(),
             server_errors: HashMap::default(),
             pending_trace: None,
+            loading_language: None,
             recent: Vec::new(),
             start_points: None,
             start_points_task: None,
@@ -463,6 +484,12 @@ impl CallHierarchyPanel {
             }
             LspStoreEvent::LanguageServerRemoved(_) | LspStoreEvent::LanguageDetected { .. } => {
                 self.refresh_server_problem(window, cx)
+            }
+            // Progress while a trace waits, so the loading line stays current.
+            LspStoreEvent::LanguageServerUpdate { .. }
+                if matches!(self.content, Content::LoadingRoot) =>
+            {
+                cx.notify()
             }
             _ => {}
         }
@@ -624,6 +651,7 @@ impl CallHierarchyPanel {
         });
         self.start_loading_root(cx);
         let project = self.project.clone();
+        self.loading_language = buffer.read(cx).language().map(|language| language.name());
         let (language, errors) = buffer.read_with(cx, |buffer, _| {
             let snapshot = buffer.snapshot();
             let errors = snapshot
@@ -1725,6 +1753,26 @@ impl CallHierarchyPanel {
             .into_any_element()
     }
 
+    /// "Loading…", with the language server's latest progress while it has some: on a large
+    /// project the first search for callers waits on the server's indexing.
+    fn loading_message(&self, cx: &App) -> String {
+        let Some(language) = &self.loading_language else {
+            return "Loading…".to_string();
+        };
+        let lsp_store = self.project.read(cx).lsp_store();
+        let lsp_store = lsp_store.read(cx);
+        let latest = lsp_store
+            .language_server_statuses()
+            .filter(|(_, status)| status.language_name.as_ref() == Some(language))
+            .flat_map(|(_, status)| status.pending_work.values())
+            .filter(|progress| !progress.is_disk_based_diagnostics_progress)
+            .max_by_key(|progress| progress.last_update_at);
+        match latest {
+            Some(progress) => format!("Loading… {}", progress_line(language.as_ref(), progress)),
+            None => "Loading…".to_string(),
+        }
+    }
+
     fn render_start(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let mut editor_context = KeyContext::default();
         editor_context.add("Editor");
@@ -1936,7 +1984,8 @@ impl Render for CallHierarchyPanel {
         let mut key_context = KeyContext::new_with_defaults(cx.platform_info().os);
         key_context.add("CallHierarchyPanel");
         key_context.add("menu");
-        let message = matches!(self.content, Content::LoadingRoot).then_some("Loading…");
+        let message =
+            matches!(self.content, Content::LoadingRoot).then(|| self.loading_message(cx));
         let empty = matches!(self.content, Content::Empty).then(|| match &self.server_problem {
             Some(problem) => self.render_server_problem(problem, cx),
             None => self.render_start(window, cx),
@@ -3454,6 +3503,35 @@ mod tests {
         setup.cx.run_until_parked();
         assert_eq!(setup.take_requests(), ["calls of main"]);
         assert_eq!(setup.tree(), ["helper ×2"]);
+    }
+
+    #[test]
+    fn loading_says_what_the_language_server_is_doing() {
+        let progress = |title: Option<&str>, message: Option<&str>, percentage| {
+            project::LanguageServerProgress {
+                is_disk_based_diagnostics_progress: false,
+                is_cancellable: false,
+                title: title.map(str::to_string),
+                message: message.map(str::to_string),
+                percentage,
+                last_update_at: std::time::Instant::now(),
+            }
+        };
+        assert_eq!(
+            progress_line(
+                "Java",
+                &progress(Some("Building workspace"), Some("src"), Some(45))
+            ),
+            "Java: Building workspace · src · 45%"
+        );
+        assert_eq!(
+            progress_line("Java", &progress(None, Some("Searching"), None)),
+            "Java: Searching"
+        );
+        assert_eq!(
+            progress_line("Java", &progress(None, None, None)),
+            "Java is busy"
+        );
     }
 
     #[gpui::test]
