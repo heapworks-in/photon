@@ -78,6 +78,28 @@ pub fn init(cx: &mut App) {
 
 /// What to say when the language server finds no function at the cursor. Errors in the file usually
 /// mean the server isn't reading the project's sources, so they're the likely reason.
+/// Start to End stops growing past this many levels from the traced function, or this many
+/// functions; deeper branches stay folded and open on a double-click.
+const MAX_TRAIL_DEPTH: usize = 6;
+const MAX_TRAIL_NODES: usize = 60;
+
+/// Whether Start to End expands a call by itself. Callers are followed back to where a flow
+/// starts (an entry point, HTTP handler or test); calls are followed only through the project, so
+/// Java and dependency code shows once and never fans out.
+fn follows(
+    direction: CallHierarchyMode,
+    tag: Option<Tag>,
+    library: bool,
+    depth: usize,
+    count: usize,
+) -> bool {
+    let stops_here = match direction {
+        CallHierarchyMode::Incoming => tag.is_some(),
+        CallHierarchyMode::Outgoing => library,
+    };
+    !stops_here && depth < MAX_TRAIL_DEPTH && count < MAX_TRAIL_NODES
+}
+
 /// One line for a language server's work in progress, shown while a trace waits on it.
 fn progress_line(language: &str, progress: &project::LanguageServerProgress) -> String {
     let mut parts: Vec<String> = [&progress.title, &progress.message]
@@ -150,6 +172,8 @@ pub struct CallHierarchyPanel {
     scroll_handle: UniformListScrollHandle,
     map_scroll_handle: ScrollHandle,
     mode: CallHierarchyMode,
+    /// Callers and calls at once, each followed to the end (see [`follows`]).
+    start_to_end: bool,
     view: TrailView,
     content: Content,
     root_header: RootHeader,
@@ -157,7 +181,8 @@ pub struct CallHierarchyPanel {
     /// The rows last drawn, for the indent guides.
     rows: Vec<Row>,
     root_task: Option<Task<()>>,
-    child_tasks: HashMap<usize, Task<()>>,
+    /// Keyed by node and whether it's fetching callers: Start to End's root fetches both.
+    child_tasks: HashMap<(usize, bool), Task<()>>,
     context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
     /// The active editor's buffer, whose language server the panel reports on.
     active_buffer: Option<WeakEntity<Buffer>>,
@@ -301,6 +326,10 @@ struct Node {
     call: Call,
     parent: Option<usize>,
     depth: usize,
+    /// Whether this is a caller or a call of its parent; the root's is the panel's mode.
+    direction: CallHierarchyMode,
+    /// Outside the project's folders: Java's own classes or a dependency's.
+    library: bool,
     /// `None` until first expanded and fetched.
     children: Option<Vec<usize>>,
     expanded: bool,
@@ -312,7 +341,15 @@ struct Node {
 }
 
 impl Node {
-    fn new(call: Call, parent: Option<usize>, depth: usize, recursive: bool, cx: &App) -> Self {
+    fn new(
+        call: Call,
+        parent: Option<usize>,
+        depth: usize,
+        recursive: bool,
+        direction: CallHierarchyMode,
+        library: bool,
+        cx: &App,
+    ) -> Self {
         let tag = tag_for(&call.item, cx);
         let call_row = call
             .target
@@ -324,6 +361,8 @@ impl Node {
             call,
             parent,
             depth,
+            direction,
+            library,
             children: None,
             expanded: false,
             recursive,
@@ -401,6 +440,7 @@ impl CallHierarchyPanel {
             scroll_handle: UniformListScrollHandle::new(),
             map_scroll_handle: ScrollHandle::new(),
             mode: CallHierarchyMode::Incoming,
+            start_to_end: false,
             view: TrailView::List,
             content: Content::Empty,
             not_found: None,
@@ -795,7 +835,8 @@ impl CallHierarchyPanel {
         self.child_tasks.clear();
         self.selected = None;
         self.root_header = self.root_header(&root, cx);
-        let root = Node::new(root, None, 0, false, cx);
+        let library = in_library(&root.item.buffer, &self.project, cx);
+        let root = Node::new(root, None, 0, false, self.mode, library, cx);
         self.remember(&root.call.item, root.tag, cx);
         self.content = Content::Tree(vec![root]);
         self.expand(0, window, cx);
@@ -846,10 +887,21 @@ impl CallHierarchyPanel {
     }
 
     fn set_mode(&mut self, mode: CallHierarchyMode, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mode == mode {
+        if self.mode == mode && !self.start_to_end {
             return;
         }
         self.mode = mode;
+        self.start_to_end = false;
+        self.make_root(0, window, cx);
+    }
+
+    /// Callers back to where the flow starts and calls to the end, in one graph.
+    fn set_start_to_end(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.start_to_end {
+            return;
+        }
+        self.start_to_end = true;
+        self.view = TrailView::Map;
         self.make_root(0, window, cx);
     }
 
@@ -881,10 +933,16 @@ impl CallHierarchyPanel {
     /// Recursive calls, and callers of entry points and tests, aren't worth a fetch; nor is a
     /// call already known to have none.
     fn can_expand(&self, node: &Node) -> bool {
-        let leaf_by_kind = self.mode == CallHierarchyMode::Incoming
+        let leaf_by_kind = node.direction == CallHierarchyMode::Incoming
             && matches!(node.tag, Some(Tag::EntryPoint | Tag::Test));
+        // Start to End stops at the project's edge.
+        let leaf_by_place = self.start_to_end
+            && node.library
+            && node.parent.is_some()
+            && node.direction == CallHierarchyMode::Outgoing;
         !node.recursive
             && !(node.parent.is_some() && leaf_by_kind)
+            && !leaf_by_place
             && node
                 .children
                 .as_ref()
@@ -899,7 +957,7 @@ impl CallHierarchyPanel {
         {
             return;
         }
-        let mode = self.mode;
+        let start_to_end = self.start_to_end;
         let Content::Tree(nodes) = &mut self.content else {
             return;
         };
@@ -908,21 +966,47 @@ impl CallHierarchyPanel {
         };
         node.expanded = true;
         cx.notify();
-        if node.children.is_some() || self.child_tasks.contains_key(&node_ix) {
+        let directions = if start_to_end && node.parent.is_none() {
+            vec![CallHierarchyMode::Incoming, CallHierarchyMode::Outgoing]
+        } else {
+            vec![node.direction]
+        };
+        if node.children.is_some() {
             return;
         }
         let item = node.call.item.clone();
-        let project = self.project.clone();
-        let task = cx.spawn_in(window, async move |this, cx| {
-            let calls = call_hierarchy::fetch_calls(&item, &project, mode, cx).await;
-            this.update(cx, |this, cx| this.add_children(node_ix, calls, cx))
+        for direction in directions {
+            let key = (node_ix, direction == CallHierarchyMode::Incoming);
+            if self.child_tasks.contains_key(&key) {
+                continue;
+            }
+            let item = item.clone();
+            let project = self.project.clone();
+            let task = cx.spawn_in(window, async move |this, cx| {
+                let calls = call_hierarchy::fetch_calls(&item, &project, direction, cx).await;
+                this.update_in(cx, |this, window, cx| {
+                    this.add_children(node_ix, calls, direction, window, cx)
+                })
                 .ok();
-        });
-        self.child_tasks.insert(node_ix, task);
+            });
+            self.child_tasks.insert(key, task);
+        }
     }
 
-    fn add_children(&mut self, parent_ix: usize, calls: Vec<Call>, cx: &mut Context<Self>) {
-        self.child_tasks.remove(&parent_ix);
+    fn add_children(
+        &mut self,
+        parent_ix: usize,
+        calls: Vec<Call>,
+        direction: CallHierarchyMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.child_tasks
+            .remove(&(parent_ix, direction == CallHierarchyMode::Incoming));
+        let libraries = calls
+            .iter()
+            .map(|call| in_library(&call.item.buffer, &self.project, cx))
+            .collect::<Vec<_>>();
         let Content::Tree(nodes) = &mut self.content else {
             return;
         };
@@ -930,7 +1014,7 @@ impl CallHierarchyPanel {
             return;
         };
         let mut children = Vec::with_capacity(calls.len());
-        for call in calls {
+        for (call, library) in calls.into_iter().zip(libraries) {
             let mut ancestor = Some(parent_ix);
             let mut recursive = false;
             while let Some(ancestor_node) = ancestor.and_then(|ix| nodes.get(ix)) {
@@ -941,10 +1025,39 @@ impl CallHierarchyPanel {
                 ancestor = ancestor_node.parent;
             }
             children.push(nodes.len());
-            nodes.push(Node::new(call, Some(parent_ix), depth, recursive, cx));
+            nodes.push(Node::new(
+                call,
+                Some(parent_ix),
+                depth,
+                recursive,
+                direction,
+                library,
+                cx,
+            ));
         }
+        // Start to End's root gets its callers and its calls from two fetches.
         if let Some(parent) = nodes.get_mut(parent_ix) {
-            parent.children = Some(children);
+            match &mut parent.children {
+                Some(existing) => existing.extend(children.iter().copied()),
+                None => parent.children = Some(children.clone()),
+            }
+        }
+        if self.start_to_end {
+            for child in children {
+                let follow = self.nodes().get(child).is_some_and(|node| {
+                    !node.recursive
+                        && follows(
+                            node.direction,
+                            node.tag,
+                            node.library,
+                            node.depth,
+                            self.nodes().len(),
+                        )
+                });
+                if follow {
+                    self.expand(child, window, cx);
+                }
+            }
         }
         cx.notify();
     }
@@ -1573,27 +1686,39 @@ impl CallHierarchyPanel {
                                         this.set_mode(CallHierarchyMode::Outgoing, window, cx)
                                     }),
                                 ),
+                                ToggleButtonSimple::new(
+                                    "Start to End",
+                                    cx.listener(|this, _, window, cx| {
+                                        this.set_start_to_end(window, cx)
+                                    }),
+                                ),
                             ],
                         )
                         .style(ToggleButtonGroupStyle::Outlined)
                         .auto_width()
-                        .selected_index(match self.mode {
-                            CallHierarchyMode::Incoming => 0,
-                            CallHierarchyMode::Outgoing => 1,
-                        }),
+                        .selected_index(
+                            match (self.start_to_end, self.mode) {
+                                (true, _) => 2,
+                                (false, CallHierarchyMode::Incoming) => 0,
+                                (false, CallHierarchyMode::Outgoing) => 1,
+                            },
+                        ),
                     )
-                    .child(icon_button(
-                        "call-trail-view-list",
-                        IconName::ListTree,
-                        "List",
-                        TrailView::List,
-                    ))
-                    .child(icon_button(
-                        "call-trail-view-map",
-                        IconName::GitGraph,
-                        "Map",
-                        TrailView::Map,
-                    ))
+                    // Start to End is always a graph: callers left, calls right.
+                    .when(!self.start_to_end, |this| {
+                        this.child(icon_button(
+                            "call-trail-view-list",
+                            IconName::ListTree,
+                            "List",
+                            TrailView::List,
+                        ))
+                        .child(icon_button(
+                            "call-trail-view-map",
+                            IconName::GitGraph,
+                            "Map",
+                            TrailView::Map,
+                        ))
+                    })
                     .child(div().flex_1())
                     .children(self.summary().map(|summary| {
                         div().min_w_0().child(
@@ -1995,9 +2120,9 @@ impl Render for CallHierarchyPanel {
             .first()
             .map(|root| self.render_header(root, cx));
         let has_tree = header.is_some();
-        let body = has_tree.then(|| match self.view {
-            TrailView::List => self.render_list(cx),
-            TrailView::Map => self.render_map(window, cx),
+        let body = has_tree.then(|| match (self.start_to_end, self.view) {
+            (false, TrailView::List) => self.render_list(cx),
+            (true, _) | (false, TrailView::Map) => self.render_map(window, cx),
         });
         v_flex()
             .id("call-hierarchy-panel")
@@ -2102,7 +2227,7 @@ impl Panel for CallHierarchyPanel {
         }
         let pending = std::mem::take(&mut self.child_tasks);
         if let Content::Tree(nodes) = &mut self.content {
-            for node_ix in pending.keys() {
+            for (node_ix, _) in pending.keys() {
                 if let Some(node) = nodes.get_mut(*node_ix) {
                     node.expanded = false;
                 }
@@ -2351,6 +2476,19 @@ fn detect_tag(
     in_test_module.then_some(Tag::Test)
 }
 
+/// Code outside the project's folders: the language server's copy of Java's own classes or a
+/// dependency's, which the project opens in a hidden folder.
+fn in_library(buffer: &Entity<Buffer>, project: &Entity<Project>, cx: &App) -> bool {
+    let Some(file) = buffer.read(cx).file() else {
+        return false;
+    };
+    let worktree_id = file.worktree_id(cx);
+    project
+        .read(cx)
+        .worktree_for_id(worktree_id, cx)
+        .is_none_or(|worktree| !worktree.read(cx).is_visible())
+}
+
 fn same_item(left: &CallHierarchyItem, right: &CallHierarchyItem) -> bool {
     left.buffer == right.buffer
         && left.selection_range == right.selection_range
@@ -2566,6 +2704,9 @@ mod tests {
             json!({"src": {"main.rs": SOURCE, "App.java": "class App {}\n"}}),
         )
         .await;
+        // Library code outside the project, like the Java server's copy of `HashMap`.
+        fs.insert_tree(path!("/jdk"), json!({"HashMap.java": "class HashMap {}\n"}))
+            .await;
         let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
         project.read_with(cx, |project, _| {
             project.languages().add(Arc::new(Language::new(
@@ -2898,6 +3039,48 @@ mod tests {
                         }
                     })
                     .collect()
+            })
+        }
+
+        fn start_to_end(&mut self, line: u32) {
+            self.show_in_panel(line);
+            self.panel.update_in(self.cx, |panel, window, cx| {
+                panel.set_start_to_end(window, cx)
+            });
+            self.cx.run_until_parked();
+        }
+
+        /// Both sides of a start-to-end trail, each depth-first, indented by distance from the root.
+        fn sides(&mut self) -> (Vec<String>, Vec<String>) {
+            self.panel.read_with(self.cx, |panel, _| {
+                let nodes = panel.nodes();
+                let mut callers = Vec::new();
+                let mut calls = Vec::new();
+                fn walk(nodes: &[Node], ix: usize, out: &mut Vec<String>) {
+                    let node = &nodes[ix];
+                    let mut text =
+                        format!("{}{}", "  ".repeat(node.depth - 1), node.call.item.name);
+                    if node.call.site_count > 1 {
+                        text.push_str(&format!(" ×{}", node.call.site_count));
+                    }
+                    if node.recursive {
+                        text.push_str(" ↻");
+                    }
+                    if let Some(tag) = node.tag {
+                        text.push_str(&format!(" [{}]", tag.label()));
+                    }
+                    out.push(text);
+                    for &child in node.children.iter().flatten() {
+                        walk(nodes, child, out);
+                    }
+                }
+                for &child in nodes[0].children.iter().flatten() {
+                    match nodes[child].direction {
+                        CallHierarchyMode::Incoming => walk(nodes, child, &mut callers),
+                        CallHierarchyMode::Outgoing => walk(nodes, child, &mut calls),
+                    }
+                }
+                (callers, calls)
             })
         }
 
@@ -3367,10 +3550,10 @@ mod tests {
         assert_eq!(
             layout,
             [
-                named("main", 2, 0., Some("helper")),
-                named("helper", 2, 1., Some("helper")),
-                named("helper", 1, 0.5, Some("leaf")),
-                named("other", 1, 2., Some("leaf")),
+                named("main", -2, 0., Some("helper")),
+                named("helper", -2, 1., Some("helper")),
+                named("helper", -1, 0.5, Some("leaf")),
+                named("other", -1, 2., Some("leaf")),
                 named("leaf", 0, 1.25, None),
             ]
         );
@@ -3532,6 +3715,113 @@ mod tests {
             progress_line("Java", &progress(None, None, None)),
             "Java is busy"
         );
+    }
+
+    #[gpui::test]
+    async fn start_to_end_walks_callers_back_to_where_the_flow_starts(cx: &mut TestAppContext) {
+        let mut setup = setup(true, cx).await;
+        setup.start_to_end(2);
+        assert_eq!(setup.root().as_deref(), Some("leaf"));
+        let (callers, calls) = setup.sides();
+        assert_eq!(
+            callers,
+            [
+                "helper",
+                "  main ×2 [entry point]",
+                "  helper ↻",
+                "other",
+                "  other_works [test]"
+            ]
+        );
+        assert!(calls.is_empty());
+    }
+
+    #[gpui::test]
+    async fn start_to_end_follows_calls_to_the_end(cx: &mut TestAppContext) {
+        let mut setup = setup(true, cx).await;
+        setup.start_to_end(0);
+        let (callers, calls) = setup.sides();
+        assert!(callers.is_empty());
+        assert_eq!(calls, ["helper ×2", "  leaf", "  helper ↻"]);
+    }
+
+    #[gpui::test]
+    async fn start_to_end_puts_callers_left_and_calls_right(cx: &mut TestAppContext) {
+        let mut setup = setup(true, cx).await;
+        setup.start_to_end(1);
+        let layout = setup.panel.read_with(setup.cx, |panel, _| {
+            map::layout(panel.nodes())
+                .into_iter()
+                .map(|placed| {
+                    let node = &panel.nodes()[placed.node_ix];
+                    (node.call.item.name.clone(), placed.column, placed.row)
+                })
+                .collect::<Vec<_>>()
+        });
+        let named = |name: &str, column, row| (name.to_string(), column, row);
+        assert_eq!(
+            layout,
+            [
+                named("main", -1, 0.),
+                named("helper", -1, 1.),
+                named("leaf", 1, 0.),
+                named("helper", 1, 1.),
+                named("helper", 0, 0.5),
+            ]
+        );
+        assert!(setup.cx.debug_bounds("call-trail-map-main").is_some());
+        assert!(setup.cx.debug_bounds("call-trail-view-list").is_none());
+    }
+
+    async fn open_in(
+        project: &Entity<Project>,
+        path: &str,
+        visible: bool,
+        cx: &mut VisualTestContext,
+    ) -> Entity<Buffer> {
+        let (worktree, relative) = project
+            .update(cx, |project, cx| {
+                project.find_or_create_worktree(path, visible, cx)
+            })
+            .await
+            .expect("worktree");
+        let worktree_id = worktree.read_with(cx, |worktree, _| worktree.id());
+        project
+            .update(cx, |project, cx| {
+                project.open_buffer((worktree_id, relative), cx)
+            })
+            .await
+            .expect("buffer")
+    }
+
+    #[gpui::test]
+    async fn code_outside_the_project_is_library_code(cx: &mut TestAppContext) {
+        let setup = setup(true, cx).await;
+        let project = setup
+            .panel
+            .read_with(setup.cx, |panel, _| panel.project.clone());
+        let own = open_in(&project, path!("/test/src/App.java"), true, setup.cx).await;
+        let library = open_in(&project, path!("/jdk/HashMap.java"), false, setup.cx).await;
+        setup.cx.read(|cx| {
+            assert!(!in_library(&own, &project, cx));
+            assert!(in_library(&library, &project, cx));
+        });
+    }
+
+    #[test]
+    fn what_start_to_end_follows() {
+        use CallHierarchyMode::{Incoming, Outgoing};
+        // Callers stop where a flow starts.
+        assert!(follows(Incoming, None, false, 1, 1));
+        assert!(!follows(Incoming, Some(Tag::EntryPoint), false, 1, 1));
+        assert!(!follows(Incoming, Some(Tag::Test), false, 1, 1));
+        assert!(!follows(Incoming, Some(Tag::HttpHandler), false, 1, 1));
+        // Calls stop at the project's edge: Java and dependency code is shown once.
+        assert!(follows(Outgoing, None, false, 1, 1));
+        assert!(!follows(Outgoing, None, true, 1, 1));
+        // Either way, the graph stops growing at its limits.
+        assert!(!follows(Outgoing, None, false, MAX_TRAIL_DEPTH, 1));
+        assert!(!follows(Incoming, None, false, 1, MAX_TRAIL_NODES));
     }
 
     #[gpui::test]

@@ -16,19 +16,58 @@ const DETAIL_SIZE: Pixels = px(10.);
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct MapNode {
     pub node_ix: usize,
-    /// Distance from the root.
-    pub column: usize,
+    /// Distance from the root: negative for callers, which sit left of it, positive for calls.
+    pub column: isize,
     pub row: f32,
 }
 
 /// The explored tree: columns by depth, rows in list order. A leaf takes the next row and a
 /// parent sits midway between its first and last child, so the layout never depends on timing.
+/// Callers and calls are laid out separately on either side of the root, which sits level with
+/// the middle of the taller side.
 pub(crate) fn layout(nodes: &[Node]) -> Vec<MapNode> {
-    let mut placed = Vec::new();
-    if !nodes.is_empty() {
+    let Some(root) = nodes.first() else {
+        return Vec::new();
+    };
+    let children = match &root.children {
+        Some(children) if root.expanded => children.as_slice(),
+        _ => &[],
+    };
+    let sides = [CallHierarchyMode::Incoming, CallHierarchyMode::Outgoing].map(|direction| {
         let mut next_row = 0.;
-        place(nodes, 0, &mut next_row, &mut placed);
+        let mut placed = Vec::new();
+        let rows = children
+            .iter()
+            .filter(|child| {
+                nodes
+                    .get(**child)
+                    .is_some_and(|node| node.direction == direction)
+            })
+            .map(|child| place(nodes, *child, &mut next_row, &mut placed))
+            .collect::<Vec<_>>();
+        let middle = rows
+            .first()
+            .zip(rows.last())
+            .map(|(first, last)| (first + last) / 2.);
+        (placed, middle)
+    });
+    let root_row = sides
+        .iter()
+        .filter_map(|(_, middle)| *middle)
+        .fold(0., f32::max);
+    let mut placed = Vec::new();
+    for (side, middle) in sides {
+        let shift = middle.map_or(0., |middle| root_row - middle);
+        placed.extend(side.into_iter().map(|node| MapNode {
+            row: node.row + shift,
+            ..node
+        }));
     }
+    placed.push(MapNode {
+        node_ix: 0,
+        column: 0,
+        row: root_row,
+    });
     placed
 }
 
@@ -52,9 +91,13 @@ fn place(nodes: &[Node], node_ix: usize, next_row: &mut f32, placed: &mut Vec<Ma
             row
         }
     };
+    let depth = node.depth as isize;
     placed.push(MapNode {
         node_ix,
-        column: node.depth,
+        column: match node.direction {
+            CallHierarchyMode::Incoming => -depth,
+            CallHierarchyMode::Outgoing => depth,
+        },
         row,
     });
     row
@@ -106,28 +149,24 @@ impl CallHierarchyPanel {
             })
             .collect::<Vec<_>>();
 
-        let columns = placed.iter().map(|node| node.column).max().unwrap_or(0) + 1;
+        // Callers read left to right into the root; calls go out from it.
+        let first_column = placed.iter().map(|node| node.column).min().unwrap_or(0);
+        let last_column = placed.iter().map(|node| node.column).max().unwrap_or(0);
+        let columns = (last_column - first_column + 1) as usize;
+        let screen = |column: isize| (column - first_column) as usize;
         let mut column_widths = vec![px(0.); columns];
         for (node, label) in placed.iter().zip(&labels) {
             if let (Some(width), Some((_, _, node_width, _))) =
-                (column_widths.get_mut(node.column), label)
+                (column_widths.get_mut(screen(node.column)), label)
             {
                 *width = (*width).max(*node_width);
             }
         }
-        // Callers read left to right into the root; calls go out from it.
         let mut column_x = vec![px(0.); columns];
         let mut x = PADDING;
-        for screen_column in 0..columns {
-            let column = match self.mode {
-                CallHierarchyMode::Incoming => columns - 1 - screen_column,
-                CallHierarchyMode::Outgoing => screen_column,
-            };
-            if let (Some(left), Some(width)) = (column_x.get_mut(column), column_widths.get(column))
-            {
-                *left = x;
-                x += *width + COLUMN_GAP;
-            }
+        for (left, width) in column_x.iter_mut().zip(&column_widths) {
+            *left = x;
+            x += *width + COLUMN_GAP;
         }
         let total_width = x - COLUMN_GAP + PADDING;
         let rows = placed.iter().map(|node| node.row).fold(0., f32::max) + 1.;
@@ -135,7 +174,8 @@ impl CallHierarchyPanel {
 
         let mut bounds = HashMap::default();
         for (node, label) in placed.iter().zip(&labels) {
-            if let (Some(left), Some((_, _, width, _))) = (column_x.get(node.column), label) {
+            if let (Some(left), Some((_, _, width, _))) = (column_x.get(screen(node.column)), label)
+            {
                 let top = PADDING + ROW_HEIGHT * node.row + (ROW_HEIGHT - NODE_HEIGHT) / 2.;
                 bounds.insert(node.node_ix, (*left, top, *width));
             }
@@ -151,15 +191,20 @@ impl CallHierarchyPanel {
                 continue;
             };
             let middle = NODE_HEIGHT / 2.;
-            let (from, to) = match self.mode {
-                CallHierarchyMode::Incoming => (
+            // A caller sits left of what it calls.
+            let caller = nodes
+                .get(node.node_ix)
+                .is_some_and(|node| node.direction == CallHierarchyMode::Incoming);
+            let (from, to) = if caller {
+                (
                     point(child.0 + child.2, child.1 + middle),
                     point(parent.0, parent.1 + middle),
-                ),
-                CallHierarchyMode::Outgoing => (
+                )
+            } else {
+                (
                     point(parent.0 + parent.2, parent.1 + middle),
                     point(child.0, child.1 + middle),
-                ),
+                )
             };
             let color = if trail.contains(&node.node_ix) {
                 colors.text_accent
@@ -177,6 +222,16 @@ impl CallHierarchyPanel {
             let node_ix = node.node_ix;
             let lit = trail.contains(&node_ix);
             let selected = self.selected == Some(node_ix);
+            let (library, folded) = nodes.get(node_ix).map_or((false, false), |node| {
+                (
+                    node.library && node.parent.is_some(),
+                    self.start_to_end
+                        && node.parent.is_some()
+                        && !node.expanded
+                        && node.children.is_none()
+                        && self.can_expand(node),
+                )
+            });
             let selector = name.clone();
             Some(
                 h_flex()
@@ -202,6 +257,10 @@ impl CallHierarchyPanel {
                         colors.elevated_surface_background
                     })
                     .when(!lit, |this| this.opacity(0.55))
+                    // Java or a dependency: shown once, never followed further.
+                    .when(library, |this| {
+                        this.border_dashed().bg(colors.panel_background)
+                    })
                     .whitespace_nowrap()
                     .overflow_hidden()
                     .cursor_pointer()
@@ -219,6 +278,15 @@ impl CallHierarchyPanel {
                             .text_color(colors.text_muted)
                             .child(detail)
                     }))
+                    // Stopped at the graph's limits; a double-click opens it.
+                    .when(folded, |this| {
+                        this.child(
+                            div()
+                                .text_size(DETAIL_SIZE)
+                                .text_color(colors.text_accent)
+                                .child("+"),
+                        )
+                    })
                     .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         if event.click_count() >= 2 {
                             this.toggle_expanded(node_ix, window, cx);
