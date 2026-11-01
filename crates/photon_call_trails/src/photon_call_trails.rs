@@ -19,8 +19,7 @@ use smallvec::SmallVec;
 use std::{ops::Range, rc::Rc};
 use ui::{
     Chip, ContextMenu, Disclosure, IndentGuideColors, KeyBinding, ListItem, RenderedIndentGuide,
-    ToggleButtonGroup, ToggleButtonGroupStyle, ToggleButtonSimple, Tooltip, prelude::*,
-    rems_from_px,
+    Tooltip, prelude::*, rems_from_px,
 };
 use util::ResultExt as _;
 use workspace::{
@@ -78,12 +77,12 @@ pub fn init(cx: &mut App) {
 
 /// What to say when the language server finds no function at the cursor. Errors in the file usually
 /// mean the server isn't reading the project's sources, so they're the likely reason.
-/// Start to End stops growing past this many levels from the traced function, or this many
+/// Flow stops growing past this many levels from the traced function, or this many
 /// functions; deeper branches stay folded and open on a double-click.
 const MAX_TRAIL_DEPTH: usize = 6;
 const MAX_TRAIL_NODES: usize = 60;
 
-/// Whether Start to End expands a call by itself. Callers are followed back to where a flow
+/// Whether Flow expands a call by itself. Callers are followed back to where a flow
 /// starts (an entry point, HTTP handler or test); calls are followed only through the project, so
 /// Java and dependency code shows once and never fans out.
 fn follows(
@@ -181,7 +180,7 @@ pub struct CallHierarchyPanel {
     /// The rows last drawn, for the indent guides.
     rows: Vec<Row>,
     root_task: Option<Task<()>>,
-    /// Keyed by node and whether it's fetching callers: Start to End's root fetches both.
+    /// Keyed by node and whether it's fetching callers: Flow's root fetches both.
     child_tasks: HashMap<(usize, bool), Task<()>>,
     context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
     /// The active editor's buffer, whose language server the panel reports on.
@@ -935,7 +934,7 @@ impl CallHierarchyPanel {
     fn can_expand(&self, node: &Node) -> bool {
         let leaf_by_kind = node.direction == CallHierarchyMode::Incoming
             && matches!(node.tag, Some(Tag::EntryPoint | Tag::Test));
-        // Start to End stops at the project's edge.
+        // Flow stops at the project's edge.
         let leaf_by_place = self.start_to_end
             && node.library
             && node.parent.is_some()
@@ -1035,7 +1034,7 @@ impl CallHierarchyPanel {
                 cx,
             ));
         }
-        // Start to End's root gets its callers and its calls from two fetches.
+        // Flow's root gets its callers and its calls from two fetches.
         if let Some(parent) = nodes.get_mut(parent_ix) {
             match &mut parent.children {
                 Some(existing) => existing.extend(children.iter().copied()),
@@ -1670,52 +1669,50 @@ impl CallHierarchyPanel {
                 h_flex()
                     .pt_1()
                     .gap_1()
-                    .child(
-                        ToggleButtonGroup::single_row(
-                            "call-trail-mode",
-                            [
-                                ToggleButtonSimple::new(
-                                    "Callers",
-                                    cx.listener(|this, _, window, cx| {
-                                        this.set_mode(CallHierarchyMode::Incoming, window, cx)
-                                    }),
-                                ),
-                                ToggleButtonSimple::new(
-                                    "Calls",
-                                    cx.listener(|this, _, window, cx| {
-                                        this.set_mode(CallHierarchyMode::Outgoing, window, cx)
-                                    }),
-                                ),
-                                ToggleButtonSimple::new(
-                                    "Start to End",
-                                    cx.listener(|this, _, window, cx| {
-                                        this.set_start_to_end(window, cx)
-                                    }),
-                                ),
-                            ],
-                        )
-                        .style(ToggleButtonGroupStyle::Outlined)
-                        .auto_width()
-                        .selected_index(
-                            match (self.start_to_end, self.mode) {
-                                (true, _) => 2,
-                                (false, CallHierarchyMode::Incoming) => 0,
-                                (false, CallHierarchyMode::Outgoing) => 1,
-                            },
-                        ),
-                    )
-                    // Start to End is always a graph: callers left, calls right.
+                    .child(mode_button(
+                        "call-trail-mode-callers",
+                        IconName::ArrowLeft,
+                        "Callers: who calls this",
+                        !self.start_to_end && self.mode == CallHierarchyMode::Incoming,
+                        cx.listener(|this, _, window, cx| {
+                            this.set_mode(CallHierarchyMode::Incoming, window, cx)
+                        }),
+                    ))
+                    .child(mode_button(
+                        "call-trail-mode-calls",
+                        IconName::ArrowRight,
+                        "Calls: what this calls",
+                        !self.start_to_end && self.mode == CallHierarchyMode::Outgoing,
+                        cx.listener(|this, _, window, cx| {
+                            this.set_mode(CallHierarchyMode::Outgoing, window, cx)
+                        }),
+                    ))
+                    .child(mode_button(
+                        "call-trail-mode-flow",
+                        IconName::ArrowRightLeft,
+                        "Flow: from where it starts to where it ends",
+                        self.start_to_end,
+                        cx.listener(|this, _, window, cx| this.set_start_to_end(window, cx)),
+                    ))
+                    // Flow is always a graph: callers left, calls right.
                     .when(!self.start_to_end, |this| {
-                        this.child(icon_button(
+                        this.child(
+                            div()
+                                .w_px()
+                                .h_4()
+                                .mx_0p5()
+                                .bg(cx.theme().colors().border_variant),
+                        )
+                        .child(icon_button(
                             "call-trail-view-list",
                             IconName::ListTree,
-                            "List",
+                            "Show as a list",
                             TrailView::List,
                         ))
                         .child(icon_button(
                             "call-trail-view-map",
                             IconName::GitGraph,
-                            "Map",
+                            "Show as a graph",
                             TrailView::Map,
                         ))
                     })
@@ -2235,6 +2232,23 @@ impl Panel for CallHierarchyPanel {
         }
         cx.notify();
     }
+}
+
+/// One of the header's Callers, Calls and Flow buttons: an icon, with its name in the tooltip.
+fn mode_button(
+    id: &'static str,
+    icon: IconName,
+    tooltip: &'static str,
+    selected: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div().debug_selector(move || id.into()).child(
+        IconButton::new(id, icon)
+            .icon_size(IconSize::Small)
+            .toggle_state(selected)
+            .tooltip(Tooltip::text(tooltip))
+            .on_click(on_click),
+    )
 }
 
 fn row_height() -> Rems {
@@ -3806,6 +3820,23 @@ mod tests {
             assert!(!in_library(&own, &project, cx));
             assert!(in_library(&library, &project, cx));
         });
+    }
+
+    #[gpui::test]
+    async fn the_header_switches_direction_with_icon_buttons(cx: &mut TestAppContext) {
+        let mut setup = setup(true, cx).await;
+        setup.show_in_panel(1);
+        let state = |setup: &mut Setup| {
+            setup
+                .panel
+                .read_with(setup.cx, |panel, _| (panel.start_to_end, panel.mode))
+        };
+        setup.click("call-trail-mode-flow");
+        assert_eq!(state(&mut setup), (true, CallHierarchyMode::Incoming));
+        setup.click("call-trail-mode-calls");
+        assert_eq!(state(&mut setup), (false, CallHierarchyMode::Outgoing));
+        setup.click("call-trail-mode-callers");
+        assert_eq!(state(&mut setup), (false, CallHierarchyMode::Incoming));
     }
 
     #[test]

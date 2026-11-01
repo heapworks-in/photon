@@ -1,4 +1,4 @@
-# Call Hierarchy: Start to End
+# Call Hierarchy: Flow
 
 A third option beside **Callers** and **Calls** in the Call Hierarchy panel. It shows one graph:
 where the flow starts on the left, the traced function in the middle, what it calls on the right.
@@ -18,7 +18,7 @@ Mockup: https://claude.ai/artifact/K7R5jk7TwxqittX4XEaBHt
 
 ## Behaviour
 
-- Start to End is always the graph view (callers left, calls right); the List/Map buttons hide.
+- Flow is always the graph view (callers left, calls right); the List/Map buttons hide.
 - The graph fills in as the language server answers; the loading line shows its progress.
 - Switching back to Callers or Calls traces the same function in that one direction.
 
