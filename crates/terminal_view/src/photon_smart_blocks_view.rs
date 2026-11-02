@@ -11,7 +11,7 @@ use photon_terminal::{RowMark, SmartBlocks, TableItem};
 use settings::Settings as _;
 use terminal::terminal_settings::TerminalSettings;
 use terminal::{BlockPart, InputTarget, PathLikeTarget};
-use ui::{ButtonSize, ContextMenu, prelude::*};
+use ui::{ButtonSize, ContextMenu, Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::{Pane, Workspace};
 
@@ -63,6 +63,22 @@ pub(crate) enum ToolbarButton {
 }
 
 impl ToolbarButton {
+    /// The toolbar shows an icon, with the label as its tooltip; `None` keeps the text, for a
+    /// label that carries information (the server's address).
+    fn icon(self) -> Option<IconName> {
+        Some(match self {
+            Self::RerunFailed => IconName::Rerun,
+            Self::OpenErrors => IconName::Warning,
+            Self::StageAll => IconName::Plus,
+            Self::OpenInGitPanel => IconName::GitBranch,
+            Self::OpenAsJson => IconName::Json,
+            Self::OpenAsTable => IconName::Table,
+            Self::CopyAsCsv => IconName::Copy,
+            Self::OpenUrl => return None,
+            Self::Stop => IconName::Stop,
+        })
+    }
+
     pub(crate) fn label(self, local_url: Option<&str>) -> String {
         match self {
             Self::RerunFailed => "Re-run Failed".to_string(),
@@ -102,9 +118,9 @@ pub(crate) enum RowButton {
 impl RowButton {
     fn label(self) -> &'static str {
         match self {
-            Self::Stage => "Stage",
-            Self::Diff => "Diff",
-            Self::Discard => "Discard",
+            Self::Stage => "Stage This File",
+            Self::Diff => "Show Changes",
+            Self::Discard => "Discard Changes",
         }
     }
 }
@@ -653,15 +669,20 @@ impl TerminalView {
                     RowContent::Buttons(buttons) => {
                         row_element.children(buttons.into_iter().map(|button| {
                             let smart_blocks = smart_blocks.clone();
-                            Button::new(
+                            IconButton::new(
                                 SharedString::from(format!(
                                     "smart-block-row-{absolute_line}-{button:?}"
                                 )),
-                                button.label(),
+                                match button {
+                                    RowButton::Stage => IconName::Plus,
+                                    RowButton::Diff => IconName::Diff,
+                                    RowButton::Discard => IconName::Undo,
+                                },
                             )
+                            .icon_size(IconSize::Small)
                             .style(ButtonStyle::Outlined)
                             .size(ButtonSize::Compact)
-                            .label_size(LabelSize::Small)
+                            .tooltip(Tooltip::text(button.label()))
                             .on_click(move |_, window, cx| {
                                 smart_blocks.update(cx, |smart_blocks, cx| match button {
                                     RowButton::Stage => {
@@ -784,17 +805,39 @@ impl TerminalView {
                             Label::new(delta).size(LabelSize::Small).color(Color::Muted)
                         }))
                         .children(buttons.into_iter().map(|button| {
-                            let focus_handle = focus_handle.clone();
-                            Button::new(
-                                SharedString::from(format!("smart-block-{button:?}")),
-                                button.label(local_url.as_deref()),
-                            )
-                            .style(ButtonStyle::Outlined)
-                            .size(ButtonSize::Compact)
-                            .label_size(LabelSize::Small)
-                            .on_click(move |_, window, cx| {
-                                focus_handle.dispatch_action(button.action().as_ref(), window, cx)
-                            })
+                            let id = SharedString::from(format!("smart-block-{button:?}"));
+                            let label = button.label(local_url.as_deref());
+                            let tooltip = Tooltip::for_action_title_in(
+                                label.clone(),
+                                button.action().as_ref(),
+                                &focus_handle,
+                            );
+                            let on_click = {
+                                let focus_handle = focus_handle.clone();
+                                move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
+                                    focus_handle.dispatch_action(
+                                        button.action().as_ref(),
+                                        window,
+                                        cx,
+                                    )
+                                }
+                            };
+                            match button.icon() {
+                                Some(icon) => IconButton::new(id, icon)
+                                    .icon_size(IconSize::Small)
+                                    .style(ButtonStyle::Outlined)
+                                    .size(ButtonSize::Compact)
+                                    .tooltip(tooltip)
+                                    .on_click(on_click)
+                                    .into_any_element(),
+                                None => Button::new(id, label)
+                                    .style(ButtonStyle::Outlined)
+                                    .size(ButtonSize::Compact)
+                                    .label_size(LabelSize::Small)
+                                    .tooltip(tooltip)
+                                    .on_click(on_click)
+                                    .into_any_element(),
+                            }
                         })),
                 )
                 .into_any_element(),
@@ -838,6 +881,23 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn toolbar_buttons_are_icons_except_the_server_address() {
+        for button in [
+            ToolbarButton::RerunFailed,
+            ToolbarButton::OpenErrors,
+            ToolbarButton::StageAll,
+            ToolbarButton::OpenInGitPanel,
+            ToolbarButton::OpenAsJson,
+            ToolbarButton::OpenAsTable,
+            ToolbarButton::CopyAsCsv,
+            ToolbarButton::Stop,
+        ] {
+            assert!(button.icon().is_some(), "{button:?}");
+        }
+        assert_eq!(ToolbarButton::OpenUrl.icon(), None);
     }
 
     #[test]

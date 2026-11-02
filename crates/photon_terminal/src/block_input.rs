@@ -19,7 +19,9 @@ use settings::{Settings as _, SettingsStore};
 use terminal::{Event, InputTarget, Terminal, terminal_settings::TerminalSettings};
 use theme_settings::ThemeSettings;
 use ui::ActiveTheme as _;
-use ui::{ButtonCommon as _, ButtonLike, ButtonSize, ButtonStyle, PopoverMenu, PopoverMenuHandle};
+use ui::{
+    ButtonCommon as _, ButtonLike, ButtonSize, ButtonStyle, PopoverMenu, PopoverMenuHandle, Tooltip,
+};
 use util::ResultExt as _;
 use workspace::Workspace;
 
@@ -629,12 +631,15 @@ impl Render for BlockInput {
                         let input = cx.weak_entity();
                         this.child(
                             PopoverMenu::new("photon-folder-chip-menu")
-                                .trigger(chip(
-                                    "photon-folder-chip",
-                                    folder_chip_text(cwd),
-                                    cx.theme().colors().terminal_ansi_blue,
-                                    cx,
-                                ))
+                                .trigger_with_tooltip(
+                                    chip(
+                                        "photon-folder-chip",
+                                        folder_chip_text(cwd),
+                                        cx.theme().colors().terminal_ansi_blue,
+                                        cx,
+                                    ),
+                                    Tooltip::for_action_title("Change Folder", &ToggleFolderPicker),
+                                )
                                 .with_handle(self.folder_menu.clone())
                                 .anchor(gpui::Anchor::BottomLeft)
                                 .offset(gpui::point(px(0.), px(-4.)))
@@ -649,12 +654,18 @@ impl Render for BlockInput {
                         let input = cx.weak_entity();
                         this.child(
                             PopoverMenu::new("photon-branch-chip-menu")
-                                .trigger(chip(
-                                    "photon-branch-chip",
-                                    branch_chip_text(info),
-                                    cx.theme().colors().terminal_ansi_green,
-                                    cx,
-                                ))
+                                .trigger_with_tooltip(
+                                    chip(
+                                        "photon-branch-chip",
+                                        branch_chip_text(info),
+                                        cx.theme().colors().terminal_ansi_green,
+                                        cx,
+                                    ),
+                                    Tooltip::for_action_title(
+                                        "Switch or Create a Branch",
+                                        &ToggleBranchPicker,
+                                    ),
+                                )
                                 .with_handle(self.branch_menu.clone())
                                 .anchor(gpui::Anchor::BottomLeft)
                                 .offset(gpui::point(px(0.), px(-4.)))

@@ -495,6 +495,7 @@ impl ProjectTabs {
                                 .shape(IconButtonShape::Square)
                                 .icon_color(Color::Muted)
                                 .icon_size(IconSize::XSmall)
+                                .tooltip(|_, cx| Tooltip::for_action("Close Tab", &CloseTab, cx))
                                 .on_click({
                                     let close = close.clone();
                                     move |_, window, cx| close(window, cx)
