@@ -13117,6 +13117,29 @@ impl LspStore {
         }
     }
 
+    /// photon: restarts a language server that stopped answering, and says so.
+    fn restart_unresponsive_server(
+        &mut self,
+        server_id: LanguageServerId,
+        name: LanguageServerName,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.language_server_statuses.contains_key(&server_id) {
+            return;
+        }
+        log::warn!("language server {name} (id {server_id}) stopped answering; restarting it");
+        cx.emit(LspStoreEvent::Notification(format!(
+            "{name} stopped answering, so Photon restarted it."
+        )));
+        let buffers = self.buffer_store.read(cx).buffers().collect();
+        self.restart_language_servers_for_buffers(
+            buffers,
+            // By name: a restart by id stops the server but then finds no id to start again.
+            HashSet::from_iter([LanguageServerSelector::Name(name)]),
+            cx,
+        );
+    }
+
     pub fn restart_all_language_servers(&mut self, cx: &mut Context<Self>) {
         if let Some(local) = self.as_local_mut() {
             local.auto_start_language_servers = true;
@@ -13667,6 +13690,17 @@ impl LspStore {
             language_server.name(),
             Some(key.worktree_id),
         ));
+        // photon: a server that stopped answering is restarted rather than left failing every request.
+        if let Some(unresponsive) = language_server.take_unresponsive_signal() {
+            let name = language_server.name();
+            cx.spawn(async move |this, cx| {
+                if unresponsive.await.is_ok() {
+                    this.update(cx, |this, cx| this.restart_unresponsive_server(server_id, name, cx))
+                        .log_err();
+                }
+            })
+            .detach();
+        }
 
         if let Some((downstream_client, project_id)) = self.downstream_client.as_ref()
             && let Some(capabilities) = self

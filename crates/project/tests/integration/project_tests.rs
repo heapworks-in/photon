@@ -13545,6 +13545,71 @@ async fn test_multiple_language_server_hovers(cx: &mut gpui::TestAppContext) {
     );
 }
 
+// photon: a language server that stops answering is restarted.
+#[gpui::test]
+async fn test_unresponsive_language_server_is_restarted(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.ts": "a" })).await;
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(typescript_lang());
+    let mut fake_language_servers = language_registry.register_fake_lsp(
+        "TypeScript",
+        FakeLspAdapter {
+            capabilities: lsp::ServerCapabilities {
+                hover_provider: Some(lsp::HoverProviderCapability::Simple(true)),
+                ..lsp::ServerCapabilities::default()
+            },
+            ..FakeLspAdapter::default()
+        },
+    );
+    let (_buffer, _handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/a.ts"), cx)
+        })
+        .await
+        .unwrap();
+    cx.executor().run_until_parked();
+    let fake_server = fake_language_servers.next().await.unwrap();
+    let notifications = Arc::new(Mutex::new(Vec::new()));
+    let lsp_store = project.read_with(cx, |project, _| project.lsp_store());
+    let _subscription = cx.update(|cx| {
+        let notifications = notifications.clone();
+        cx.subscribe(&lsp_store, move |_, event, _| {
+            if let LspStoreEvent::Notification(message) = event {
+                notifications.lock().push(message.clone());
+            }
+        })
+    });
+
+    // Two timeouts in a row while the server sent nothing (see lsp's photon_health tests).
+    let server = lsp_store.read_with(cx, |lsp_store, _| {
+        lsp_store
+            .language_server_for_id(fake_server.server.server_id())
+            .expect("running server")
+    });
+    server.simulate_unresponsive();
+    cx.executor().run_until_parked();
+    // A hung server doesn't answer shutdown either; it's killed after the shutdown timeout.
+    cx.executor().advance_clock(std::time::Duration::from_secs(10));
+    cx.executor().run_until_parked();
+
+    assert!(
+        notifications
+            .lock()
+            .iter()
+            .any(|message| message.contains("stopped answering")),
+        "{:?}",
+        notifications.lock()
+    );
+    assert!(
+        fake_language_servers.try_recv().is_ok(),
+        "a new server starts in place of the one that stopped answering"
+    );
+}
+
 #[gpui::test]
 async fn test_hovers_with_empty_parts(cx: &mut gpui::TestAppContext) {
     init_test(cx);

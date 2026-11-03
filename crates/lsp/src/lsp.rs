@@ -1,4 +1,5 @@
 mod input_handler;
+mod photon_health; // photon: restart servers that stop answering
 
 pub use lsp_types::request::*;
 pub use lsp_types::*;
@@ -80,6 +81,8 @@ type NotificationHandler = Box<dyn Send + FnMut(Option<RequestId>, Value, &mut A
 type PendingRespondTasks = Arc<Mutex<HashMap<RequestId, Task<()>>>>;
 type ResponseHandler = Box<dyn Send + FnOnce(Result<String, ResponseError>) -> Task<()>>;
 type IoHandler = Box<dyn Send + FnMut(IoKind, &str)>;
+/// photon: the IO handler key the health check uses; registered handlers count up from 0.
+const PHOTON_HEALTH_IO_HANDLER: i32 = i32::MIN;
 
 /// Kind of language server stdio given to an IO handler.
 #[derive(Debug, Clone, Copy)]
@@ -142,6 +145,7 @@ pub struct LanguageServer {
     server: Arc<Mutex<Option<Child>>>,
     workspace_folders: Option<Arc<Mutex<BTreeSet<Uri>>>>,
     root_uri: Uri,
+    health: Arc<photon_health::Health>, // photon: restart servers that stop answering
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -611,6 +615,16 @@ impl LanguageServer {
             Arc::new(Mutex::new(Some(HashMap::<_, ResponseHandler>::default())));
         let pending_respond_tasks = PendingRespondTasks::default();
         let io_handlers = Arc::new(Mutex::new(HashMap::default()));
+        // photon: every message from the server shows it's still alive.
+        let health = Arc::new(photon_health::Health::default());
+        io_handlers.lock().insert(PHOTON_HEALTH_IO_HANDLER, {
+            let health = health.clone();
+            Box::new(move |kind, _: &str| {
+                if matches!(kind, IoKind::StdOut) {
+                    health.received()
+                }
+            }) as IoHandler
+        });
 
         let stdout_input_task = cx.spawn({
             let unhandled_notification_wrapper = {
@@ -720,6 +734,7 @@ impl LanguageServer {
             server: Arc::new(Mutex::new(server)),
             workspace_folders,
             root_uri,
+            health,
         }
     }
 
@@ -1516,14 +1531,37 @@ impl LanguageServer {
     where
         T::Result: 'static + Send,
     {
-        Self::request_internal::<T>(
+        let request = Self::request_internal::<T>(
             &self.next_id,
             &self.response_handlers,
             &self.outbound_tx,
             &self.executor,
             request_timeout,
             params,
-        )
+        );
+        // photon: a timeout while the server sent nothing counts towards restarting it.
+        let health = self.health.clone();
+        let mark = health.mark();
+        LspRequest::new(request.id(), async move {
+            let result = request.await;
+            match &result {
+                ConnectionResult::Timeout => health.timed_out(mark),
+                ConnectionResult::Result(_) => health.answered(),
+                ConnectionResult::ConnectionReset => {}
+            }
+            result
+        })
+    }
+
+    /// photon: resolves once the server has stopped answering requests; taken once.
+    pub fn take_unresponsive_signal(&self) -> Option<oneshot::Receiver<()>> {
+        self.health.take_unresponsive_signal()
+    }
+
+    /// photon: acts as if the server had stopped answering.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_unresponsive(&self) {
+        self.health.signal();
     }
 
     fn request_internal_with_timer<T, U>(
