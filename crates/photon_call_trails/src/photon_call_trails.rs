@@ -143,6 +143,66 @@ struct EmptyTrace {
 /// jdtls's command to load the project's build again. It doesn't reload a Gradle build whose first
 /// import failed, even once the build file is fixed, nor notice a fix outside the files (a VPN).
 const IMPORT_PROJECT: &str = "java.project.import";
+/// jdtls's command listing the source folders of the modules it loaded. A file outside them gets
+/// "nothing here" with no error anywhere, as when a module isn't part of the build it loaded.
+const LIST_SOURCE_FOLDERS: &str = "java.project.listSourcePaths";
+
+/// The source folders and their modules in a [`LIST_SOURCE_FOLDERS`] answer.
+fn parse_source_folders(answer: &serde_json::Value) -> Option<Vec<(std::path::PathBuf, String)>> {
+    answer
+        .get("data")?
+        .as_array()?
+        .iter()
+        .map(|folder| {
+            let path = folder.get("path")?.as_str()?;
+            let module = folder
+                .get("projectName")
+                .and_then(|module| module.as_str())
+                .unwrap_or_default();
+            Some((std::path::PathBuf::from(path), module.to_string()))
+        })
+        .collect()
+}
+
+/// The modules a server loaded when `file` isn't in any of their source folders; `None` when it
+/// is. Paths are compared with symlinks resolved (`/var` is `/private/var` on macOS).
+async fn modules_without(
+    file: &std::path::Path,
+    folders: Vec<(std::path::PathBuf, String)>,
+    fs: &dyn fs::Fs,
+) -> Option<Vec<String>> {
+    let file = fs
+        .canonicalize(file)
+        .await
+        .unwrap_or_else(|_| file.to_path_buf());
+    let mut modules: Vec<String> = Vec::new();
+    for (folder, module) in folders {
+        let folder = fs.canonicalize(&folder).await.unwrap_or(folder);
+        if file.starts_with(&folder) {
+            return None;
+        }
+        if !module.is_empty() && !modules.contains(&module) {
+            modules.push(module);
+        }
+    }
+    Some(modules)
+}
+
+fn module_not_loaded_note(language: &str, modules: &[String]) -> (SharedString, SharedString) {
+    let body = if modules.is_empty() {
+        format!("{language} loaded no modules from the build. Check the build, then Try Again.")
+    } else {
+        format!(
+            "It's outside the modules {language} loaded from the build: {}. Check that its \
+             module is part of the build, then Try Again.",
+            modules.join(", ")
+        )
+    };
+    (
+        format!("{language} hasn't loaded this file's module").into(),
+        body.into(),
+    )
+}
 
 #[derive(Clone, Debug, PartialEq)]
 struct BuildError {
@@ -168,7 +228,10 @@ fn build_error_summary(message: &str) -> &str {
             || line.starts_with("A problem occurred evaluating ")
             || (line.starts_with("Build file '") && line.contains("' line: "))
     }
-    let lines = message.lines().map(str::trim).filter(|line| !line.is_empty());
+    let lines = message
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
     let line = lines
         .clone()
         .find(|line| !is_wrapper(line))
@@ -289,6 +352,11 @@ pub struct CallHierarchyPanel {
     not_found: Option<(SharedString, SharedString)>,
     /// The build error behind `not_found`, if that's why.
     build_error: Option<BuildError>,
+    /// The server that can load the build again (see [`IMPORT_PROJECT`]) when the note is about
+    /// the build: an error in it, or a module it left out.
+    import_server: Option<LanguageServerId>,
+    /// Asking the server which modules it loaded, after a trace found nothing.
+    module_check: Option<Task<()>>,
     /// The server loading the build again, and whether to ask once more when it's done.
     import_task: Option<Task<()>>,
     import_again: bool,
@@ -516,13 +584,13 @@ impl CallHierarchyPanel {
                     this.ask_again(*language_server_id, window, cx);
                 }
                 if let project::Event::WorktreeUpdatedEntries(_, changes) = event
-                    && this.build_error.is_some()
+                    && this.import_server.is_some()
                     && changes.iter().any(|(path, _, _)| {
                         path.file_name()
                             .is_some_and(|name| BUILD_FILES.contains(&name))
                     })
                 {
-                    this.import_build_again(cx);
+                    this.import_build_again(window, cx);
                 }
                 if matches!(
                     event,
@@ -566,6 +634,8 @@ impl CallHierarchyPanel {
             content: Content::Empty,
             not_found: None,
             build_error: None,
+            import_server: None,
+            module_check: None,
             import_task: None,
             import_again: false,
             empty_trace: None,
@@ -821,7 +891,12 @@ impl CallHierarchyPanel {
 
     /// Asks again about a trace that found nothing, if `server_id` serves its file. Quietly: the
     /// panel keeps saying why until the answer changes.
-    fn ask_again(&mut self, server_id: LanguageServerId, window: &mut Window, cx: &mut Context<Self>) {
+    fn ask_again(
+        &mut self,
+        server_id: LanguageServerId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(empty) = &self.empty_trace else {
             return;
         };
@@ -869,8 +944,13 @@ impl CallHierarchyPanel {
         self.pending_trace = None;
         if !quietly {
             self.build_error = None;
+            self.import_server = None;
         }
         let build_files = self.build_files_with_errors(&buffer, cx);
+        let source_folders = self.source_folders_request(&buffer, cx);
+        let abs_path = buffer.read_with(cx, |buffer, cx| {
+            Some(buffer.file()?.as_local()?.abs_path(cx))
+        });
         let traced = (buffer.downgrade(), position);
         let place = buffer.read_with(cx, |buffer, _| {
             let path = buffer
@@ -888,6 +968,7 @@ impl CallHierarchyPanel {
             self.loading_language = buffer.read(cx).language().map(|language| language.name());
         }
         let project = self.project.clone();
+        let fs = self.project.read(cx).fs().clone();
         let (language, errors) = buffer.read_with(cx, |buffer, _| {
             let snapshot = buffer.snapshot();
             let errors = snapshot
@@ -930,7 +1011,12 @@ impl CallHierarchyPanel {
                             .as_ref()
                             .is_some_and(|empty| empty.ask_after);
                         // Once per change: the panel asks again whenever the server reports.
-                        if this.not_found.as_ref() != Some(&note) || this.build_error != build_error {
+                        // Once per change: the panel asks again whenever the server reports.
+                        // The note says the file's module isn't loaded (see `module_check`).
+                        let module_note = this.import_server.is_some() && this.build_error.is_none();
+                        if (this.not_found.as_ref() != Some(&note) && !module_note)
+                            || this.build_error != build_error
+                        {
                             match &build_error {
                                 Some(error) => log::info!(
                                     "call hierarchy: {language} found nothing at {place}; \
@@ -944,7 +1030,12 @@ impl CallHierarchyPanel {
                             }
                         }
                         this.show_empty(cx);
-                        this.not_found = Some(note);
+                        // A module note stays until the server says otherwise, below.
+                        if !(module_note && build_error.is_none()) {
+                            this.not_found = Some(note);
+                            this.import_server = build_error.as_ref().map(|error| error.server_id);
+                        }
+                        let checks_modules = build_error.is_none();
                         this.build_error = build_error;
                         this.empty_trace = Some(EmptyTrace {
                             buffer: traced.0.clone(),
@@ -958,6 +1049,55 @@ impl CallHierarchyPanel {
                             }
                             this.trace_with(buffer, traced.1, true, window, cx);
                         }
+                        let check = source_folders.zip(abs_path).filter(|_| checks_modules);
+                        if let Some(((server_id, request), abs_path)) = check {
+                            let (language, place) = (language.clone(), place.clone());
+                            let fs = fs.clone();
+                            this.module_check = Some(cx.spawn(async move |this, cx| {
+                                // After the note is up: a busy server may take a while to answer.
+                                let answer = match request.await.into_response() {
+                                    Ok(answer) => answer,
+                                    Err(error) => {
+                                        log::info!("call hierarchy: no source folders from {language}: {error:#}");
+                                        return;
+                                    }
+                                };
+                                let Some(folders) = answer.as_ref().and_then(parse_source_folders) else {
+                                    log::info!("call hierarchy: unreadable source folders from {language}");
+                                    return;
+                                };
+                                let modules = modules_without(&abs_path, folders, fs.as_ref()).await;
+                                this.update(cx, |this, cx| {
+                                    let still_this_trace = this.empty_trace.as_ref().is_some_and(|empty| {
+                                        empty.buffer == traced.0 && empty.position == traced.1
+                                    });
+                                    if !still_this_trace || this.build_error.is_some() {
+                                        return;
+                                    }
+                                    match modules {
+                                        Some(modules) => {
+                                            let note = module_not_loaded_note(&language, &modules);
+                                            if this.not_found.as_ref() != Some(&note) {
+                                                log::info!(
+                                                    "call hierarchy: {place} is outside the modules \
+                                                     {language} loaded: {modules:?}"
+                                                );
+                                            }
+                                            this.not_found = Some(note);
+                                            this.import_server = Some(server_id);
+                                        }
+                                        None => {
+                                            if this.import_server.is_some() {
+                                                this.not_found = Some(not_found_note(&language, errors));
+                                                this.import_server = None;
+                                            }
+                                        }
+                                    }
+                                    cx.notify();
+                                })
+                                .ok();
+                            }));
+                        }
                     })
                     .ok();
                     return;
@@ -968,6 +1108,7 @@ impl CallHierarchyPanel {
                 this.empty_trace = None;
                 this.not_found = None;
                 this.build_error = None;
+                this.import_server = None;
                 this.show_root(root, window, cx)
             })
             .ok();
@@ -1090,27 +1231,77 @@ impl CallHierarchyPanel {
             .collect()
     }
 
-    /// Has the server behind the build error load the project's build again, if it can.
-    fn import_build_again(&mut self, cx: &mut Context<Self>) {
+    /// `server_id`'s server, if it's running and offers `command`.
+    fn server_offering(
+        &self,
+        server_id: LanguageServerId,
+        command: &str,
+        cx: &App,
+    ) -> Option<std::sync::Arc<lsp::LanguageServer>> {
+        let server = self
+            .project
+            .read(cx)
+            .lsp_store()
+            .read(cx)
+            .language_server_for_id(server_id)?;
+        let offers = server
+            .capabilities()
+            .execute_command_provider
+            .as_ref()
+            .is_some_and(|provider| provider.commands.iter().any(|offered| offered == command));
+        offers.then_some(server)
+    }
+
+    /// Asks the buffer's language server for the source folders of the modules it loaded, if it
+    /// can tell.
+    #[allow(clippy::type_complexity)]
+    fn source_folders_request(
+        &self,
+        buffer: &Entity<Buffer>,
+        cx: &mut App,
+    ) -> Option<(
+        LanguageServerId,
+        impl Future<Output = util::ConnectionResult<Option<serde_json::Value>>> + use<>,
+    )> {
+        if !self.project.read(cx).is_local() {
+            return None;
+        }
+        let lsp_store = self.project.read(cx).lsp_store();
+        let server_ids = lsp_store.update(cx, |lsp_store, cx| {
+            buffer.update(cx, |buffer, cx| {
+                lsp_store.language_servers_for_local_buffer(buffer, cx)
+            })
+        });
+        let timeout = ProjectSettings::get_global(cx)
+            .global_lsp_settings
+            .get_request_timeout();
+        server_ids.into_iter().find_map(|server_id| {
+            let server = self.server_offering(server_id, LIST_SOURCE_FOLDERS, cx)?;
+            let request = server.request::<lsp::request::ExecuteCommand>(
+                lsp::ExecuteCommandParams {
+                    command: LIST_SOURCE_FOLDERS.to_string(),
+                    arguments: Vec::new(),
+                    work_done_progress_params: lsp::WorkDoneProgressParams::default(),
+                },
+                timeout,
+            );
+            Some((server_id, request))
+        })
+    }
+
+    /// Has the server the note is about load the project's build again, if it can, then asks
+    /// again: a module that's now loaded clears no error, so nothing else would.
+    fn import_build_again(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.import_task.is_some() {
             self.import_again = true;
             return;
         }
-        let Some(error) = &self.build_error else {
+        let Some(server_id) = self.import_server else {
             return;
         };
-        let lsp_store = self.project.read(cx).lsp_store();
-        let Some(server) = lsp_store.read(cx).language_server_for_id(error.server_id) else {
+        let Some(server) = self.server_offering(server_id, IMPORT_PROJECT, cx) else {
             return;
         };
-        let can_import = server
-            .capabilities()
-            .execute_command_provider
-            .as_ref()
-            .is_some_and(|provider| provider.commands.iter().any(|command| command == IMPORT_PROJECT));
-        if !can_import {
-            return;
-        }
         let timeout = ProjectSettings::get_global(cx)
             .global_lsp_settings
             .get_request_timeout();
@@ -1122,15 +1313,19 @@ impl CallHierarchyPanel {
             },
             timeout,
         );
-        self.import_task = Some(cx.spawn(async move |this, cx| {
+        log::info!("call hierarchy: asked {} to load the build again", server.name());
+        self.import_task = Some(cx.spawn_in(window, async move |this, cx| {
             if let Err(error) = request.await.into_response() {
                 log::error!("failed to load the project's build again: {error:#}");
             }
-            this.update(cx, |this, cx| {
+            this.update_in(cx, |this, window, cx| {
                 this.import_task = None;
                 if std::mem::take(&mut this.import_again) {
-                    this.import_build_again(cx);
+                    this.import_build_again(window, cx);
+                } else {
+                    this.ask_again(server_id, window, cx);
                 }
+                cx.notify();
             })
             .ok();
         }));
@@ -1169,6 +1364,7 @@ impl CallHierarchyPanel {
 
     fn start_loading_root(&mut self, cx: &mut Context<Self>) {
         self.empty_trace = None;
+        self.module_check = None;
         self.not_found = None;
         self.child_tasks.clear();
         self.selected = None;
@@ -2299,46 +2495,50 @@ impl CallHierarchyPanel {
                                         .color(Color::Muted),
                                 ),
                             )
-                            .children(self.build_error.as_ref().map(|error| {
-                                let file_name = error
-                                    .path
-                                    .path
-                                    .file_name()
-                                    .unwrap_or_default()
-                                    .to_string();
-                                h_flex()
-                                    .mt_2()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .debug_selector(|| "call-trail-open-build-file".into())
-                                            .child(
-                                                Button::new(
-                                                    "call-trail-open-build-file",
-                                                    format!("Open {file_name}"),
+                            .when(self.import_server.is_some(), |this| {
+                                let file_name = self.build_error.as_ref().map(|error| {
+                                    error.path.path.file_name().unwrap_or_default().to_string()
+                                });
+                                this.child(
+                                    h_flex()
+                                        .mt_2()
+                                        .gap_2()
+                                        .children(file_name.map(|file_name| {
+                                            div()
+                                                .debug_selector(|| {
+                                                    "call-trail-open-build-file".into()
+                                                })
+                                                .child(
+                                                    Button::new(
+                                                        "call-trail-open-build-file",
+                                                        format!("Open {file_name}"),
+                                                    )
+                                                    .style(ButtonStyle::Outlined)
+                                                    .label_size(LabelSize::Small)
+                                                    .on_click(cx.listener(|this, _, window, cx| {
+                                                        this.open_build_file(window, cx)
+                                                    })),
                                                 )
-                                                .style(ButtonStyle::Outlined)
-                                                .label_size(LabelSize::Small)
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.open_build_file(window, cx)
-                                                })),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .debug_selector(|| "call-trail-reload-build".into())
-                                            .child(
-                                                Button::new("call-trail-reload-build", "Try Again")
+                                        }))
+                                        .child(
+                                            div()
+                                                .debug_selector(|| "call-trail-reload-build".into())
+                                                .child(
+                                                    Button::new(
+                                                        "call-trail-reload-build",
+                                                        "Try Again",
+                                                    )
                                                     .style(ButtonStyle::Outlined)
                                                     .label_size(LabelSize::Small)
                                                     .disabled(self.import_task.is_some())
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.import_build_again(cx);
+                                                    .on_click(cx.listener(|this, _, window, cx| {
+                                                        this.import_build_again(window, cx);
                                                         cx.notify();
                                                     })),
-                                            ),
-                                    )
-                            }))
+                                                ),
+                                        ),
+                                )
+                            })
                     }))
                     .child(trail_picture(cx))
                     .child(
@@ -3132,7 +3332,10 @@ mod tests {
                 .then_some(lsp::CallHierarchyServerCapability::Simple(true)),
             workspace_symbol_provider: Some(lsp::OneOf::Left(true)),
             execute_command_provider: Some(lsp::ExecuteCommandOptions {
-                commands: vec!["java.project.import".to_string()],
+                commands: vec![
+                    "java.project.import".to_string(),
+                    "java.project.listSourcePaths".to_string(),
+                ],
                 ..lsp::ExecuteCommandOptions::default()
             }),
             ..lsp::ServerCapabilities::default()
@@ -3510,8 +3713,8 @@ mod tests {
 
         /// What the Java server reports when it can't load a Maven build; `None` clears it.
         fn report_build_error(&mut self, message: Option<&str>) {
-            self.server
-                .notify::<lsp::notification::PublishDiagnostics>(lsp::PublishDiagnosticsParams {
+            self.server.notify::<lsp::notification::PublishDiagnostics>(
+                lsp::PublishDiagnosticsParams {
                     uri: lsp::Uri::from_file_path(path!("/test/pom.xml")).unwrap(),
                     diagnostics: message
                         .map(|message| lsp::Diagnostic {
@@ -3523,21 +3726,44 @@ mod tests {
                         .into_iter()
                         .collect(),
                     version: None,
-                });
+                },
+            );
             self.cx.run_until_parked();
         }
 
         /// Counts the server's `java.project.import` commands.
         fn count_imports(&mut self) -> Arc<Mutex<usize>> {
+            self.answer_commands(None)
+        }
+
+        /// Answers jdtls's project commands: `source_folders` are the loaded source folders, as
+        /// (path, module); `None` leaves the question unanswered. Counts `java.project.import`.
+        fn answer_commands(
+            &mut self,
+            source_folders: Option<&'static [(&'static str, &'static str)]>,
+        ) -> Arc<Mutex<usize>> {
             let imports = Arc::new(Mutex::new(0));
             self.server
                 .set_request_handler::<lsp::request::ExecuteCommand, _, _>({
                     let imports = imports.clone();
                     move |params, _| {
-                        if params.command == "java.project.import" {
-                            *imports.lock().unwrap() += 1;
-                        }
-                        async move { Ok(None) }
+                        let result = match params.command.as_str() {
+                            "java.project.import" => {
+                                *imports.lock().unwrap() += 1;
+                                None
+                            }
+                            "java.project.listSourcePaths" => source_folders.map(|folders| {
+                                json!({
+                                    "data": folders.iter().map(|(path, module)| json!({
+                                        "path": path,
+                                        "projectName": module,
+                                    })).collect::<Vec<_>>(),
+                                    "status": true,
+                                })
+                            }),
+                            _ => None,
+                        };
+                        async move { Ok(result) }
                     }
                 });
             imports
@@ -3546,11 +3772,13 @@ mod tests {
         fn answer_prepare_with(&mut self, name: Option<&'static str>) {
             let uri = lsp::Uri::from_file_path(path!("/test/src/main.rs")).unwrap();
             self.server
-                .set_request_handler::<lsp::request::CallHierarchyPrepare, _, _>(move |params, _| {
-                    let uri = uri.clone();
-                    let line = params.text_document_position_params.position.line;
-                    async move { Ok(name.map(|name| vec![item(name, &uri, line)])) }
-                });
+                .set_request_handler::<lsp::request::CallHierarchyPrepare, _, _>(
+                    move |params, _| {
+                        let uri = uri.clone();
+                        let line = params.text_document_position_params.position.line;
+                        async move { Ok(name.map(|name| vec![item(name, &uri, line)])) }
+                    },
+                );
         }
 
         fn active_file_and_row(&mut self) -> Option<(String, u32)> {
@@ -3558,7 +3786,11 @@ mod tests {
                 let path = workspace.active_item(cx)?.project_path(cx)?;
                 let editor = workspace.active_item_as::<Editor>(cx)?;
                 let row = editor
-                    .update(cx, |editor, cx| editor.selections.newest::<language::Point>(&editor.display_snapshot(cx)))
+                    .update(cx, |editor, cx| {
+                        editor
+                            .selections
+                            .newest::<language::Point>(&editor.display_snapshot(cx))
+                    })
                     .head()
                     .row;
                 Some((path.path.as_unix_str().to_string(), row))
@@ -4369,7 +4601,9 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         real_jdtls_build_case(
-            &[("pom.xml", r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+            &[(
+                "pom.xml",
+                r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
   <modelVersion>4.0.0</modelVersion>
   <parent>
     <groupId>com.example.internal</groupId>
@@ -4378,16 +4612,20 @@ mod tests {
   </parent>
   <artifactId>app</artifactId>
 </project>
-"#)],
+"#,
+            )],
             "Non-resolvable parent POM",
-            &[("pom.xml", r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+            &[(
+                "pom.xml",
+                r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
   <modelVersion>4.0.0</modelVersion>
   <groupId>com.example</groupId>
   <artifactId>app</artifactId>
   <version>1.0</version>
   <properties><maven.compiler.release>17</maven.compiler.release></properties>
 </project>
-"#)],
+"#,
+            )],
             cx,
         )
         .await;
@@ -4413,8 +4651,54 @@ mod tests {
         .await;
     }
 
+    #[gpui::test]
+    #[ignore = "starts the real Java language server"]
+    async fn real_jdtls_explains_a_module_the_build_left_out_and_traces_once_its_added(
+        cx: &mut TestAppContext,
+    ) {
+        // The file's module has a folder but isn't in settings.gradle: jdtls loads the other
+        // module, answers "nothing" for this file and reports no error.
+        real_jdtls_case(
+            "api/src/main/java/app/App.java",
+            &[
+                ("settings.gradle", "rootProject.name = 'app'\ninclude 'core'\n"),
+                ("build.gradle", "subprojects { apply plugin: 'java' }\n"),
+                ("core/build.gradle", ""),
+                ("core/src/main/java/core/Core.java", "package core;\n\npublic class Core {\n}\n"),
+                ("api/build.gradle", ""),
+            ],
+            "Java hasn't loaded this file's module",
+            "core",
+            &[(
+                "settings.gradle",
+                "rootProject.name = 'app'\ninclude 'core', 'api'\n",
+            )],
+            cx,
+        )
+        .await;
+    }
+
     async fn real_jdtls_build_case(
         broken_build: &[(&str, &str)],
+        expected_problem: &str,
+        working_build: &[(&str, &str)],
+        cx: &mut TestAppContext,
+    ) {
+        real_jdtls_case(
+            "src/main/java/app/App.java",
+            broken_build,
+            "Java couldn't load this project's build",
+            expected_problem,
+            working_build,
+            cx,
+        )
+        .await;
+    }
+
+    async fn real_jdtls_case(
+        source: &str,
+        broken_build: &[(&str, &str)],
+        expected_title: &str,
         expected_problem: &str,
         working_build: &[(&str, &str)],
         cx: &mut TestAppContext,
@@ -4462,19 +4746,14 @@ mod tests {
             call_hierarchy::init(cx);
             init(cx);
         });
-        let tree = util::test::TempTree::new(json!({
-            "src": {"main": {"java": {"app": {"App.java": APP}}}},
-        }));
-        for (name, text) in broken_build {
-            std::fs::write(tree.path().join(name), text).unwrap();
+        let tree = util::test::TempTree::new(json!({}));
+        for (name, text) in [(source, APP)].iter().chain(broken_build) {
+            let path = tree.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
         }
         let workspace_data = util::test::TempTree::new(json!({}));
-        let project = Project::test(
-            fs::RealFs::new(None, cx.executor()),
-            [tree.path()],
-            cx,
-        )
-        .await;
+        let project = Project::test(fs::RealFs::new(None, cx.executor()), [tree.path()], cx).await;
         project.read_with(cx, |project, _| {
             project.languages().add(Arc::new(Language::new(
                 LanguageConfig {
@@ -4503,7 +4782,10 @@ mod tests {
             "-Dosgi.bundles.defaultStartLevel=4".to_string(),
             "-Declipse.product=org.eclipse.jdt.ls.core.product".to_string(),
             "-Dosgi.checkConfiguration=true".to_string(),
-            format!("-Dosgi.sharedConfiguration.area={}", configuration.display()),
+            format!(
+                "-Dosgi.sharedConfiguration.area={}",
+                configuration.display()
+            ),
             "-Dosgi.sharedConfiguration.area.readOnly=true".to_string(),
             "-Dosgi.configuration.cascaded=true".to_string(),
             "-Xms1G".to_string(),
@@ -4550,7 +4832,7 @@ mod tests {
         let editor = workspace
             .update_in(cx, |workspace, window, cx| {
                 workspace.open_path(
-                    (worktree_id, rel_path("src/main/java/app/App.java")),
+                    (worktree_id, rel_path(source)),
                     None,
                     true,
                     window,
@@ -4573,7 +4855,10 @@ mod tests {
         };
         let root = |cx: &mut VisualTestContext| {
             panel.read_with(cx, |panel, _| {
-                panel.nodes().first().map(|root| root.call.item.name.clone())
+                panel
+                    .nodes()
+                    .first()
+                    .map(|root| root.call.item.name.clone())
             })
         };
         let wait_for = |cx: &mut VisualTestContext,
@@ -4613,8 +4898,8 @@ mod tests {
 
         // Until the server has run, the panel waits for it; then it says why it found nothing.
         trace_helper(cx);
-        wait_for(cx, "the build error", &|cx| {
-            not_found_title(cx).as_deref() == Some("Java couldn't load this project's build")
+        wait_for(cx, expected_title, &|cx| {
+            not_found_title(cx).as_deref() == Some(expected_title)
         });
         let body = panel.read_with(cx, |panel, _| panel.not_found.clone().unwrap().1);
         assert!(body.contains(expected_problem), "{body}");
@@ -4623,6 +4908,18 @@ mod tests {
         for (name, text) in working_build {
             std::fs::write(tree.path().join(name), text).unwrap();
         }
+        // macOS file events don't reach this test process, so tell the worktree what its watcher
+        // would. Everything after that (Photon, then jdtls) runs for real.
+        project.update(cx, |project, cx| {
+            let worktree = project.worktrees(cx).next().unwrap();
+            // The scan reports the change as an event; nothing here needs to wait for it.
+            drop(worktree.read(cx).as_local().unwrap().refresh_entries_for_paths(
+                working_build
+                    .iter()
+                    .map(|(name, _)| Arc::from(rel_path(name)))
+                    .collect(),
+            ));
+        });
         wait_for(cx, "the trace once the build loads", &|cx| {
             root(cx).is_some_and(|name| name.starts_with("helper"))
         });
@@ -4676,7 +4973,10 @@ mod tests {
         );
 
         setup.click("call-trail-open-build-file");
-        assert_eq!(setup.active_file_and_row(), Some(("pom.xml".to_string(), 1)));
+        assert_eq!(
+            setup.active_file_and_row(),
+            Some(("pom.xml".to_string(), 1))
+        );
     }
 
     #[gpui::test]
@@ -4693,6 +4993,70 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn explains_a_file_outside_the_modules_the_server_loaded(cx: &mut TestAppContext) {
+        // jdtls loaded the build, but not the module this file is in: it answers "nothing" and
+        // reports no error.
+        let mut setup = setup(true, cx).await;
+        setup.answer_prepare_with(None);
+        let imports = setup.answer_commands(Some(&[
+            (path!("/test/core/src/main/java"), "core"),
+            (path!("/test/web/src/main/java"), "web"),
+        ]));
+        setup.show_in_panel(1);
+        assert_eq!(
+            setup.not_found(),
+            Some((
+                "Rust hasn't loaded this file's module".to_string(),
+                "It's outside the modules Rust loaded from the build: core, web. Check that its \
+                 module is part of the build, then Try Again."
+                    .to_string()
+            ))
+        );
+        assert!(
+            setup
+                .cx
+                .debug_bounds("call-trail-open-build-file")
+                .is_none()
+        );
+
+        setup.click("call-trail-reload-build");
+        assert_eq!(*imports.lock().unwrap(), 1);
+
+        // Adding the module to the build loads it again by itself.
+        setup
+            .write_file("settings.gradle", "include 'core', 'web', 'src'\n")
+            .await;
+        assert_eq!(*imports.lock().unwrap(), 2);
+    }
+
+    #[gpui::test]
+    async fn traces_once_the_server_has_loaded_the_build_again(cx: &mut TestAppContext) {
+        // Loading a left-out module clears no error, so only the import's answer says it's done.
+        let mut setup = setup(true, cx).await;
+        setup.answer_prepare_with(None);
+        setup.answer_commands(Some(&[(path!("/test/core/src/main/java"), "core")]));
+        setup.show_in_panel(1);
+        assert!(setup.cx.debug_bounds("call-trail-reload-build").is_some());
+
+        setup.answer_prepare_with(Some("helper"));
+        setup.click("call-trail-reload-build");
+        assert_eq!(setup.root().as_deref(), Some("helper"));
+    }
+
+    #[gpui::test]
+    async fn a_file_in_a_loaded_module_gets_the_usual_note(cx: &mut TestAppContext) {
+        let mut setup = setup(true, cx).await;
+        setup.answer_prepare_with(None);
+        setup.answer_commands(Some(&[(path!("/test/src"), "test")]));
+        setup.show_in_panel(1);
+        assert_eq!(
+            setup.not_found().map(|(title, _)| title),
+            Some("No function at the cursor".to_string())
+        );
+        assert!(setup.cx.debug_bounds("call-trail-reload-build").is_none());
+    }
+
+    #[gpui::test]
     async fn a_changed_build_file_is_imported_again(cx: &mut TestAppContext) {
         // jdtls doesn't reload a Gradle build whose first import failed, even once it's fixed.
         let mut setup = setup(true, cx).await;
@@ -4706,7 +5070,11 @@ mod tests {
         assert_eq!(*imports.lock().unwrap(), 1);
 
         setup.write_file("src/App.java", "class App { }\n").await;
-        assert_eq!(*imports.lock().unwrap(), 1, "only a build file's change imports again");
+        assert_eq!(
+            *imports.lock().unwrap(),
+            1,
+            "only a build file's change imports again"
+        );
     }
 
     #[gpui::test]
@@ -4752,7 +5120,11 @@ mod tests {
         setup.server.start_progress("loading").await;
         setup.server.end_progress("loading");
         setup.cx.run_until_parked();
-        assert_eq!(setup.root(), None, "the panel doesn't trace a file that's no longer active");
+        assert_eq!(
+            setup.root(),
+            None,
+            "the panel doesn't trace a file that's no longer active"
+        );
     }
 
     #[gpui::test]
@@ -4810,7 +5182,9 @@ mod tests {
             diagnostics: vec![lsp::Diagnostic {
                 range: site(1, 2),
                 severity: Some(lsp::DiagnosticSeverity::ERROR),
-                message: lsp::DiagnosticMessage::String("Element type \"parent\" must be closed".into()),
+                message: lsp::DiagnosticMessage::String(
+                    "Element type \"parent\" must be closed".into(),
+                ),
                 ..lsp::Diagnostic::default()
             }],
             version: None,
@@ -4823,7 +5197,12 @@ mod tests {
             setup.not_found().map(|(title, _)| title),
             Some("No function at the cursor".to_string())
         );
-        assert!(setup.cx.debug_bounds("call-trail-open-build-file").is_none());
+        assert!(
+            setup
+                .cx
+                .debug_bounds("call-trail-open-build-file")
+                .is_none()
+        );
     }
 
     #[gpui::test]
