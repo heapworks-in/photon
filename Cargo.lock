@@ -13771,6 +13771,7 @@ dependencies = [
  "collections",
  "editor",
  "extension_suggest",
+ "fs",
  "futures 0.3.34",
  "gpui",
  "language",
@@ -13781,12 +13782,14 @@ dependencies = [
  "project",
  "proto",
  "serde_json",
+ "settings",
  "smallvec",
  "theme",
  "tree-sitter-rust",
  "ui",
  "util",
  "workspace",
+ "zlog",
 ]
 
 [[package]]

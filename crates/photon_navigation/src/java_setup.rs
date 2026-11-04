@@ -728,38 +728,58 @@ fn iml_source_folders(iml: &str) -> Vec<String> {
         .collect()
 }
 
-/// `options` with `java.project.sourcePaths` set to `paths` under `settings` (the Java server's
+/// `options` with the Java server settings Photon relies on, under `settings` (the server's
 /// initialization options nest its settings there) or at the top (its workspace configuration).
 /// A value the user or the extension already set is kept.
-pub fn with_java_source_paths(
+///
+/// - `java.project.sourcePaths`: an IntelliJ project's source folders, when it has any.
+/// - `java.configuration.updateBuildConfiguration`: `automatic`, so a changed `pom.xml` or
+///   `build.gradle` reloads the project. Otherwise jdtls asks first, with a prompt Photon doesn't
+///   show, and never reloads.
+pub fn with_java_settings(
     options: Option<serde_json::Value>,
-    paths: &[String],
+    source_paths: &[String],
     under_settings: bool,
 ) -> Option<serde_json::Value> {
-    if paths.is_empty() {
-        return options;
-    }
     let mut options = options.unwrap_or_else(|| serde_json::json!({}));
-    let mut target = &mut options;
-    let keys: &[&str] = if under_settings {
-        &["settings", "java", "project"]
+    let java = if under_settings {
+        &["settings", "java"][..]
     } else {
-        &["java", "project"]
+        &["java"][..]
     };
-    for key in keys {
+    if !source_paths.is_empty() {
+        set_default(
+            &mut options,
+            &[java, &["project", "sourcePaths"]].concat(),
+            serde_json::json!(source_paths),
+        );
+    }
+    set_default(
+        &mut options,
+        &[java, &["configuration", "updateBuildConfiguration"]].concat(),
+        serde_json::json!("automatic"),
+    );
+    Some(options)
+}
+
+/// Sets `value` at `keys` in `options` unless something is already there, or a key on the way
+/// isn't an object.
+fn set_default(options: &mut serde_json::Value, keys: &[&str], value: serde_json::Value) {
+    let Some((last, parents)) = keys.split_last() else {
+        return;
+    };
+    let mut target = options;
+    for key in parents {
         let Some(object) = target.as_object_mut() else {
-            return Some(options);
+            return;
         };
         target = object
             .entry(key.to_string())
             .or_insert_with(|| serde_json::json!({}));
     }
-    if let Some(project) = target.as_object_mut() {
-        project
-            .entry("sourcePaths")
-            .or_insert_with(|| serde_json::json!(paths));
+    if let Some(object) = target.as_object_mut() {
+        object.entry(last.to_string()).or_insert(value);
     }
-    Some(options)
 }
 
 #[cfg(test)]
@@ -924,29 +944,43 @@ mod tests {
     }
 
     #[test]
-    fn source_paths_join_the_java_settings_without_overriding_them() {
+    fn java_settings_join_the_users_without_overriding_them() {
         let paths = ["src".to_string()];
+        let automatic = serde_json::json!({ "updateBuildConfiguration": "automatic" });
         assert_eq!(
-            with_java_source_paths(None, &paths, true),
-            Some(
-                serde_json::json!({ "settings": { "java": { "project": { "sourcePaths": ["src"] } } } })
-            )
+            with_java_settings(None, &paths, true),
+            Some(serde_json::json!({ "settings": { "java": {
+                "project": { "sourcePaths": ["src"] },
+                "configuration": automatic,
+            } } }))
         );
         assert_eq!(
-            with_java_source_paths(
+            with_java_settings(
                 Some(serde_json::json!({ "java": { "format": { "enabled": true } } })),
                 &paths,
                 false
             ),
-            Some(serde_json::json!({
-                "java": { "format": { "enabled": true }, "project": { "sourcePaths": ["src"] } }
-            }))
+            Some(serde_json::json!({ "java": {
+                "format": { "enabled": true },
+                "project": { "sourcePaths": ["src"] },
+                "configuration": automatic,
+            } }))
         );
-        let chosen = serde_json::json!({ "java": { "project": { "sourcePaths": ["app"] } } });
+        let chosen = serde_json::json!({ "java": {
+            "project": { "sourcePaths": ["app"] },
+            "configuration": { "updateBuildConfiguration": "interactive" },
+        } });
+        assert_eq!(with_java_settings(Some(chosen.clone()), &paths, false), Some(chosen));
+    }
+
+    #[test]
+    fn a_changed_build_file_reloads_the_project_even_without_source_folders() {
+        // jdtls otherwise asks whether to reload, with a prompt Photon doesn't show.
         assert_eq!(
-            with_java_source_paths(Some(chosen.clone()), &paths, false),
-            Some(chosen)
+            with_java_settings(None, &[], false),
+            Some(serde_json::json!({ "java": {
+                "configuration": { "updateBuildConfiguration": "automatic" },
+            } }))
         );
-        assert_eq!(with_java_source_paths(None, &[], false), None);
     }
 }

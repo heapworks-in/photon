@@ -305,7 +305,7 @@ pub fn register_language_server_options() {
                 return options;
             }
             let paths = photon_navigation::intellij_source_paths(worktree_root);
-            photon_navigation::with_java_source_paths(options, &paths, initialization)
+            photon_navigation::with_java_settings(options, &paths, initialization)
         },
     );
 }

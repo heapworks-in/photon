@@ -15,7 +15,9 @@ use language::{
 use project::{
     CallHierarchyItem, Project, ProjectPath, Symbol,
     lsp_store::{LspStoreEvent, SymbolLocation},
+    project_settings::ProjectSettings,
 };
+use settings::Settings as _;
 use smallvec::SmallVec;
 use std::{ops::Range, rc::Rc};
 use ui::{
@@ -128,22 +130,52 @@ const BUILD_FILES: &[&str] = &[
     "settings.gradle.kts",
 ];
 
+/// A trace that found nothing. Language servers answer "nothing here" while they're still loading
+/// a project, so the panel asks again whenever the server finishes some work or reports diagnostics.
+struct EmptyTrace {
+    buffer: WeakEntity<Buffer>,
+    position: language::Anchor,
+    asking: bool,
+    /// The server reported more while the panel was asking: ask once more when the answer comes.
+    ask_after: bool,
+}
+
+/// jdtls's command to load the project's build again. It doesn't reload a Gradle build whose first
+/// import failed, even once the build file is fixed, nor notice a fix outside the files (a VPN).
+const IMPORT_PROJECT: &str = "java.project.import";
+
 #[derive(Clone, Debug, PartialEq)]
 struct BuildError {
+    server_id: LanguageServerId,
     path: ProjectPath,
     row: u32,
     message: SharedString,
 }
 
 fn build_error_note(language: &str, error: &BuildError) -> (SharedString, SharedString) {
-    let message = error
-        .message
-        .strip_prefix("Project build error: ")
-        .unwrap_or(&error.message);
     (
         format!("{language} couldn't load this project's build").into(),
-        message.to_string().into(),
+        build_error_summary(&error.message).to_string().into(),
     )
+}
+
+/// The line of a build error that names the problem: jdtls wraps Gradle's errors in lines that
+/// only say a build failed.
+fn build_error_summary(message: &str) -> &str {
+    fn is_wrapper(line: &str) -> bool {
+        line == "The supplied phased action failed with an exception."
+            || line.starts_with("A problem occurred configuring ")
+            || line.starts_with("A problem occurred evaluating ")
+            || (line.starts_with("Build file '") && line.contains("' line: "))
+    }
+    let lines = message.lines().map(str::trim).filter(|line| !line.is_empty());
+    let line = lines
+        .clone()
+        .find(|line| !is_wrapper(line))
+        .or_else(|| lines.clone().next())
+        .unwrap_or(message);
+    let line = line.strip_prefix("Project build error: ").unwrap_or(line);
+    line.strip_suffix(':').unwrap_or(line)
 }
 
 /// The first error a language server reports on one of these build files.
@@ -174,7 +206,12 @@ async fn first_build_error(
                 .next()
         });
         if let Some((row, message)) = error {
-            return Some(BuildError { path, row, message });
+            return Some(BuildError {
+                server_id,
+                path,
+                row,
+                message,
+            });
         }
     }
     None
@@ -250,8 +287,12 @@ pub struct CallHierarchyPanel {
     active_buffer: Option<WeakEntity<Buffer>>,
     /// Why the last trace found nothing, shown above the start screen until the next trace.
     not_found: Option<(SharedString, SharedString)>,
-    /// The build error behind `not_found`, if that's why, and the function to trace once it's gone.
-    build_error: Option<(BuildError, WeakEntity<Buffer>, language::Anchor)>,
+    /// The build error behind `not_found`, if that's why.
+    build_error: Option<BuildError>,
+    /// The server loading the build again, and whether to ask once more when it's done.
+    import_task: Option<Task<()>>,
+    import_again: bool,
+    empty_trace: Option<EmptyTrace>,
     server_problem: Option<ServerProblem>,
     /// Servers that are downloading, starting or failed, project-wide.
     server_statuses: HashMap<LanguageServerName, ServerStatus>,
@@ -468,8 +509,20 @@ impl CallHierarchyPanel {
         let mut subscriptions = vec![
             cx.subscribe_in(&lsp_store, window, Self::on_lsp_store_event),
             cx.subscribe_in(&project, window, |this, _, event, window, cx| {
-                if let project::Event::DiagnosticsUpdated { .. } = event {
-                    this.retry_once_the_build_loads(window, cx);
+                if let project::Event::DiagnosticsUpdated {
+                    language_server_id, ..
+                } = event
+                {
+                    this.ask_again(*language_server_id, window, cx);
+                }
+                if let project::Event::WorktreeUpdatedEntries(_, changes) = event
+                    && this.build_error.is_some()
+                    && changes.iter().any(|(path, _, _)| {
+                        path.file_name()
+                            .is_some_and(|name| BUILD_FILES.contains(&name))
+                    })
+                {
+                    this.import_build_again(cx);
                 }
                 if matches!(
                     event,
@@ -494,6 +547,7 @@ impl CallHierarchyPanel {
                         if buffer != this.active_buffer {
                             this.active_buffer = buffer;
                             this.pending_trace = None;
+                            this.empty_trace = None;
                             this.refresh_server_problem(window, cx);
                         }
                     }
@@ -512,6 +566,9 @@ impl CallHierarchyPanel {
             content: Content::Empty,
             not_found: None,
             build_error: None,
+            import_task: None,
+            import_again: false,
+            empty_trace: None,
             root_header: RootHeader::default(),
             selected: None,
             rows: Vec::new(),
@@ -592,6 +649,16 @@ impl CallHierarchyPanel {
             }
             LspStoreEvent::LanguageServerRemoved(_) | LspStoreEvent::LanguageDetected { .. } => {
                 self.refresh_server_problem(window, cx)
+            }
+            LspStoreEvent::LanguageServerUpdate {
+                language_server_id,
+                message: proto::update_language_server::Variant::WorkEnd(_),
+                ..
+            } => {
+                if matches!(self.content, Content::LoadingRoot) {
+                    cx.notify();
+                }
+                self.ask_again(*language_server_id, window, cx);
             }
             // Progress while a trace waits, so the loading line stays current.
             LspStoreEvent::LanguageServerUpdate { .. }
@@ -748,13 +815,61 @@ impl CallHierarchyPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.empty_trace = None;
+        self.trace_with(buffer, position, false, window, cx);
+    }
+
+    /// Asks again about a trace that found nothing, if `server_id` serves its file. Quietly: the
+    /// panel keeps saying why until the answer changes.
+    fn ask_again(&mut self, server_id: LanguageServerId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(empty) = &self.empty_trace else {
+            return;
+        };
+        let Some(buffer) = empty.buffer.upgrade() else {
+            self.empty_trace = None;
+            return;
+        };
+        let position = empty.position;
+        let lsp_store = self.project.read(cx).lsp_store();
+        let serves_the_file = lsp_store.update(cx, |lsp_store, cx| {
+            buffer.update(cx, |buffer, cx| {
+                lsp_store
+                    .language_servers_for_local_buffer(buffer, cx)
+                    .contains(&server_id)
+            })
+        });
+        let Some(empty) = self.empty_trace.as_mut() else {
+            return;
+        };
+        if !serves_the_file {
+            return;
+        }
+        if empty.asking {
+            empty.ask_after = true;
+            return;
+        }
+        empty.asking = true;
+        self.trace_with(buffer, position, true, window, cx);
+    }
+
+    fn trace_with(
+        &mut self,
+        buffer: Entity<Buffer>,
+        position: language::Anchor,
+        quietly: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.server_problem_for(&buffer, cx).is_some() {
+            self.empty_trace = None;
             self.show_empty(cx);
             self.pending_trace = Some((buffer.downgrade(), position));
             return;
         }
         self.pending_trace = None;
-        self.build_error = None;
+        if !quietly {
+            self.build_error = None;
+        }
         let build_files = self.build_files_with_errors(&buffer, cx);
         let traced = (buffer.downgrade(), position);
         let place = buffer.read_with(cx, |buffer, _| {
@@ -768,9 +883,11 @@ impl CallHierarchyPanel {
         let prepare = self.project.update(cx, |project, cx| {
             project.prepare_call_hierarchy(&buffer, position, cx)
         });
-        self.start_loading_root(cx);
+        if !quietly {
+            self.start_loading_root(cx);
+            self.loading_language = buffer.read(cx).language().map(|language| language.name());
+        }
         let project = self.project.clone();
-        self.loading_language = buffer.read(cx).language().map(|language| language.name());
         let (language, errors) = buffer.read_with(cx, |buffer, _| {
             let snapshot = buffer.snapshot();
             let errors = snapshot
@@ -791,19 +908,8 @@ impl CallHierarchyPanel {
                     None => {
                         build_error = first_build_error(&project, build_files, cx).await;
                         Ok(match &build_error {
-                            Some(error) => {
-                                log::info!(
-                                    "call hierarchy: {language} found nothing at {place}; \
-                                     build error in {}: {}",
-                                    error.path.path.as_unix_str(),
-                                    error.message
-                                );
-                                build_error_note(&language, error)
-                            }
-                            None => {
-                                log::info!("call hierarchy: {language} found nothing at {place}");
-                                not_found_note(&language, errors)
-                            }
+                            Some(error) => build_error_note(&language, error),
+                            None => not_found_note(&language, errors),
                         })
                     }
                 },
@@ -818,19 +924,53 @@ impl CallHierarchyPanel {
             let item = match note {
                 Err(item) => item,
                 Ok(note) => {
-                    this.update(cx, |this, cx| {
+                    this.update_in(cx, |this, window, cx| {
+                        let ask_after = this
+                            .empty_trace
+                            .as_ref()
+                            .is_some_and(|empty| empty.ask_after);
+                        // Once per change: the panel asks again whenever the server reports.
+                        if this.not_found.as_ref() != Some(&note) || this.build_error != build_error {
+                            match &build_error {
+                                Some(error) => log::info!(
+                                    "call hierarchy: {language} found nothing at {place}; \
+                                     build error in {}: {}",
+                                    error.path.path.as_unix_str(),
+                                    error.message
+                                ),
+                                None => log::info!(
+                                    "call hierarchy: {language} found nothing at {place}"
+                                ),
+                            }
+                        }
                         this.show_empty(cx);
                         this.not_found = Some(note);
-                        this.build_error =
-                            build_error.map(|error| (error, traced.0.clone(), traced.1));
+                        this.build_error = build_error;
+                        this.empty_trace = Some(EmptyTrace {
+                            buffer: traced.0.clone(),
+                            position: traced.1,
+                            asking: false,
+                            ask_after: false,
+                        });
+                        if ask_after && let Some(buffer) = traced.0.upgrade() {
+                            if let Some(empty) = this.empty_trace.as_mut() {
+                                empty.asking = true;
+                            }
+                            this.trace_with(buffer, traced.1, true, window, cx);
+                        }
                     })
                     .ok();
                     return;
                 }
             };
             let root = call_hierarchy::call_for_item(item, &project, cx).await;
-            this.update_in(cx, |this, window, cx| this.show_root(root, window, cx))
-                .ok();
+            this.update_in(cx, |this, window, cx| {
+                this.empty_trace = None;
+                this.not_found = None;
+                this.build_error = None;
+                this.show_root(root, window, cx)
+            })
+            .ok();
         }));
     }
 
@@ -950,23 +1090,54 @@ impl CallHierarchyPanel {
             .collect()
     }
 
-    fn retry_once_the_build_loads(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((_, buffer, position)) = &self.build_error else {
+    /// Has the server behind the build error load the project's build again, if it can.
+    fn import_build_again(&mut self, cx: &mut Context<Self>) {
+        if self.import_task.is_some() {
+            self.import_again = true;
             return;
-        };
-        let Some(buffer) = buffer.upgrade() else {
-            self.build_error = None;
-            return;
-        };
-        let position = *position;
-        if self.build_files_with_errors(&buffer, cx).is_empty() {
-            self.build_error = None;
-            self.trace(buffer, position, window, cx);
         }
+        let Some(error) = &self.build_error else {
+            return;
+        };
+        let lsp_store = self.project.read(cx).lsp_store();
+        let Some(server) = lsp_store.read(cx).language_server_for_id(error.server_id) else {
+            return;
+        };
+        let can_import = server
+            .capabilities()
+            .execute_command_provider
+            .as_ref()
+            .is_some_and(|provider| provider.commands.iter().any(|command| command == IMPORT_PROJECT));
+        if !can_import {
+            return;
+        }
+        let timeout = ProjectSettings::get_global(cx)
+            .global_lsp_settings
+            .get_request_timeout();
+        let request = server.request::<lsp::request::ExecuteCommand>(
+            lsp::ExecuteCommandParams {
+                command: IMPORT_PROJECT.to_string(),
+                arguments: Vec::new(),
+                work_done_progress_params: lsp::WorkDoneProgressParams::default(),
+            },
+            timeout,
+        );
+        self.import_task = Some(cx.spawn(async move |this, cx| {
+            if let Err(error) = request.await.into_response() {
+                log::error!("failed to load the project's build again: {error:#}");
+            }
+            this.update(cx, |this, cx| {
+                this.import_task = None;
+                if std::mem::take(&mut this.import_again) {
+                    this.import_build_again(cx);
+                }
+            })
+            .ok();
+        }));
     }
 
     fn open_build_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((error, _, _)) = self.build_error.clone() else {
+        let Some(error) = self.build_error.clone() else {
             return;
         };
         let Some(open) = self
@@ -997,6 +1168,7 @@ impl CallHierarchyPanel {
     }
 
     fn start_loading_root(&mut self, cx: &mut Context<Self>) {
+        self.empty_trace = None;
         self.not_found = None;
         self.child_tasks.clear();
         self.selected = None;
@@ -2127,26 +2299,44 @@ impl CallHierarchyPanel {
                                         .color(Color::Muted),
                                 ),
                             )
-                            .children(self.build_error.as_ref().map(|(error, _, _)| {
+                            .children(self.build_error.as_ref().map(|error| {
                                 let file_name = error
                                     .path
                                     .path
                                     .file_name()
                                     .unwrap_or_default()
                                     .to_string();
-                                div()
-                                    .debug_selector(|| "call-trail-open-build-file".into())
+                                h_flex()
                                     .mt_2()
+                                    .gap_2()
                                     .child(
-                                        Button::new(
-                                            "call-trail-open-build-file",
-                                            format!("Open {file_name}"),
-                                        )
-                                        .style(ButtonStyle::Outlined)
-                                        .label_size(LabelSize::Small)
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.open_build_file(window, cx)
-                                        })),
+                                        div()
+                                            .debug_selector(|| "call-trail-open-build-file".into())
+                                            .child(
+                                                Button::new(
+                                                    "call-trail-open-build-file",
+                                                    format!("Open {file_name}"),
+                                                )
+                                                .style(ButtonStyle::Outlined)
+                                                .label_size(LabelSize::Small)
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.open_build_file(window, cx)
+                                                })),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .debug_selector(|| "call-trail-reload-build".into())
+                                            .child(
+                                                Button::new("call-trail-reload-build", "Try Again")
+                                                    .style(ButtonStyle::Outlined)
+                                                    .label_size(LabelSize::Small)
+                                                    .disabled(self.import_task.is_some())
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.import_build_again(cx);
+                                                        cx.notify();
+                                                    })),
+                                            ),
                                     )
                             }))
                     }))
@@ -2941,6 +3131,10 @@ mod tests {
             call_hierarchy_provider: call_hierarchy_support
                 .then_some(lsp::CallHierarchyServerCapability::Simple(true)),
             workspace_symbol_provider: Some(lsp::OneOf::Left(true)),
+            execute_command_provider: Some(lsp::ExecuteCommandOptions {
+                commands: vec!["java.project.import".to_string()],
+                ..lsp::ExecuteCommandOptions::default()
+            }),
             ..lsp::ServerCapabilities::default()
         };
         let initializer = initialized.map(|initialized| {
@@ -3184,6 +3378,19 @@ mod tests {
             self.cx.run_until_parked();
         }
 
+        async fn write_file(&mut self, path: &str, text: &str) {
+            let fs = self.workspace.read_with(self.cx, |workspace, cx| {
+                workspace.project().read(cx).fs().clone()
+            });
+            fs.write(
+                std::path::Path::new(path!("/test")).join(path).as_path(),
+                text.as_bytes(),
+            )
+            .await
+            .unwrap();
+            self.cx.run_until_parked();
+        }
+
         fn open_file(&mut self, path: &'static str) {
             let worktree_id = self.workspace.update(self.cx, |workspace, cx| {
                 workspace.project().update(cx, |project, cx| {
@@ -3318,6 +3525,22 @@ mod tests {
                     version: None,
                 });
             self.cx.run_until_parked();
+        }
+
+        /// Counts the server's `java.project.import` commands.
+        fn count_imports(&mut self) -> Arc<Mutex<usize>> {
+            let imports = Arc::new(Mutex::new(0));
+            self.server
+                .set_request_handler::<lsp::request::ExecuteCommand, _, _>({
+                    let imports = imports.clone();
+                    move |params, _| {
+                        if params.command == "java.project.import" {
+                            *imports.lock().unwrap() += 1;
+                        }
+                        async move { Ok(None) }
+                    }
+                });
+            imports
         }
 
         fn answer_prepare_with(&mut self, name: Option<&'static str>) {
@@ -4135,6 +4358,307 @@ mod tests {
     const BUILD_ERROR: &str = "Project build error: Non-resolvable parent POM for com.example:app:1.0: \
         The following artifacts could not be resolved: com.example:parent:pom:7 (absent)";
 
+    /// End to end with the real Java language server, the way Photon runs it: a build it can't
+    /// load, then the same build fixed on disk. Run with
+    /// `cargo test -p photon_call_trails -- --ignored real_jdtls`; `PHOTON_JDTLS` (a jdtls folder
+    /// with `plugins/`) and `PHOTON_JAVA` (Java 21 or newer) override where they're looked for.
+    /// jdtls runs offline, so nothing is fetched.
+    #[gpui::test]
+    #[ignore = "starts the real Java language server"]
+    async fn real_jdtls_explains_a_maven_build_it_cannot_load_and_traces_once_it_loads(
+        cx: &mut TestAppContext,
+    ) {
+        real_jdtls_build_case(
+            &[("pom.xml", r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.example.internal</groupId>
+    <artifactId>company-parent</artifactId>
+    <version>7.3.1</version>
+  </parent>
+  <artifactId>app</artifactId>
+</project>
+"#)],
+            "Non-resolvable parent POM",
+            &[("pom.xml", r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>app</artifactId>
+  <version>1.0</version>
+  <properties><maven.compiler.release>17</maven.compiler.release></properties>
+</project>
+"#)],
+            cx,
+        )
+        .await;
+    }
+
+    #[gpui::test]
+    #[ignore = "starts the real Java language server"]
+    async fn real_jdtls_explains_a_gradle_build_it_cannot_load_and_traces_once_it_loads(
+        cx: &mut TestAppContext,
+    ) {
+        real_jdtls_build_case(
+            &[
+                ("settings.gradle", "rootProject.name = 'app'\n"),
+                (
+                    "build.gradle",
+                    "plugins {\n    id 'java'\n    id 'com.example.internal.conventions' version '7.3.1'\n}\n",
+                ),
+            ],
+            "com.example.internal.conventions",
+            &[("build.gradle", "plugins {\n    id 'java'\n}\n")],
+            cx,
+        )
+        .await;
+    }
+
+    async fn real_jdtls_build_case(
+        broken_build: &[(&str, &str)],
+        expected_problem: &str,
+        working_build: &[(&str, &str)],
+        cx: &mut TestAppContext,
+    ) {
+        const APP: &str = "package app;\n\npublic class App {\n    public static void main(String[] args) {\n        helper();\n    }\n\n    static void helper() {\n    }\n}\n";
+
+        let home = std::env::var("HOME").unwrap_or_default();
+        let jdtls = std::env::var("PHOTON_JDTLS")
+            .map(std::path::PathBuf::from)
+            .ok()
+            .or_else(|| {
+                [
+                    format!("{home}/Library/Application Support/Photon/extensions/work/java/jdtls"),
+                    format!("{home}/Library/Caches/photon-trace/extensions/work/java/jdtls"),
+                ]
+                .into_iter()
+                .filter_map(|versions| std::fs::read_dir(versions).ok())
+                .flat_map(|versions| versions.filter_map(|version| Some(version.ok()?.path())))
+                .max()
+            })
+            .expect("no jdtls found: install Photon's Java extension or set PHOTON_JDTLS");
+        let launcher = std::fs::read_dir(jdtls.join("plugins"))
+            .expect("jdtls has a plugins folder")
+            .filter_map(|entry| Some(entry.ok()?.path()))
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("org.eclipse.equinox.launcher_"))
+            })
+            .expect("jdtls has the equinox launcher");
+        let configuration = jdtls.join(if cfg!(target_arch = "aarch64") {
+            "config_mac_arm"
+        } else {
+            "config_mac"
+        });
+        let java = std::env::var("PHOTON_JAVA").unwrap_or_else(|_| {
+            "/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home/bin/java".to_string()
+        });
+
+        zlog::init_test();
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            let _state = AppState::test(cx);
+            editor::init(cx);
+            call_hierarchy::init(cx);
+            init(cx);
+        });
+        let tree = util::test::TempTree::new(json!({
+            "src": {"main": {"java": {"app": {"App.java": APP}}}},
+        }));
+        for (name, text) in broken_build {
+            std::fs::write(tree.path().join(name), text).unwrap();
+        }
+        let workspace_data = util::test::TempTree::new(json!({}));
+        let project = Project::test(
+            fs::RealFs::new(None, cx.executor()),
+            [tree.path()],
+            cx,
+        )
+        .await;
+        project.read_with(cx, |project, _| {
+            project.languages().add(Arc::new(Language::new(
+                LanguageConfig {
+                    name: LanguageName::new("Java"),
+                    matcher: Arc::new(LanguageMatcher {
+                        path_suffixes: vec!["java".into()],
+                        ..LanguageMatcher::default()
+                    }),
+                    ..LanguageConfig::default()
+                },
+                None,
+            )));
+            // Photon's own Java settings, as its extension hook gives them.
+            project.languages().register_fake_lsp_adapter(
+                "Java",
+                FakeLspAdapter {
+                    name: "jdtls",
+                    initialization_options: photon_navigation::with_java_settings(None, &[], true),
+                    ..FakeLspAdapter::default()
+                },
+            );
+        });
+        // Started from settings, as a user's own jdtls would be: the real binary, no fake.
+        let arguments = [
+            "-Declipse.application=org.eclipse.jdt.ls.core.id1".to_string(),
+            "-Dosgi.bundles.defaultStartLevel=4".to_string(),
+            "-Declipse.product=org.eclipse.jdt.ls.core.product".to_string(),
+            "-Dosgi.checkConfiguration=true".to_string(),
+            format!("-Dosgi.sharedConfiguration.area={}", configuration.display()),
+            "-Dosgi.sharedConfiguration.area.readOnly=true".to_string(),
+            "-Dosgi.configuration.cascaded=true".to_string(),
+            "-Xms1G".to_string(),
+            "--add-modules=ALL-SYSTEM".to_string(),
+            "-jar".to_string(),
+            launcher.display().to_string(),
+            "-nosplash".to_string(),
+            "-data".to_string(),
+            workspace_data.path().display().to_string(),
+        ];
+        cx.update(|cx| {
+            cx.update_global::<settings::SettingsStore, _>(|store, cx| {
+                store
+                    .set_user_settings(
+                        &json!({"lsp": {"jdtls": {
+                            "binary": {"path": java, "arguments": arguments},
+                            // Offline, so a build that can't load fails here instead of online.
+                            "settings": photon_navigation::with_java_settings(
+                                Some(json!({"java": {"import": {
+                                    "maven": {"offline": {"enabled": true}},
+                                    "gradle": {"offline": {"enabled": true}},
+                                }}})),
+                                &[],
+                                false,
+                            ),
+                        }}})
+                        .to_string(),
+                        cx,
+                    )
+                    .result()
+                    .unwrap();
+            })
+        });
+
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+        let worktree_id = workspace.update(cx, |workspace, cx| {
+            workspace.project().update(cx, |project, cx| {
+                project.worktrees(cx).next().unwrap().read(cx).id()
+            })
+        });
+        let editor = workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.open_path(
+                    (worktree_id, rel_path("src/main/java/app/App.java")),
+                    None,
+                    true,
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .unwrap()
+            .downcast::<Editor>()
+            .unwrap();
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| CallHierarchyPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+        let not_found_title = |cx: &mut VisualTestContext| {
+            panel.read_with(cx, |panel, _| {
+                panel.not_found.as_ref().map(|(title, _)| title.to_string())
+            })
+        };
+        let root = |cx: &mut VisualTestContext| {
+            panel.read_with(cx, |panel, _| {
+                panel.nodes().first().map(|root| root.call.item.name.clone())
+            })
+        };
+        let wait_for = |cx: &mut VisualTestContext,
+                        what: &str,
+                        done: &dyn Fn(&mut VisualTestContext) -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(150);
+            loop {
+                cx.run_until_parked();
+                if done(cx) {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for {what}; panel says {:?}, root {:?}, {}",
+                    not_found_title(cx),
+                    root(cx),
+                    panel.read_with(cx, |panel, _| format!(
+                        "loading {}, problem {:?}, pending {}",
+                        matches!(panel.content, Content::LoadingRoot),
+                        panel.server_problem,
+                        panel.pending_trace.is_some()
+                    ))
+                );
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        };
+        let trace_helper = |cx: &mut VisualTestContext| {
+            editor.update_in(cx, |editor, window, cx| {
+                editor.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
+                    let point = language::Point::new(7, 17);
+                    s.select_ranges([point..point])
+                });
+                window.focus(&editor.focus_handle(cx), cx);
+            });
+            cx.dispatch_action(ShowInPanel);
+        };
+
+        // Until the server has run, the panel waits for it; then it says why it found nothing.
+        trace_helper(cx);
+        wait_for(cx, "the build error", &|cx| {
+            not_found_title(cx).as_deref() == Some("Java couldn't load this project's build")
+        });
+        let body = panel.read_with(cx, |panel, _| panel.not_found.clone().unwrap().1);
+        assert!(body.contains(expected_problem), "{body}");
+
+        // Fixed on disk, the server loads the build and the panel traces by itself.
+        for (name, text) in working_build {
+            std::fs::write(tree.path().join(name), text).unwrap();
+        }
+        wait_for(cx, "the trace once the build loads", &|cx| {
+            root(cx).is_some_and(|name| name.starts_with("helper"))
+        });
+        assert_eq!(not_found_title(cx), None);
+    }
+
+    #[test]
+    fn build_errors_are_summed_up_by_the_line_naming_the_problem() {
+        // As jdtls reports them, word for word.
+        assert_eq!(
+            build_error_summary(
+                "Project build error: Non-resolvable parent POM for com.example:app:1.0: \
+                 The following artifacts could not be resolved: com.example:parent:pom:7 (absent)"
+            ),
+            "Non-resolvable parent POM for com.example:app:1.0: The following artifacts could \
+             not be resolved: com.example:parent:pom:7 (absent)"
+        );
+        assert_eq!(
+            build_error_summary(
+                "The supplied phased action failed with an exception.\n\
+                 A problem occurred configuring root project 'corp-gradle'.\n\
+                 Build file '/work/corp-gradle/build.gradle' line: 3\n\
+                 Plugin [id: 'com.example.conventions', version: '7.3.1'] was not found in any \
+                 of the following sources:\n\
+                 - Gradle Core Plugins (plugin is not in 'org.gradle' namespace)\n"
+            ),
+            "Plugin [id: 'com.example.conventions', version: '7.3.1'] was not found in any of \
+             the following sources"
+        );
+        // Nothing but wrapper text: still say something.
+        assert_eq!(
+            build_error_summary("The supplied phased action failed with an exception."),
+            "The supplied phased action failed with an exception."
+        );
+    }
+
     #[gpui::test]
     async fn explains_a_build_the_language_server_cannot_load(cx: &mut TestAppContext) {
         let mut setup = setup(true, cx).await;
@@ -4153,6 +4677,82 @@ mod tests {
 
         setup.click("call-trail-open-build-file");
         assert_eq!(setup.active_file_and_row(), Some(("pom.xml".to_string(), 1)));
+    }
+
+    #[gpui::test]
+    async fn try_again_has_the_server_import_the_project_again(cx: &mut TestAppContext) {
+        // A fix outside the files, like connecting to a VPN, needs the build loaded again.
+        let mut setup = setup(true, cx).await;
+        let imports = setup.count_imports();
+        setup.answer_prepare_with(None);
+        setup.report_build_error(Some(BUILD_ERROR));
+        setup.show_in_panel(1);
+
+        setup.click("call-trail-reload-build");
+        assert_eq!(*imports.lock().unwrap(), 1);
+    }
+
+    #[gpui::test]
+    async fn a_changed_build_file_is_imported_again(cx: &mut TestAppContext) {
+        // jdtls doesn't reload a Gradle build whose first import failed, even once it's fixed.
+        let mut setup = setup(true, cx).await;
+        let imports = setup.count_imports();
+        setup.answer_prepare_with(None);
+        setup.report_build_error(Some(BUILD_ERROR));
+        setup.show_in_panel(1);
+        assert_eq!(*imports.lock().unwrap(), 0);
+
+        setup.write_file("pom.xml", "<project>\n</project>\n").await;
+        assert_eq!(*imports.lock().unwrap(), 1);
+
+        setup.write_file("src/App.java", "class App { }\n").await;
+        assert_eq!(*imports.lock().unwrap(), 1, "only a build file's change imports again");
+    }
+
+    #[gpui::test]
+    async fn asks_again_when_the_server_finishes_loading(cx: &mut TestAppContext) {
+        // jdtls answers "nothing here" while it's still loading the project.
+        let mut setup = setup(true, cx).await;
+        setup.answer_prepare_with(None);
+        setup.show_in_panel(1);
+        assert_eq!(
+            setup.not_found().map(|(title, _)| title),
+            Some("No function at the cursor".to_string())
+        );
+
+        setup.answer_prepare_with(Some("helper"));
+        setup.server.start_progress("loading").await;
+        setup.server.end_progress("loading");
+        setup.cx.run_until_parked();
+        assert_eq!(setup.root().as_deref(), Some("helper"));
+        assert_eq!(setup.not_found(), None);
+    }
+
+    #[gpui::test]
+    async fn explains_a_build_error_reported_after_the_answer(cx: &mut TestAppContext) {
+        // jdtls answers first, and reports the build it couldn't load a moment later.
+        let mut setup = setup(true, cx).await;
+        setup.answer_prepare_with(None);
+        setup.show_in_panel(1);
+        setup.report_build_error(Some(BUILD_ERROR));
+        assert_eq!(
+            setup.not_found().map(|(title, _)| title),
+            Some("Rust couldn't load this project's build".to_string())
+        );
+    }
+
+    #[gpui::test]
+    async fn stops_asking_once_another_file_is_active(cx: &mut TestAppContext) {
+        let mut setup = setup(true, cx).await;
+        setup.answer_prepare_with(None);
+        setup.show_in_panel(1);
+        setup.open_file("src/App.java");
+
+        setup.answer_prepare_with(Some("helper"));
+        setup.server.start_progress("loading").await;
+        setup.server.end_progress("loading");
+        setup.cx.run_until_parked();
+        assert_eq!(setup.root(), None, "the panel doesn't trace a file that's no longer active");
     }
 
     #[gpui::test]
