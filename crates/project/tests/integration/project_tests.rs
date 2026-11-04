@@ -13545,6 +13545,68 @@ async fn test_multiple_language_server_hovers(cx: &mut gpui::TestAppContext) {
     );
 }
 
+// photon: Java setup restarts jdtls right after the first .java file opens; a call hierarchy
+// request afterwards must reach the new server, not be dropped as "nothing at the cursor".
+#[gpui::test]
+async fn test_call_hierarchy_reaches_a_restarted_server(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.ts": "function a() {}" })).await;
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(typescript_lang());
+    let mut fake_language_servers = language_registry.register_fake_lsp(
+        "TypeScript",
+        FakeLspAdapter {
+            capabilities: lsp::ServerCapabilities {
+                call_hierarchy_provider: Some(lsp::CallHierarchyServerCapability::Simple(true)),
+                ..lsp::ServerCapabilities::default()
+            },
+            ..FakeLspAdapter::default()
+        },
+    );
+    let (buffer, _handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/a.ts"), cx)
+        })
+        .await
+        .unwrap();
+    cx.executor().run_until_parked();
+    let first_server = fake_language_servers.next().await.unwrap();
+    first_server.set_request_handler::<lsp::request::Shutdown, _, _>(|_, _| async { Ok(()) });
+
+    project.update(cx, |project, cx| {
+        project.lsp_store().update(cx, |lsp_store, cx| {
+            lsp_store.restart_language_servers_for_buffers(vec![buffer.clone()], HashSet::default(), cx)
+        })
+    });
+    cx.executor().run_until_parked();
+    let second_server = fake_language_servers.next().await.unwrap();
+    second_server.set_request_handler::<lsp::request::CallHierarchyPrepare, _, _>(
+        |params, _| async move {
+            Ok(Some(vec![lsp::CallHierarchyItem {
+                name: "a".into(),
+                kind: lsp::SymbolKind::FUNCTION,
+                tags: None,
+                detail: None,
+                uri: params.text_document_position_params.text_document.uri,
+                range: lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 15)),
+                selection_range: lsp::Range::new(lsp::Position::new(0, 9), lsp::Position::new(0, 10)),
+                data: None,
+            }]))
+        },
+    );
+    cx.executor().run_until_parked();
+
+    let items = project
+        .update(cx, |project, cx| project.prepare_call_hierarchy(&buffer, Point::new(0, 9), cx))
+        .await
+        .unwrap()
+        .unwrap_or_default();
+    assert_eq!(items.len(), 1, "the restarted server answers the call hierarchy request");
+}
+
 // photon: a language server that stops answering is restarted.
 #[gpui::test]
 async fn test_unresponsive_language_server_is_restarted(cx: &mut gpui::TestAppContext) {
