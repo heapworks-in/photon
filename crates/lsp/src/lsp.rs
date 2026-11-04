@@ -549,7 +549,10 @@ impl LanguageServer {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .kill_on_drop(true)
+            // photon: a server's own processes (jdtls under java-lsp-proxy) must stop with it,
+            // or they keep the project's workspace locked for the next server.
+            .process_group(true);
 
         let mut server = command
             .spawn()

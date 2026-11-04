@@ -72,6 +72,7 @@ pub struct Command {
     stdout_cfg: Option<Stdio>,
     stderr_cfg: Option<Stdio>,
     kill_on_drop: bool,
+    process_group: bool, // photon: language servers' children die with them
 }
 
 impl Command {
@@ -86,6 +87,7 @@ impl Command {
             stdout_cfg: None,
             stderr_cfg: None,
             kill_on_drop: false,
+            process_group: false,
         }
     }
 
@@ -168,6 +170,13 @@ impl Command {
         self
     }
 
+    /// photon: starts the child in its own process group, so killing it also kills the
+    /// processes it started.
+    pub fn process_group(&mut self, process_group: bool) -> &mut Self {
+        self.process_group = process_group;
+        self
+    }
+
     pub fn spawn(&mut self) -> io::Result<Child> {
         let current_dir = self
             .current_dir
@@ -205,6 +214,7 @@ impl Command {
             self.stdout_cfg.unwrap_or_default(),
             self.stderr_cfg.unwrap_or_default(),
             self.kill_on_drop,
+            self.process_group,
         )
     }
 
@@ -230,6 +240,7 @@ impl Command {
 #[derive(Debug)]
 pub struct Child {
     inner: smol::process::Child,
+    group_kill_on_drop: Option<bool>, // photon: Some when the child leads its own process group
     pub stdin: Option<Async<std::fs::File>>,
     pub stdout: Option<Async<std::fs::File>>,
     pub stderr: Option<Async<std::fs::File>>,
@@ -241,6 +252,9 @@ impl Child {
     }
 
     pub fn kill(&mut self) -> io::Result<()> {
+        if self.group_kill_on_drop.is_some() {
+            kill_group(self.inner.id());
+        }
         self.inner.kill()
     }
 
@@ -299,6 +313,7 @@ fn spawn_posix_spawn(
     stdout_cfg: Stdio,
     stderr_cfg: Stdio,
     kill_on_drop: bool,
+    process_group: bool,
 ) -> io::Result<Child> {
     // posix_spawnp resolves programs against the parent's cwd/PATH, not the child's.
     let resolved_program = if program.as_bytes().contains(&b'/') {
@@ -410,9 +425,14 @@ fn spawn_posix_spawn(
         }
         cvt_nz(libc::posix_spawnattr_setsigdefault(&mut attr, &default_set))?;
 
+        let mut flags = libc::POSIX_SPAWN_CLOEXEC_DEFAULT | libc::POSIX_SPAWN_SETSIGDEF;
+        if process_group {
+            flags |= libc::POSIX_SPAWN_SETPGROUP;
+            cvt_nz(libc::posix_spawnattr_setpgroup(&mut attr, 0))?;
+        }
         cvt_nz(libc::posix_spawnattr_setflags(
             &mut attr,
-            (libc::POSIX_SPAWN_CLOEXEC_DEFAULT | libc::POSIX_SPAWN_SETSIGDEF) as libc::c_short,
+            flags as libc::c_short,
         ))?;
 
         cvt_nz(posix_spawnattr_setexceptionports_np(
@@ -498,10 +518,26 @@ fn spawn_posix_spawn(
 
         Ok(Child {
             inner,
+            group_kill_on_drop: process_group.then_some(kill_on_drop),
             stdin: stdin_write.map(Async::new).transpose()?,
             stdout: stdout_read.map(Async::new).transpose()?,
             stderr: stderr_read.map(Async::new).transpose()?,
         })
+    }
+}
+
+/// photon: the group's id is its leader's pid; a group that already exited is fine to miss.
+fn kill_group(leader: u32) {
+    unsafe {
+        libc::killpg(leader as libc::pid_t, libc::SIGKILL);
+    }
+}
+
+impl Drop for Child {
+    fn drop(&mut self) {
+        if self.group_kill_on_drop == Some(true) {
+            kill_group(self.inner.id());
+        }
     }
 }
 
@@ -574,7 +610,7 @@ mod tests {
     use std::os::unix::process::ExitStatusExt as _;
 
     use super::*;
-    use futures_lite::AsyncWriteExt;
+    use futures_lite::{AsyncBufReadExt as _, AsyncWriteExt};
 
     // Verifies that pipes returned by `create_pipe` aren't visible to unrelated
     // child processes spawned via `std::process::Command`. On macOS, `std`
@@ -654,6 +690,28 @@ mod tests {
             let pid = child.id();
             drop(child);
             wait_until_gone(pid);
+        });
+    }
+
+    // photon: a language server's own children (jdtls under java-lsp-proxy) must not outlive it.
+    #[test]
+    fn test_kill_stops_the_whole_process_group() {
+        smol::block_on(async {
+            let mut child = Command::new("/bin/sh")
+                .args(["-c", "/bin/sleep 60 & echo $!; wait"])
+                .stdout(Stdio::piped())
+                .process_group(true)
+                .spawn()
+                .expect("failed to spawn command");
+            let mut line = String::new();
+            let stdout = child.stdout.take().expect("stdout");
+            futures_lite::io::BufReader::new(stdout)
+                .read_line(&mut line)
+                .await
+                .expect("read pid");
+            let grandchild: u32 = line.trim().parse().expect("pid");
+            child.kill().expect("kill");
+            wait_until_gone(grandchild);
         });
     }
 

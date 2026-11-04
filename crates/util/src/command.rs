@@ -110,6 +110,11 @@ impl Command {
         self
     }
 
+    /// photon: shortcut: only the macOS spawner starts a process group; Photon ships on macOS only.
+    pub fn process_group(&mut self, _process_group: bool) -> &mut Self {
+        self
+    }
+
     pub fn spawn(&mut self) -> std::io::Result<Child> {
         self.0.spawn()
     }
