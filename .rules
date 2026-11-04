@@ -148,6 +148,12 @@ Photon is a fork of Zed. Keep upstream merges cheap:
 
 # Photon product rules
 
+* **Critical: reliable, no shortcuts.** Everything Photon ships must work every time, including after
+  crashes, restarts, slow or hung servers, and leftovers from earlier versions. Find the root cause
+  with evidence from the real failure before fixing; a plausible theory is not a cause. Test the fix
+  end to end against the real thing (a real language server, a real project), not only units, and
+  check it recovers by itself. No workarounds, no "good enough for now", no releasing a fix that
+  hasn't been shown to fix the reported failure. This rule beats keeping the diff small.
 * **Look and behave like Zed.** A Photon feature should look as if Zed shipped it. Build it from Zed's
   existing components and patterns (`ContextMenu`, `PopoverMenu`, toggleable menu entries, `Checkbox`,
   `Label` sizes and colours, notifications, settings) before inventing new UI.
