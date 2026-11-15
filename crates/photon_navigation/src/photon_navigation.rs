@@ -1,3 +1,4 @@
+mod idle_java;
 mod java_setup;
 mod language_server_fixes;
 mod set_up_language_server;
@@ -34,6 +35,7 @@ pub fn init(cx: &mut App) {
     cx.set_global(DefinitionFallback(Rc::new(definition_fallback)));
     cx.set_global(JavaSetup::new(java_setup::real_detect()));
     register_language_server_help(cx);
+    idle_java::init(cx);
 }
 
 fn register_language_server_help(cx: &mut App) {

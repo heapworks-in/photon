@@ -2838,6 +2838,14 @@
   },
   // LSP Specific settings.
   "lsp": {
+    // photon: each project tab runs its own Java server; start small and stop at 2 GB, as VS Code
+    // does, instead of 1 GB at start and up to a quarter of the Mac's memory.
+    "jdtls": {
+      "settings": {
+        "min_memory": "100m",
+        "max_memory": "2G"
+      }
+    },
     // Specify the LSP name as a key here.
     // "rust-analyzer": {
     //     // A special flag for rust-analyzer integration, to use server-provided tasks

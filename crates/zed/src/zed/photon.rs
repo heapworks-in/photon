@@ -604,6 +604,39 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn java_servers_start_small_and_stop_at_two_gigabytes(cx: &mut TestAppContext) {
+        use gpui::UpdateGlobal as _;
+        use settings::{Settings as _, SettingsStore};
+        cx.update(|cx| {
+            let store = SettingsStore::new(cx, &settings::default_settings());
+            cx.set_global(store);
+            // As the Java extension reads them, for its -Xms and -Xmx.
+            let jdtls = |cx: &gpui::App| {
+                project::project_settings::ProjectSettings::get_global(cx)
+                    .lsp
+                    .get(&language::LanguageServerName::new_static("jdtls"))
+                    .and_then(|lsp| lsp.settings.clone())
+                    .unwrap_or_default()
+            };
+            assert_eq!(jdtls(cx)["min_memory"], "100m");
+            assert_eq!(jdtls(cx)["max_memory"], "2G");
+
+            // A user's own Java settings keep the limits; their own limit wins.
+            SettingsStore::update_global(cx, |store, cx| {
+                store
+                    .set_user_settings(
+                        r#"{"lsp": {"jdtls": {"settings": {"java_home": "/jdk", "max_memory": "4G"}}}}"#,
+                        cx,
+                    )
+                    .unwrap();
+            });
+            assert_eq!(jdtls(cx)["java_home"], "/jdk");
+            assert_eq!(jdtls(cx)["min_memory"], "100m");
+            assert_eq!(jdtls(cx)["max_memory"], "4G");
+        });
+    }
+
     #[test]
     fn font_styles_set_code_and_menu_fonts_and_clear_the_terminal_font() {
         let mut settings = settings::SettingsContent::default();

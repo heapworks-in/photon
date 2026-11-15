@@ -13808,6 +13808,7 @@ name = "photon_navigation"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "collections",
  "editor",
  "extension_suggest",
  "fs",
