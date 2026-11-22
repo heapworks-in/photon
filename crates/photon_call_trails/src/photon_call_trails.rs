@@ -30,6 +30,7 @@ use workspace::{
     dock::{DockPosition, Panel, PanelEvent},
 };
 
+mod diagnose;
 mod map;
 
 actions!(
@@ -43,6 +44,8 @@ actions!(
         ToggleCallSite,
         /// Makes the selected function the root of the call hierarchy.
         MakeRoot,
+        /// Diagnoses why code navigation finds nothing at the cursor, in a report you can share.
+        DiagnoseNavigation,
     ]
 );
 
@@ -73,6 +76,7 @@ pub fn init(cx: &mut App) {
             workspace.toggle_panel_focus::<CallHierarchyPanel>(window, cx);
         });
         workspace.register_action(show_in_panel);
+        workspace.register_action(diagnose::diagnose);
         workspace.register_action(keep_open);
     })
     .detach();
@@ -278,6 +282,56 @@ async fn first_build_error(
         }
     }
     None
+}
+
+/// Build files the buffer's language servers report errors on.
+pub(crate) fn build_files_with_errors(
+    project: &Entity<Project>,
+    buffer: &Entity<Buffer>,
+    cx: &mut App,
+) -> Vec<(ProjectPath, LanguageServerId)> {
+    if !project.read(cx).is_local() {
+        return Vec::new();
+    }
+    let lsp_store = project.read(cx).lsp_store();
+    let servers = lsp_store.update(cx, |lsp_store, cx| {
+        buffer.update(cx, |buffer, cx| {
+            lsp_store.language_servers_for_local_buffer(buffer, cx)
+        })
+    });
+    project
+        .read(cx)
+        .diagnostic_summaries(false, cx)
+        .filter(|(path, server_id, summary)| {
+            summary.error_count > 0
+                && servers.contains(server_id)
+                && path
+                    .path
+                    .file_name()
+                    .is_some_and(|name| BUILD_FILES.contains(&name))
+        })
+        .map(|(path, server_id, _)| (path, server_id))
+        .collect()
+}
+
+/// `server_id`'s server, if it's running and offers `command`.
+pub(crate) fn server_offering(
+    project: &Entity<Project>,
+    server_id: LanguageServerId,
+    command: &str,
+    cx: &App,
+) -> Option<std::sync::Arc<lsp::LanguageServer>> {
+    let server = project
+        .read(cx)
+        .lsp_store()
+        .read(cx)
+        .language_server_for_id(server_id)?;
+    let offers = server
+        .capabilities()
+        .execute_command_provider
+        .as_ref()
+        .is_some_and(|provider| provider.commands.iter().any(|offered| offered == command));
+    offers.then_some(server)
 }
 
 fn not_found_note(language: &str, errors: usize) -> (SharedString, SharedString) {
@@ -613,9 +667,19 @@ impl CallHierarchyPanel {
                     if matches!(event, workspace::Event::ActiveItemChanged) {
                         let buffer = active_buffer(workspace.read(cx), cx);
                         if buffer != this.active_buffer {
+                            // Only another file is moving on: a tab without one, like a
+                            // diagnosis report, keeps the panel asking about the last file.
+                            let another_file = buffer
+                                .as_ref()
+                                .and_then(WeakEntity::upgrade)
+                                .is_some_and(|buffer| buffer.read(cx).file().is_some())
+                                && this.empty_trace.as_ref().map(|empty| &empty.buffer)
+                                    != buffer.as_ref();
                             this.active_buffer = buffer;
                             this.pending_trace = None;
-                            this.empty_trace = None;
+                            if another_file {
+                                this.empty_trace = None;
+                            }
                             this.refresh_server_problem(window, cx);
                         }
                     }
@@ -1201,34 +1265,12 @@ impl CallHierarchyPanel {
         }));
     }
 
-    /// Build files the buffer's language servers report errors on.
     fn build_files_with_errors(
         &self,
         buffer: &Entity<Buffer>,
         cx: &mut App,
     ) -> Vec<(ProjectPath, LanguageServerId)> {
-        if !self.project.read(cx).is_local() {
-            return Vec::new();
-        }
-        let lsp_store = self.project.read(cx).lsp_store();
-        let servers = lsp_store.update(cx, |lsp_store, cx| {
-            buffer.update(cx, |buffer, cx| {
-                lsp_store.language_servers_for_local_buffer(buffer, cx)
-            })
-        });
-        self.project
-            .read(cx)
-            .diagnostic_summaries(false, cx)
-            .filter(|(path, server_id, summary)| {
-                summary.error_count > 0
-                    && servers.contains(server_id)
-                    && path
-                        .path
-                        .file_name()
-                        .is_some_and(|name| BUILD_FILES.contains(&name))
-            })
-            .map(|(path, server_id, _)| (path, server_id))
-            .collect()
+        build_files_with_errors(&self.project, buffer, cx)
     }
 
     /// `server_id`'s server, if it's running and offers `command`.
@@ -1238,18 +1280,7 @@ impl CallHierarchyPanel {
         command: &str,
         cx: &App,
     ) -> Option<std::sync::Arc<lsp::LanguageServer>> {
-        let server = self
-            .project
-            .read(cx)
-            .lsp_store()
-            .read(cx)
-            .language_server_for_id(server_id)?;
-        let offers = server
-            .capabilities()
-            .execute_command_provider
-            .as_ref()
-            .is_some_and(|provider| provider.commands.iter().any(|offered| offered == command));
-        offers.then_some(server)
+        server_offering(&self.project, server_id, command, cx)
     }
 
     /// Asks the buffer's language server for the source folders of the modules it loaded, if it
@@ -1313,7 +1344,10 @@ impl CallHierarchyPanel {
             },
             timeout,
         );
-        log::info!("call hierarchy: asked {} to load the build again", server.name());
+        log::info!(
+            "call hierarchy: asked {} to load the build again",
+            server.name()
+        );
         self.import_task = Some(cx.spawn_in(window, async move |this, cx| {
             if let Err(error) = request.await.into_response() {
                 log::error!("failed to load the project's build again: {error:#}");
@@ -2495,49 +2529,56 @@ impl CallHierarchyPanel {
                                         .color(Color::Muted),
                                 ),
                             )
-                            .when(self.import_server.is_some(), |this| {
+                            .child({
                                 let file_name = self.build_error.as_ref().map(|error| {
                                     error.path.path.file_name().unwrap_or_default().to_string()
                                 });
-                                this.child(
-                                    h_flex()
-                                        .mt_2()
-                                        .gap_2()
-                                        .children(file_name.map(|file_name| {
-                                            div()
-                                                .debug_selector(|| {
-                                                    "call-trail-open-build-file".into()
-                                                })
-                                                .child(
-                                                    Button::new(
-                                                        "call-trail-open-build-file",
-                                                        format!("Open {file_name}"),
-                                                    )
-                                                    .style(ButtonStyle::Outlined)
-                                                    .label_size(LabelSize::Small)
-                                                    .on_click(cx.listener(|this, _, window, cx| {
-                                                        this.open_build_file(window, cx)
-                                                    })),
+                                let button = |id: &'static str, label: SharedString| {
+                                    Button::new(id, label)
+                                        .style(ButtonStyle::Outlined)
+                                        .label_size(LabelSize::Small)
+                                };
+                                h_flex()
+                                    .mt_2()
+                                    .gap_2()
+                                    .children(file_name.map(|file_name| {
+                                        div()
+                                            .debug_selector(|| "call-trail-open-build-file".into())
+                                            .child(
+                                                button(
+                                                    "call-trail-open-build-file",
+                                                    format!("Open {file_name}").into(),
                                                 )
-                                        }))
-                                        .child(
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.open_build_file(window, cx)
+                                                })),
+                                            )
+                                    }))
+                                    .when(self.import_server.is_some(), |this| {
+                                        this.child(
                                             div()
                                                 .debug_selector(|| "call-trail-reload-build".into())
                                                 .child(
-                                                    Button::new(
-                                                        "call-trail-reload-build",
-                                                        "Try Again",
-                                                    )
-                                                    .style(ButtonStyle::Outlined)
-                                                    .label_size(LabelSize::Small)
-                                                    .disabled(self.import_task.is_some())
-                                                    .on_click(cx.listener(|this, _, window, cx| {
-                                                        this.import_build_again(window, cx);
-                                                        cx.notify();
-                                                    })),
+                                                    button("call-trail-reload-build", "Try Again".into())
+                                                        .disabled(self.import_task.is_some())
+                                                        .on_click(cx.listener(|this, _, window, cx| {
+                                                            this.import_build_again(window, cx);
+                                                            cx.notify();
+                                                        })),
                                                 ),
+                                        )
+                                    })
+                                    .child(
+                                        div().debug_selector(|| "call-trail-diagnose".into()).child(
+                                            button("call-trail-diagnose", "Diagnose".into())
+                                                .tooltip(Tooltip::text(
+                                                    "Ask the language server what it sees here, in a report you can share",
+                                                ))
+                                                .on_click(|_, window, cx| {
+                                                    window.dispatch_action(DiagnoseNavigation.boxed_clone(), cx)
+                                                }),
                                         ),
-                                )
+                                    )
                             })
                     }))
                     .child(trail_picture(cx))
@@ -3781,6 +3822,46 @@ mod tests {
                 );
         }
 
+        /// Symbols as jdtls reports them: `helper` (line 1), its name at columns 3 to 9.
+        fn answer_symbols(&mut self) {
+            self.server
+                .set_request_handler::<lsp::request::DocumentSymbolRequest, _, _>(|_, _| async {
+                    #[allow(deprecated)]
+                    let helper = lsp::DocumentSymbol {
+                        name: "helper".into(),
+                        detail: None,
+                        kind: lsp::SymbolKind::FUNCTION,
+                        tags: None,
+                        deprecated: None,
+                        range: lsp::Range::new(lsp::Position::new(1, 0), lsp::Position::new(1, 34)),
+                        selection_range: lsp::Range::new(
+                            lsp::Position::new(1, 3),
+                            lsp::Position::new(1, 9),
+                        ),
+                        children: None,
+                    };
+                    Ok(Some(lsp::DocumentSymbolResponse::Nested(vec![helper])))
+                });
+        }
+
+        /// Questions the fake server has no handler for wait out the diagnosis's time limit.
+        fn finish_diagnosis(&mut self) {
+            self.cx.run_until_parked();
+            self.cx
+                .executor()
+                .advance_clock(std::time::Duration::from_secs(31));
+            self.cx.run_until_parked();
+        }
+
+        fn active_text(&mut self) -> String {
+            self.workspace.update(self.cx, |workspace, cx| {
+                workspace
+                    .active_item_as::<Editor>(cx)
+                    .map(|editor| editor.read(cx).text(cx))
+                    .unwrap_or_default()
+            })
+        }
+
         fn active_file_and_row(&mut self) -> Option<(String, u32)> {
             self.workspace.update(self.cx, |workspace, cx| {
                 let path = workspace.active_item(cx)?.project_path(cx)?;
@@ -4661,10 +4742,16 @@ mod tests {
         real_jdtls_case(
             "api/src/main/java/app/App.java",
             &[
-                ("settings.gradle", "rootProject.name = 'app'\ninclude 'core'\n"),
+                (
+                    "settings.gradle",
+                    "rootProject.name = 'app'\ninclude 'core'\n",
+                ),
                 ("build.gradle", "subprojects { apply plugin: 'java' }\n"),
                 ("core/build.gradle", ""),
-                ("core/src/main/java/core/Core.java", "package core;\n\npublic class Core {\n}\n"),
+                (
+                    "core/src/main/java/core/Core.java",
+                    "package core;\n\npublic class Core {\n}\n",
+                ),
                 ("api/build.gradle", ""),
             ],
             "Java hasn't loaded this file's module",
@@ -4831,13 +4918,7 @@ mod tests {
         });
         let editor = workspace
             .update_in(cx, |workspace, window, cx| {
-                workspace.open_path(
-                    (worktree_id, rel_path(source)),
-                    None,
-                    true,
-                    window,
-                    cx,
-                )
+                workspace.open_path((worktree_id, rel_path(source)), None, true, window, cx)
             })
             .await
             .unwrap()
@@ -4904,6 +4985,35 @@ mod tests {
         let body = panel.read_with(cx, |panel, _| panel.not_found.clone().unwrap().1);
         assert!(body.contains(expected_problem), "{body}");
 
+        // The diagnosis, asking the same real server, names the same cause.
+        let diagnose = |cx: &mut VisualTestContext| -> String {
+            editor.update_in(cx, |editor, window, cx| {
+                window.focus(&editor.focus_handle(cx), cx)
+            });
+            cx.dispatch_action(DiagnoseNavigation);
+            let report = |cx: &mut VisualTestContext| {
+                workspace.update(cx, |workspace, cx| {
+                    workspace
+                        .active_item_as::<Editor>(cx)
+                        .map(|report| report.read(cx).text(cx))
+                        .filter(|text| text.starts_with("# Code navigation diagnosis"))
+                })
+            };
+            wait_for(cx, "the diagnosis report", &|cx| report(cx).is_some());
+            let text = report(cx).unwrap_or_default();
+            // Back to the Java file, as the user would be.
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.activate_item(&editor, true, true, window, cx)
+            });
+            text
+        };
+        let report = diagnose(cx);
+        assert!(
+            report.contains(&format!("**{expected_title}**")),
+            "{report}"
+        );
+        assert!(report.contains(expected_problem), "{report}");
+
         // Fixed on disk, the server loads the build and the panel traces by itself.
         for (name, text) in working_build {
             std::fs::write(tree.path().join(name), text).unwrap();
@@ -4913,17 +5023,30 @@ mod tests {
         project.update(cx, |project, cx| {
             let worktree = project.worktrees(cx).next().unwrap();
             // The scan reports the change as an event; nothing here needs to wait for it.
-            drop(worktree.read(cx).as_local().unwrap().refresh_entries_for_paths(
-                working_build
-                    .iter()
-                    .map(|(name, _)| Arc::from(rel_path(name)))
-                    .collect(),
-            ));
+            drop(
+                worktree
+                    .read(cx)
+                    .as_local()
+                    .unwrap()
+                    .refresh_entries_for_paths(
+                        working_build
+                            .iter()
+                            .map(|(name, _)| Arc::from(rel_path(name)))
+                            .collect(),
+                    ),
+            );
         });
         wait_for(cx, "the trace once the build loads", &|cx| {
             root(cx).is_some_and(|name| name.starts_with("helper"))
         });
         assert_eq!(not_found_title(cx), None);
+
+        let report = diagnose(cx);
+        assert!(report.contains("**Call hierarchy works here**"), "{report}");
+        assert!(
+            report.contains("| Call hierarchy, asked directly | helper()"),
+            "{report}"
+        );
     }
 
     #[test]
@@ -5078,6 +5201,48 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn diagnose_opens_a_report_naming_the_cause(cx: &mut TestAppContext) {
+        let mut setup = setup(true, cx).await;
+        setup.answer_prepare_with(None);
+        setup.answer_symbols();
+        setup.show_in_panel(1);
+
+        setup.click("call-trail-diagnose");
+        setup.finish_diagnosis();
+        let report = setup.active_text();
+        for expected in [
+            "**rust-analyzer knows `helper` but returns no call hierarchy for it**",
+            "| File | `src/main.rs`, line 2, column 5, on `helper` |",
+            "| Call hierarchy, as Photon showed it | 0 found |",
+            "| Call hierarchy, asked directly | nothing |",
+            "| Symbols in this file | 1; the cursor is on `helper`'s name |",
+        ] {
+            assert!(
+                report.contains(expected),
+                "missing {expected:?} in:\n{report}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn diagnose_tells_a_dropped_answer_from_a_missing_one(cx: &mut TestAppContext) {
+        // The server answers, so the report says whether Photon showed it.
+        let mut setup = setup(true, cx).await;
+        setup.move_cursor(1, 4);
+        setup.editor.update_in(setup.cx, |editor, window, cx| {
+            window.focus(&editor.focus_handle(cx), cx)
+        });
+        setup.cx.dispatch_action(DiagnoseNavigation);
+        setup.finish_diagnosis();
+        let report = setup.active_text();
+        assert!(report.contains("**Call hierarchy works here**"), "{report}");
+        assert!(
+            report.contains("| Call hierarchy, as Photon showed it | 1 found |"),
+            "{report}"
+        );
+    }
+
+    #[gpui::test]
     async fn asks_again_when_the_server_finishes_loading(cx: &mut TestAppContext) {
         // jdtls answers "nothing here" while it's still loading the project.
         let mut setup = setup(true, cx).await;
@@ -5107,6 +5272,33 @@ mod tests {
             setup.not_found().map(|(title, _)| title),
             Some("Rust couldn't load this project's build".to_string())
         );
+    }
+
+    #[gpui::test]
+    async fn keeps_asking_after_a_diagnosis_report_was_shown(cx: &mut TestAppContext) {
+        // The report is a tab without a file; looking at it isn't moving on to other code.
+        let mut setup = setup(true, cx).await;
+        setup.answer_prepare_with(None);
+        setup.show_in_panel(1);
+        setup.click("call-trail-diagnose");
+        setup.finish_diagnosis();
+        assert!(
+            setup
+                .active_text()
+                .starts_with("# Code navigation diagnosis")
+        );
+        let editor = setup.editor.clone();
+        setup
+            .workspace
+            .update_in(setup.cx, |workspace, window, cx| {
+                workspace.activate_item(&editor, true, true, window, cx)
+            });
+
+        setup.answer_prepare_with(Some("helper"));
+        setup.server.start_progress("loading").await;
+        setup.server.end_progress("loading");
+        setup.cx.run_until_parked();
+        assert_eq!(setup.root().as_deref(), Some("helper"));
     }
 
     #[gpui::test]

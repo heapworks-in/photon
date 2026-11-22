@@ -13781,6 +13781,7 @@ dependencies = [
  "photon_navigation",
  "project",
  "proto",
+ "release_channel",
  "serde_json",
  "settings",
  "smallvec",
